@@ -665,6 +665,79 @@ static void test_change_pulse() {
     CHECK(!u.pulse_range(a, b));
 }
 
+static void test_morph() {
+    // Every kind of line, both directions, every frame of the transition:
+    // nothing out of range, and the text is untouched.
+    std::string long_item = "- a list item long enough to wrap onto another row, with **bold** and `code` and a [link](https://x.y) in it";
+    std::string doc = "# Title\n\nPara with *em* and ==mark== and [[wiki|alias]].\n\n" + long_item +
+                      "\n- [ ] task\n- [x] done\n1. first\n> quote line\n---\n```cpp\nint x = 1;\n```\n\n~~gone~~ end";
+    Editor e = fresh(doc);
+    for (int round = 0; round < 2; round++) {
+        e.set_reader(!e.reader());
+        for (int f = 0; f < 20; f++) frame(e);
+    }
+    CHECK(!e.reader());
+    CHECK_EQ(e.text(), doc);
+
+    // Toggling again mid-morph is fine too.
+    e.set_reader(true);
+    frame(e);
+    frame(e);
+    e.set_reader(false);
+    for (int f = 0; f < 20; f++) frame(e);
+    CHECK_EQ(e.text(), doc);
+}
+
+// Glyph corner positions of all text drawn in `col` in the last frame.
+static std::vector<std::pair<float, float>> glyphs_in(ImU32 col) {
+    std::vector<std::pair<float, float>> out;
+    ImDrawData* dd = ImGui::GetDrawData();
+    for (int n = 0; dd && n < dd->CmdLists.Size; n++)
+        for (auto& v : dd->CmdLists[n]->VtxBuffer)
+            if (v.col == col) out.push_back({v.pos.x, v.pos.y});
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// Same glyphs in the same places, to within float rounding (0.05px).
+static bool same_glyphs(const std::vector<std::pair<float, float>>& a, const std::vector<std::pair<float, float>>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++)
+        if (std::fabs(a[i].first - b[i].first) > 0.05f || std::fabs(a[i].second - b[i].second) > 0.05f) return false;
+    return true;
+}
+
+static void test_morph_still_text() {
+    // Plain text has nothing to move between the views: every glyph must sit
+    // on exactly the same spot in the editor, all through the morph, and in
+    // the reader. (It used to shiver by half a pixel.)
+    Theme saved = T;
+    const ImU32 ink = IM_COL32(210, 211, 212, 255);
+    T.text = T.bright = ink;
+    T.dim = T.faint = IM_COL32(90, 90, 90, 255);
+    std::string doc = "Plain words on a line, long enough that it wraps onto a second row in the column for sure, twice even, "
+                      "because the column is only so wide and this keeps going.\n\nAnother plain line.";
+    Editor e = fresh(doc);
+    for (int f = 0; f < 5; f++) frame(e);
+    auto still = glyphs_in(ink);
+    CHECK(!still.empty());
+    bool same = true;
+    e.set_reader(true);
+    for (int f = 0; f < 30; f++) {
+        frame(e);
+        if (!same_glyphs(glyphs_in(ink), still)) same = false;
+    }
+    CHECK(same);
+    same = true;
+    e.set_reader(false);
+    for (int f = 0; f < 30; f++) {
+        frame(e);
+        if (!same_glyphs(glyphs_in(ink), still)) same = false;
+    }
+    CHECK(same);
+    T = saved;
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -692,6 +765,8 @@ int main() {
     test_layout_motion();
     test_code_block_space();
     test_change_pulse();
+    test_morph();
+    test_morph_still_text();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

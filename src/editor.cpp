@@ -543,7 +543,7 @@ void Editor::set_syntax(Syntax s) {
     diag_.clear();
 }
 
-void Editor::set_reader(bool r) {
+void Editor::set_reader(bool r, bool animate) {
     if (r == reader_) return;
     int mode = reader_ ? 1 : 0;
     auto& V = lay_[mode];
@@ -554,6 +554,16 @@ void Editor::set_reader(bool r) {
         sync_line_ = i;
         sync_frac_ = V[i].h > 0 ? std::clamp((doc_top - V[i].y) / V[i].h, 0.0f, 1.0f) : 0;
     }
+    // The page morphs between the two views: words glide between their
+    // positions, syntax fades out (or in), decorations fade in (or out).
+    // Input switches at once; only the drawing takes its time.
+    morph_.active = animate && anim::enabled && lay_[0].size() == lines_.size();
+    if (morph_.active) {
+        morph_.to_reader = r;
+        morph_.start = ImGui::GetTime();
+        morph_.scroll_from = scroll_;
+    }
+    ghosts_.clear();
     reader_ = r;
     drag_mode_ = 0;
     caret_snap_ = true;
@@ -1368,7 +1378,7 @@ void Editor::draw(const EditorParams& p) {
     sync_edits();
     layout(0);
     resolve_pending();
-    if (mode) layout(1);
+    if (mode || morph_.active) layout(1);
     if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
 
     if (sync_line_ >= 0 && sync_line_ < (int)lay_[mode].size()) {
@@ -1407,7 +1417,7 @@ void Editor::draw(const EditorParams& p) {
         sync_edits();
         layout(0);
         resolve_pending();
-        if (mode) layout(1);
+        if (mode || morph_.active) layout(1);
         if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
     }
 
@@ -1468,6 +1478,15 @@ void Editor::draw(const EditorParams& p) {
     dl->PushClipRect(p.min, p.max, true);
     origin_y_ = p.min.y + p.top_pad - scroll_;
     auto& V = lay_[mode];
+
+    // Switching between edit and reader: the morph draws the page instead.
+    bool morphing = false;
+    if (morph_.active) {
+        float elapsed = anim::enabled ? (float)(now - morph_.start) * anim::speed : 1e9f;
+        if (lay_[1].size() != lines_.size() || !draw_morph(dl, elapsed)) morph_.active = false;
+        else { morphing = true; anim::active = true; }
+    }
+    if (!morphing) {
 
     // Change pulse: what an undo, redo or paste changed glows softly and
     // fades. Any further edit clears it (its positions would be stale).
@@ -1666,6 +1685,8 @@ void Editor::draw(const EditorParams& p) {
         }
     }
 
+    }  // !morphing
+
     // Scroll position hint: a thin bar at the right edge that shows while
     // scrolling and fades out after.
     if (max_scroll > 1) {
@@ -1681,6 +1702,188 @@ void Editor::draw(const EditorParams& p) {
         }
     }
     dl->PopClipRect();
+}
+
+// The edit <-> reader transition. Every visible word exists in both views
+// (the reader text maps back to source bytes), so it's drawn at a position
+// eased between the two. Syntax that only the editor shows fades out where
+// it stands; decorations only the reader has (bullet, checkbox, quote bar)
+// fade in where they'll be. Each view keeps its own scroll, so lines ease
+// between their two screen positions. At t = 1 this draws exactly what the
+// normal reader (or editor) frame does, so the hand-off is invisible.
+bool Editor::draw_morph(ImDrawList* dl, float s) {
+    const EditorParams& p = P_;
+    // Every part is its own exponential (Unreal's FInterpTo shape: fast out
+    // of the gate, soft settle), none cut short. s is seconds since the
+    // toggle. What's leaving (syntax, words that re-wrap onto another row)
+    // fades out fast; words that keep their row glide; what's arriving fades
+    // in once the glide is most of the way there, so nothing crosses.
+    auto expo = [](float x, float rate) { return x <= 0 ? 0.0f : 1.0f - std::exp(-rate * x); };
+    const float glide_delay = 0.02f, glide_rate = 38.0f;
+    float fade_out = 1.0f - expo(s, 70.0f);                       // ~95% gone by 43ms
+    float g = expo(s - glide_delay, glide_rate);                  // glide progress
+    float in_start = glide_delay + std::log(33.0f) / glide_rate;  // glide at 97%
+    float fade_in = expo(s - in_start, 45.0f);
+    // Symbols with a counterpart in the other view (- and a bullet, [ ] and
+    // a checkbox, > and the quote bar, --- and the rule) sit in the same
+    // spot, so they transform in place: one expo crossfade, old out as new
+    // comes in, no gap between them.
+    float swap = expo(s, 34.0f);
+    float struct_old = 1.0f - swap, struct_new = swap;  // "old" = the view being left
+    if (g >= 0.995f && fade_in >= 0.995f) return false;          // settled: hand back
+    float w = morph_.to_reader ? g : 1.0f - g;
+    float wg = w;                                                 // glide position
+
+    // Where the normal renderer puts byte k on row r: run starts (a run is
+    // same-style text) snap to whole pixels, glyphs inside sit at fractional
+    // offsets. Matching that exactly means a word that doesn't move sits on
+    // the same pixel before, during and after the morph.
+    auto glyph_x = [&](const Line& L, const std::string& s, const std::vector<uint16_t>& st, const Metrics& m, int r, int k) {
+        int rs = L.rows[r];
+        int s0 = k;
+        while (s0 > rs && st[s0 - 1] == st[k] && (s[s0 - 1] == '\t') == (s[k] == '\t')) s0--;
+        return std::round(col_x_ + row_x(L, r) + measure(s, st, rs, s0, m)) + measure(s, st, s0, k, m);
+    };
+    exact_x_ = true;
+    // ImGui snaps the start of every text draw to a whole pixel. Inside a run
+    // a word sits at a fractional position, so drawn on its own it would jump.
+    // The positions above are already exact: tell ImGui to leave them alone.
+    const ImDrawListFlags saved_flags = dl->Flags;
+    dl->Flags |= ImDrawListFlags_TextNoPixelSnap;
+    // Syntax only the editor shows (**, #, backticks, urls) takes turns with
+    // the glide: going to the reader it leaves first, coming back it arrives
+    // last, so words never glide across it. Structural symbols crossfade in
+    // place with their counterpart instead (see swap above).
+    float syntax_a = morph_.to_reader ? fade_out : fade_in;
+    float edit_struct = morph_.to_reader ? struct_old : struct_new;    // -, [ ], >, ---
+    float reader_struct = morph_.to_reader ? struct_new : struct_old;  // bullet, box, bar, rule
+    auto lerp = [](float a, float b, float k) { return a + (b - a) * k; };
+    const float base = P_.alpha;
+    float scroll_e = morph_.to_reader ? morph_.scroll_from : scroll_;
+    float scroll_r = morph_.to_reader ? scroll_ : morph_.scroll_from;
+    float oe = p.min.y + p.top_pad - scroll_e, orr = p.min.y + p.top_pad - scroll_r;
+    const float x0 = col_x_;
+    const float pad_x = std::round(p.size * 0.6f);
+    auto& E = lay_[0];
+    auto& R = lay_[1];
+    dl->PushClipRect(p.min, p.max, true);
+
+    for (int i = 0; i < (int)lines_.size(); i++) {
+        const Line& L0 = E[i];
+        const Line& L1 = R[i];
+        float ye = oe + L0.dy + L0.pad, yr = orr + L1.y + L1.pad;  // first-row tops
+        float he = L0.rows.size() * L0.row_h, hr = L1.rows.size() * L1.row_h;
+        if (std::min(ye, yr) > p.max.y || std::max(ye + he, yr + hr) < p.min.y) continue;
+        const std::string& src = lines_[i];
+        const std::string& rt = L1.rtext;
+        Metrics m0 = metrics(L0.size), m1 = metrics(L1.size);
+
+        // Code blocks reshape between the two heights (fences are thinner
+        // in the reader), staying solid throughout.
+        if (L0.info.kind == LineKind::CodeBlock || L0.info.kind == LineKind::Fence) {
+            float top = lerp(ye, yr, w), h = lerp(he, hr, w);
+            dl->AddRectFilled(ImVec2(x0 - pad_x, top), ImVec2(x0 + p.column + pad_x, top + h), col_alpha(T.code_bg, base));
+        }
+        // Rules: the editor's short line after "---" gives way to the
+        // reader's full-width one.
+        if (L0.info.kind == LineKind::Rule) {
+            float th = std::max(1.0f, p.dpi);
+            float me = std::round(ye + L0.row_h * 0.5f), mr = std::round(yr + L1.row_h * 0.5f);
+            float from = x0 + measure(src, L0.style, 0, (int)src.size(), m0) + L0.size * 0.6f;
+            dl->AddRectFilled(ImVec2(from, me), ImVec2(x0 + p.column, me + th), col_alpha(T.border, base * edit_struct));
+            dl->AddRectFilled(ImVec2(x0, mr), ImVec2(x0 + p.column, mr + th), col_alpha(T.border, base * reader_struct));
+        }
+
+        // Words: each run of reader text glides from its source position in
+        // the editor to its reader position. Runs break at spaces, row ends
+        // and wherever the mapping to source jumps (removed syntax).
+        std::vector<char> covered(src.size(), 0);
+        auto is_deco = [&](uint16_t f) {
+            return (f & (S_TaskBox | S_QuoteMark)) || ((f & S_ListMark) && L0.info.list && !L0.info.ordered);
+        };
+        for (int k = 0; k < (int)rt.size();) {
+            uint16_t f = L1.rstyle[k];
+            int r1 = row_of(L1, k);
+            int r1_end = r1 + 1 < (int)L1.rows.size() ? L1.rows[r1 + 1] : (int)rt.size();
+            bool deco = is_deco(f);
+            // A run is one word plus the space after it, in one style, on one
+            // row, mapping to consecutive source bytes.
+            int k2 = k;
+            while (true) {
+                bool was_space = rt[k2] == ' ';
+                k2 = utf8::next(rt, k2);
+                if (k2 >= r1_end || L1.rstyle[k2] != f) break;
+                if (deco) continue;
+                if (was_space || L1.rmap[k2] != L1.rmap[k2 - 1] + 1) break;
+            }
+            if (!deco) {
+                int j = L1.rmap[k];
+                int r0 = row_of(L0, j);
+                int r0_end = r0 + 1 < (int)L0.rows.size() ? L0.rows[r0 + 1] : (int)src.size();
+                if (j + (k2 - k) > r0_end && r0_end > j) k2 = k + (r0_end - j);  // stay on one editor row
+            }
+            float xr = glyph_x(L1, rt, L1.rstyle, m1, r1, k);
+            float yr_row = yr + r1 * L1.row_h;
+            if (deco) {
+                P_.alpha = base * reader_struct;  // bullets, boxes and bars all have an editor counterpart
+                if (P_.alpha > 0) draw_row(dl, 1, L1, m1, rt, L1.rstyle, k, k2, xr, yr_row);
+            } else {
+                int j = L1.rmap[k];
+                int r0 = row_of(L0, j);
+                float xe = glyph_x(L0, src, L0.style, m0, r0, j);
+                float ye_row = ye + r0 * L0.row_h;
+                for (int b = j; b < j + (k2 - k) && b < (int)src.size(); b++) covered[b] = 1;
+                if (r0 == r1) {
+                    // Same row in both views: glide, closing the gaps the
+                    // syntax leaves (or opening them again).
+                    P_.alpha = base;
+                    draw_row(dl, 1, L1, m1, rt, L1.rstyle, k, k2, lerp(xe, xr, wg), lerp(ye_row, yr_row, wg));
+                } else {
+                    // Re-wrapped onto another row: travelling would cross other
+                    // words, so it fades out where it was, then in where it
+                    // belongs once that spot has settled.
+                    float fx = morph_.to_reader ? xe : xr, fy = morph_.to_reader ? ye_row : yr_row;
+                    float tx = morph_.to_reader ? xr : xe, ty = morph_.to_reader ? yr_row : ye_row;
+                    if (fade_out > 0) { P_.alpha = base * fade_out; draw_row(dl, 1, L1, m1, rt, L1.rstyle, k, k2, fx, fy); }
+                    if (fade_in > 0) { P_.alpha = base * fade_in; draw_row(dl, 1, L1, m1, rt, L1.rstyle, k, k2, tx, ty); }
+                }
+            }
+            k = k2;
+        }
+
+        // Syntax only the editor shows: fades out where it stands (at the
+        // dimness fade_syntax gave it).
+        line_mark_a_ = syntax_ == Syntax::Markdown && i < (int)mark_a_.size() ? mark_a_[i] : 1.0f;
+        for (int j = 0; j < (int)src.size();) {
+            if (covered[j]) { j++; continue; }
+            int r0 = row_of(L0, j);
+            int r0_end = r0 + 1 < (int)L0.rows.size() ? L0.rows[r0 + 1] : (int)src.size();
+            // One style per call, so each run is placed exactly (see glyph_x).
+            int j2 = j;
+            while (j2 < r0_end && !covered[j2] && L0.style[j2] == L0.style[j]) j2 = utf8::next(src, j2);
+            float xe = glyph_x(L0, src, L0.style, m0, r0, j);
+            bool structural = (L0.style[j] & (S_ListMark | S_TaskBox | S_QuoteMark)) || L0.info.kind == LineKind::Rule;
+            P_.alpha = base * (structural ? edit_struct : syntax_a);
+            if (P_.alpha > 0) draw_row(dl, 0, L0, m0, src, L0.style, j, j2, xe, ye + r0 * L0.row_h);
+            j = j2;
+        }
+
+        // Line numbers belong to the editor.
+        if (p.line_numbers && x0 - p.min.x > p.size * 4 && syntax_a > 0) {
+            float ns = std::round(p.size * 0.8f);
+            char buf[16];
+            snprintf(buf, sizeof buf, "%d", i + 1);
+            ImVec2 sz = p.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
+            float ty = ye + (L0.row_h - L0.size) * 0.5f + (L0.size - ns) * 0.78f;
+            dl->AddText(p.mono, ns, ImVec2(std::round(x0 - p.size * 1.3f - sz.x), std::round(ty)),
+                        col_alpha(i == cur_.line ? T.dim : T.faint, base * syntax_a), buf);
+        }
+    }
+    P_.alpha = base;
+    exact_x_ = false;
+    dl->Flags = saved_flags;
+    dl->PopClipRect();
+    return true;
 }
 
 void Editor::draw_line(ImDrawList* dl, int mode, int i, float x0, float y0) {
@@ -1818,9 +2021,11 @@ Look resolve_ini(uint16_t f) {
 }
 
 void put_text(ImDrawList* dl, ImFont* font, float size, float x, float y, ImU32 col, const char* a, const char* b,
-              bool bold, bool italic) {
+              bool bold, bool italic, bool exact_x = false) {
     int v0 = dl->VtxBuffer.Size;
-    ImVec2 pos(std::round(x), std::round(y));
+    // Run starts snap to whole pixels; the morph passes exact positions it
+    // has already computed to match that snapping (and to glide smoothly).
+    ImVec2 pos(exact_x ? x : std::round(x), std::round(y));
     dl->AddText(font, size, pos, col, a, b);
     if (bold) dl->AddText(font, size, ImVec2(pos.x + std::max(0.5f, size * 0.035f), pos.y), col, a, b);
     if (italic) {
@@ -1919,7 +2124,7 @@ void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m,
             ImFont* bold_font = mono ? P_.mono_bold : P_.sans_bold;
             ImFont* font = bold && bold_font ? bold_font : (mono ? P_.mono : P_.sans);
             put_text(dl, font, mono ? m.msize : m.size, x, mono ? mono_ty : ty, col, p + i, p + j,
-                     bold && !bold_font, k.italic);
+                     bold && !bold_font, k.italic, exact_x_);
             float lw = std::max(1.0f, std::round(dpi));
             if (k.underline) {
                 float uy = std::round(ty + L.size * 0.86f);

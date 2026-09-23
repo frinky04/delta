@@ -94,6 +94,7 @@ private:
     Palette palette_;
     std::vector<Command> cmds_;
     std::vector<std::string> pending_run_;
+    double run_after_ = 0;             // --run steps wait until this time
 
     ImFont* sans_ = nullptr;
     ImFont* mono_ = nullptr;

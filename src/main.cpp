@@ -43,6 +43,7 @@ int main(int argc, char** argv) {
     AppOptions opts;
     std::string shot;
     int shot_w = 0, shot_h = 0;
+    double shot_delay = 1.0;  // seconds after the first frame
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -58,6 +59,7 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--screenshot") shot = next();
         else if (a == "--size") std::sscanf(next().c_str(), "%dx%d", &shot_w, &shot_h);
+        else if (a == "--shot-delay") shot_delay = std::atof(next().c_str());
     }
 
     if (!glfwInit()) return 1;
@@ -135,7 +137,7 @@ int main(int argc, char** argv) {
 
         // Capture once animations have had real time to settle.
         static double first_frame = glfwGetTime();
-        if (!shot.empty() && ++frames >= 10 && glfwGetTime() - first_frame > 1.0) {
+        if (!shot.empty() && ++frames >= 3 && glfwGetTime() - first_frame > shot_delay) {
             std::vector<unsigned char> px((size_t)w * h * 4);
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());

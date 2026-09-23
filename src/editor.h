@@ -68,7 +68,7 @@ public:
     void draw(const EditorParams& p);
 
     bool reader() const { return reader_; }
-    void set_reader(bool r);
+    void set_reader(bool r, bool animate = true);  // animate: morph between the views
 
     // Markdown for notes, Ini for delta.ini. Set before set_text().
     void set_syntax(Syntax s);
@@ -199,6 +199,7 @@ private:
 
     // drawing
     void draw_line(ImDrawList* dl, int mode, int i, float x0, float y0);
+    bool draw_morph(ImDrawList* dl, float s);  // edit <-> reader transition, s seconds in; false once settled
     void draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::string& s,
                         const std::vector<uint16_t>& st, float y, int index, float x0, float shown_h);
     void sync_edits();               // pair lines before/after an edit
@@ -267,6 +268,12 @@ private:
     std::vector<float> dh_;          // drawn height per line (edit layout)
     std::vector<Ghost> ghosts_;
     bool snap_heights_ = true;
+    struct Morph {
+        bool active = false;
+        bool to_reader = true;
+        double start = 0;
+        float scroll_from = 0;       // scroll of the view being left
+    } morph_;
     struct Pending {
         bool active = false;
         int begin = 0;               // first new line of the edited region
@@ -277,6 +284,7 @@ private:
     TextPos sel_cur_, sel_anchor_;
     uint64_t sel_version_ = 0;
     float line_mark_a_ = 1;          // the line being drawn
+    bool exact_x_ = false;           // morph: text x is pre-snapped, don't round it again
     int sync_line_ = -1;
     float sync_frac_ = 0;
 

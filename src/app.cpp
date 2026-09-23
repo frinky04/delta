@@ -101,7 +101,7 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
             if (x >= mx - 50 && y >= my - 50 && x < mx + mw - 100 && y < my + mh - 100) { glfwSetWindowPos(win_, x, y); break; }
         }
     }
-    if (state["reader"] == "1") editor_.set_reader(true);
+    if (state["reader"] == "1") editor_.set_reader(true, false);
 
     editor_.on_link = [this](const LinkSpan& l) { open_link(l); };
 
@@ -250,8 +250,7 @@ void App::register_commands() {
     // View
     add("view.reader", "Toggle reader mode", "ctrl+e", [this] {
         if (!note_ || is_config()) return;
-        editor_.set_reader(!editor_.reader());
-        fade_start_ = ImGui::GetTime();
+        editor_.set_reader(!editor_.reader());  // morphs between the views
     }, false, false);
     add("view.line_numbers", "Toggle line numbers", "", [this] { cfg_.line_numbers = !cfg_.line_numbers; });
     add("view.zoom_in", "Zoom in", "ctrl+= ctrl+numpad+", [this] { zoom_ = std::min(3.0f, zoom_ * 1.1f); status("Zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
@@ -343,9 +342,9 @@ void App::open_note(const NoteRef& n, bool push_history) {
     bool config = n.path == cfg_path_;
     if (config && !was_config) {
         reader_pref_ = editor_.reader();
-        editor_.set_reader(false);
+        editor_.set_reader(false, false);
     } else if (!config && was_config) {
-        editor_.set_reader(reader_pref_);
+        editor_.set_reader(reader_pref_, false);
     }
     editor_.set_syntax(config ? Syntax::Ini : Syntax::Markdown);
     editor_.set_text(text);
@@ -1005,10 +1004,17 @@ void App::frame() {
     double now = ImGui::GetTime();
 
     // Commands passed on the command line (used for testing and scripting).
-    if (!pending_run_.empty()) {
+    // "wait:<seconds>" pauses the list, so later steps run once the page is up.
+    if (!pending_run_.empty() && now >= run_after_) {
         auto run = std::move(pending_run_);
         pending_run_.clear();
-        for (auto& id : run) {
+        for (size_t k = 0; k < run.size(); k++) {
+            const std::string& id = run[k];
+            if (id.rfind("wait:", 0) == 0) {
+                run_after_ = now + std::atof(id.c_str() + 5);
+                pending_run_.assign(run.begin() + k + 1, run.end());
+                break;
+            }
             if (id.rfind("open:", 0) == 0) { open_by_name(id.substr(5)); continue; }
             if (id.rfind("palette:", 0) == 0) { open_palette(id.substr(8)); continue; }
             if (Command* c = find_command(id)) c->run();
