@@ -106,6 +106,19 @@ public:
     std::vector<Heading> headings() const;
     int word_count();
 
+    // Where line i is drawn right now vs. where it's laid out (edit view).
+    // They differ while space is opening or closing.
+    float drawn_y(int i) const { return lay_[0][i].dy; }
+    float laid_y(int i) const { return lay_[0][i].y; }
+
+    // The span the change pulse is highlighting, if any.
+    bool pulse_range(TextPos& a, TextPos& b) const {
+        if (!pulse_.active) return false;
+        a = pulse_.a;
+        b = pulse_.b;
+        return true;
+    }
+
     // When the caret next changes blink state (for the idle loop).
     double next_blink(double now) const;
 
@@ -116,6 +129,7 @@ private:
         uint64_t hash = 0;
         float wrap = -1, base = -1, lh = -1, blank = -1;
         float hang = 0;                  // x where wrapped rows start
+        float dy = 0, dh = 0;            // where it's drawn now (edit mode animates these)
         int tab = -1;
         bool in_code = false;
         LineInfo info;
@@ -170,6 +184,7 @@ private:
     TextPos row_end() const;
     void select_word_at(TextPos p);
     void toggle_task_line(int line);
+    void pulse_changes(const std::vector<std::string>& before);
 
     // editing primitives
     void begin_edit(Edit kind);
@@ -184,6 +199,11 @@ private:
 
     // drawing
     void draw_line(ImDrawList* dl, int mode, int i, float x0, float y0);
+    void draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::string& s,
+                        const std::vector<uint16_t>& st, float y, int index, float x0, float shown_h);
+    void sync_edits();               // pair lines before/after an edit
+    void animate_layout(float dt);   // displayed heights chase real ones
+    void resolve_pending();          // conserve space across the last structural edit
     void draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m, const std::string& s,
                   const std::vector<uint16_t>& st, int a, int b, float x0, float ry);
     ImU32 fade(ImU32 c) const;
@@ -217,6 +237,43 @@ private:
         bool live;
     };
     std::vector<SelRect> sel_rects_;
+
+    // Soft highlight on what the last undo, redo or paste changed.
+    struct Pulse {
+        bool active = false;
+        TextPos a, b;
+        double start = 0;
+        uint64_t version = 0;       // any later edit clears it
+    } pulse_;
+
+    // Space opening and closing. Each line's drawn height chases its real
+    // height, and lines are stacked by drawn heights, so whatever opens or
+    // closes pushes everything below it exactly. New lines: the space opens,
+    // then the text fades in. Removed lines stay briefly as ghosts: the text
+    // fades out, then the space closes. Taking turns, text never overlaps.
+    // Lines are paired across an edit by comparing the text.
+    struct Ghost {
+        int before;                  // index of the line it sits above
+        Line lay;
+        std::string text;
+        float h, full;
+        bool show_text;              // false when its text was merged into a neighbour
+        float a = 1;                 // fades out first; the space closes after
+        bool fresh = false;          // from the edit resolve_pending() hasn't settled yet
+        float dy = 0;
+    };
+    std::vector<std::string> prev_lines_;
+    uint64_t diff_version_ = 0;
+    std::vector<float> dh_;          // drawn height per line (edit layout)
+    std::vector<Ghost> ghosts_;
+    bool snap_heights_ = true;
+    struct Pending {
+        bool active = false;
+        int begin = 0;               // first new line of the edited region
+        std::vector<char> is_new;    // per line in the region: inserted (vs carried on)
+        float old_space = 0;         // drawn space the region had before the edit
+    } pending_;
+    float geom_[5] = {};             // column, size, line height, blank, tab: a change snaps
     TextPos sel_cur_, sel_anchor_;
     uint64_t sel_version_ = 0;
     float line_mark_a_ = 1;          // the line being drawn

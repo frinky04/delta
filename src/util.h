@@ -60,11 +60,17 @@ inline bool enabled = true;
 inline float speed = 1.0f;
 inline bool active = false;
 
+// The most time one frame may count towards an animation. delta sleeps
+// between inputs, so the first frame after a pause can be seconds after the
+// last one; uncapped, that frame would finish every animation at once, and
+// motion would seem to randomly not happen whenever you'd paused first.
+inline float step(float dt) { return dt < 1.0f / 30 ? dt : 1.0f / 30; }
+
 inline float approach(float cur, float target, float rate, float dt, float eps = 0.25f) {
     float d = target - cur;
     if (!enabled || std::fabs(d) <= eps) return target;
     active = true;
-    return target - d * std::exp(-rate * speed * dt);
+    return target - d * std::exp(-rate * speed * step(dt));
 }
 
 // 0..1 progress of a tween that started at `start`.

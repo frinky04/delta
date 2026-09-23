@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 
 #include "ini_syntax.h"
 #include "theme.h"
@@ -55,6 +56,12 @@ void Editor::set_text(const std::string& text) {
     yoff_.assign(lines_.size(), 0);
     mark_a_.clear();
     sel_rects_.clear();
+    pulse_.active = false;
+    // A different document appears as it is: nothing opens or collapses.
+    ghosts_.clear();
+    snap_heights_ = true;
+    prev_lines_ = lines_;
+    diff_version_ = version_;
     scroll_ = scroll_target_ = 0;
     snap_ = caret_snap_ = true;
     sync_line_ = -1;
@@ -227,11 +234,13 @@ void Editor::undo() {
     redo_.push_back({lines_, cur_, anchor_});
     Snap s = std::move(undo_.back());
     undo_.pop_back();
+    std::vector<std::string> before = std::move(lines_);
     lines_ = std::move(s.lines);
     cur_ = s.cur;
     anchor_ = s.anchor;
     last_edit_ = Edit::None;
     end_edit();
+    pulse_changes(before);
 }
 
 void Editor::redo() {
@@ -239,11 +248,13 @@ void Editor::redo() {
     undo_.push_back({lines_, cur_, anchor_});
     Snap s = std::move(redo_.back());
     redo_.pop_back();
+    std::vector<std::string> before = std::move(lines_);
     lines_ = std::move(s.lines);
     cur_ = s.cur;
     anchor_ = s.anchor;
     last_edit_ = Edit::None;
     end_edit();
+    pulse_changes(before);
 }
 
 void Editor::copy() {
@@ -279,6 +290,7 @@ void Editor::paste() {
     if (!clip || !*clip) return;
     std::string text = clip;
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    std::vector<std::string> before = lines_;
     begin_edit(Edit::Other);
     if (!has_selection() && !line_clip_.empty() && text == line_clip_) {
         // A whole-line copy pastes as a line above, like an IDE.
@@ -289,6 +301,46 @@ void Editor::paste() {
         replace_selection(text);
     }
     end_edit();
+    pulse_changes(before);
+}
+
+// Highlight what an undo, redo or paste changed: the span of text that
+// differs between `before` and now, down to the character. Nothing to show
+// for a pure deletion (the removed lines' fade already says what happened).
+void Editor::pulse_changes(const std::vector<std::string>& before) {
+    pulse_.active = false;
+    auto join = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (size_t i = 0; i < v.size(); i++) {
+            if (i) s += '\n';
+            s += v[i];
+        }
+        return s;
+    };
+    std::string o = join(before), n = join(lines_);
+    size_t pre = 0, lim = std::min(o.size(), n.size());
+    while (pre < lim && o[pre] == n[pre]) pre++;
+    size_t suf = 0;
+    while (suf < lim - pre && o[o.size() - 1 - suf] == n[n.size() - 1 - suf]) suf++;
+    // Snap to whole characters.
+    while (pre > 0 && utf8::is_cont((unsigned char)n[pre])) pre--;
+    size_t end = n.size() - suf;
+    while (end < n.size() && utf8::is_cont((unsigned char)n[end])) end++;
+    if (end <= pre) return;
+
+    auto pos_of = [&](size_t off) {
+        TextPos p;
+        for (size_t i = 0; i < off; i++) {
+            if (n[i] == '\n') { p.line++; p.col = 0; }
+            else p.col++;
+        }
+        return p;
+    };
+    pulse_.a = pos_of(pre);
+    pulse_.b = pos_of(end);
+    pulse_.start = ImGui::GetTime();
+    pulse_.version = version_;
+    pulse_.active = true;
 }
 
 void Editor::select_all() {
@@ -487,6 +539,7 @@ void Editor::set_syntax(Syntax s) {
     syntax_ = s;
     lay_[0].clear();  // styles are cached per line
     lay_[1].clear();
+    snap_heights_ = true;
     diag_.clear();
 }
 
@@ -639,10 +692,209 @@ void Editor::layout(int mode) {
             L.pad = std::round(P_.size * (L.info.level <= 2 ? 0.5f : 0.25f));
         L.y = y;
         L.h = L.pad + L.rows.size() * L.row_h;
+        if (mode == 1) { L.dy = L.y; L.dh = L.h; }  // the reader doesn't animate layout
         y += L.h;
         if (L.info.kind == LineKind::Fence) in_code = !in_code;
     }
     total_h_[mode] = y;
+}
+
+// Work out which lines survived the latest edit(s), which are new and which
+// were removed, by comparing the text now with the text last frame. Must run
+// while lay_[0] still holds last frame's layout (before layout(0)).
+void Editor::sync_edits() {
+    if (version_ == diff_version_) return;
+    diff_version_ = version_;
+    const std::vector<std::string>& O = prev_lines_;
+    const std::vector<std::string>& N = lines_;
+    auto finish = [&] { prev_lines_ = lines_; };
+    if (snap_heights_ || reader_ || lay_[0].size() != O.size() || dh_.size() != O.size()) {
+        snap_heights_ = true;
+        ghosts_.clear();
+        finish();
+        return;
+    }
+
+    // Unchanged lines at the top and bottom; the edit is in between.
+    size_t p = 0;
+    while (p < O.size() && p < N.size() && O[p] == N[p]) p++;
+    size_t s = 0;
+    while (s < O.size() - p && s < N.size() - p && O[O.size() - 1 - s] == N[N.size() - 1 - s]) s++;
+    size_t o_end = O.size() - s, n_end = N.size() - s;
+    if (o_end - p > 200 || n_end - p > 200) {  // a wholesale change: don't animate it
+        snap_heights_ = true;
+        ghosts_.clear();
+        finish();
+        return;
+    }
+
+    std::vector<int> o2n(O.size(), -1), n2o(N.size(), -1);
+    for (size_t i = 0; i < p; i++) o2n[i] = (int)i, n2o[i] = (int)i;
+    for (size_t k = 0; k < s; k++) {
+        size_t oi = O.size() - 1 - k, ni = N.size() - 1 - k;
+        o2n[oi] = (int)ni;
+        n2o[ni] = (int)oi;
+    }
+    // In the middle: identical lines pair first (moved or duplicated lines),
+    // then the rest pair up in order (edited lines, e.g. the first half of a
+    // split). Whatever is left over was inserted or removed.
+    std::unordered_map<std::string, std::vector<int>> pool;
+    for (size_t j = n_end; j-- > p;) pool[N[j]].push_back((int)j);
+    for (size_t i = p; i < o_end; i++) {
+        auto it = pool.find(O[i]);
+        if (it == pool.end() || it->second.empty()) continue;
+        int j = it->second.back();
+        it->second.pop_back();
+        o2n[i] = j;
+        n2o[j] = (int)i;
+    }
+    std::vector<int> lo, ln;
+    for (size_t i = p; i < o_end; i++) if (o2n[i] < 0) lo.push_back((int)i);
+    for (size_t j = p; j < n_end; j++) if (n2o[j] < 0) ln.push_back((int)j);
+    for (size_t k = 0; k < lo.size() && k < ln.size(); k++) {
+        o2n[lo[k]] = ln[k];
+        n2o[ln[k]] = lo[k];
+    }
+
+    // Where a removed line (or an older ghost) now sits: above the next line
+    // that survived.
+    auto before_of = [&](int oi) {
+        for (int k = oi; k < (int)O.size(); k++)
+            if (o2n[k] >= 0) return o2n[k];
+        return (int)N.size();
+    };
+    for (auto& g : ghosts_) g.before = g.before < (int)O.size() ? before_of(g.before) : (int)N.size();
+    for (size_t i = p; i < o_end; i++) {
+        if (o2n[i] >= 0) continue;
+        Ghost g;
+        g.before = before_of((int)i);
+        g.lay = lay_[0][i];
+        g.text = O[i];
+        g.h = dh_[i];
+        g.full = std::max(1.0f, lay_[0][i].h);
+        // Backspace joining lines: the text lives on in the line above, so
+        // only the space collapses (no duplicate of the text fading out).
+        g.show_text = !O[i].empty();
+        for (size_t j = p; j < n_end && g.show_text; j++)
+            if (n2o[j] >= 0 && N[j].find(O[i]) != std::string::npos && N[j] != O[i]) g.show_text = false;
+        g.a = g.show_text ? 1.0f : 0.0f;  // merged lines have no text to fade: close at once
+        g.fresh = true;                   // part of this edit's space accounting
+        ghosts_.push_back(std::move(g));
+    }
+
+    // Lines were added or removed (not just edited in place): conserve the
+    // edited region's space. It's settled after the next layout, once the
+    // new heights are known (see resolve_pending()).
+    bool structural = false;
+    for (size_t i = p; i < o_end && !structural; i++) structural = o2n[i] < 0;
+    for (size_t j = p; j < n_end && !structural; j++) structural = n2o[j] < 0;
+    if (structural) {
+        pending_.active = true;
+        pending_.begin = (int)p;
+        pending_.is_new.assign(n_end - p, 0);
+        for (size_t j = p; j < n_end; j++) pending_.is_new[j - p] = n2o[j] < 0;
+        pending_.old_space = 0;
+        for (size_t i = p; i < o_end; i++) pending_.old_space += dh_[i];
+    }
+
+    std::vector<float> dh(N.size(), 0.0f);  // new lines open from nothing
+    for (size_t j = 0; j < N.size(); j++)
+        if (n2o[j] >= 0) dh[j] = dh_[n2o[j]];
+    dh_ = std::move(dh);
+    finish();
+}
+
+// Settle the space of the last structural edit, now that layout has the new
+// heights. The edited region starts with exactly the space it had before:
+// lines that carried on (e.g. the first half of a split paragraph) take
+// their new height at once, and the difference goes to what's new or
+// removed. Breaking a paragraph: the second half inherits the rows its text
+// already filled and opens only by the space the break added, so nothing
+// moves up. Joining lines: only the space actually freed collapses.
+void Editor::resolve_pending() {
+    if (!pending_.active) return;
+    pending_.active = false;
+    auto& V = lay_[0];
+    if (dh_.size() != V.size()) return;
+    float kept = 0;
+    for (size_t k = 0; k < pending_.is_new.size(); k++) {
+        int j = pending_.begin + (int)k;
+        if (j >= (int)V.size() || pending_.is_new[k]) continue;
+        dh_[j] = V[j].h;
+        kept += V[j].h;
+    }
+    float budget = pending_.old_space - kept;  // space the old region had left over
+    float ghosts = 0;
+    for (auto& g : ghosts_) if (g.fresh) ghosts += g.h;
+    if (budget > ghosts) {
+        // More room than the removed lines need: new lines start with it.
+        float extra = budget - ghosts;
+        for (size_t k = 0; k < pending_.is_new.size() && extra > 0; k++) {
+            int j = pending_.begin + (int)k;
+            if (j >= (int)V.size() || !pending_.is_new[k]) continue;
+            float give = std::min(extra, V[j].h);
+            dh_[j] = give;
+            extra -= give;
+        }
+    } else if (budget < ghosts) {
+        // The carried-on lines grew into some of the removed space: that part
+        // is already taken, so it leaves the ghosts now. Merged ghosts first,
+        // they have no text to fade.
+        float excess = ghosts - budget;
+        for (int pass = 0; pass < 2 && excess > 0; pass++)
+            for (auto& g : ghosts_) {
+                if (!g.fresh || excess <= 0 || g.show_text != (pass == 1)) continue;
+                float cut = std::min(excess, g.h);
+                g.h -= cut;
+                excess -= cut;
+            }
+    }
+    for (auto& g : ghosts_) g.fresh = false;
+}
+
+// Displayed heights chase real heights, ghosts collapse, and every line's
+// drawn position is the sum of drawn heights above it.
+void Editor::animate_layout(float dt) {
+    auto& V = lay_[0];
+    float geom[5] = {P_.column, P_.size, P_.line_height, P_.blank_line, (float)P_.tab_size};
+    bool geom_changed = std::memcmp(geom, geom_, sizeof geom) != 0;
+    if (geom_changed) std::memcpy(geom_, geom, sizeof geom);
+    if (snap_heights_ || geom_changed || dh_.size() != V.size() || !anim::enabled) {
+        dh_.resize(V.size());
+        for (size_t i = 0; i < V.size(); i++) dh_[i] = V[i].h;
+        ghosts_.clear();
+        snap_heights_ = false;
+        if (prev_lines_.size() != lines_.size() || diff_version_ != version_) {
+            prev_lines_ = lines_;
+            diff_version_ = version_;
+        }
+    }
+    const float rate = 30.0f;
+    for (size_t i = 0; i < V.size(); i++) {
+        dh_[i] = anim::approach(dh_[i], V[i].h, rate, dt, 0.3f);
+    }
+    // A removed line fades out first, holding its space; only then does the
+    // space close. Taking turns means text never overlaps.
+    for (auto& g : ghosts_) {
+        if (g.a > 0.0f) g.a = anim::approach(g.a, 0.0f, 40.0f, dt, 0.03f);
+        else g.h = anim::approach(g.h, 0.0f, rate, dt, 0.3f);
+    }
+    ghosts_.erase(std::remove_if(ghosts_.begin(), ghosts_.end(), [](const Ghost& g) { return g.h <= 0.0f; }), ghosts_.end());
+    std::stable_sort(ghosts_.begin(), ghosts_.end(), [](const Ghost& a, const Ghost& b) { return a.before < b.before; });
+
+    float y = 0;
+    size_t gi = 0;
+    for (size_t i = 0; i <= V.size(); i++) {
+        while (gi < ghosts_.size() && ghosts_[gi].before <= (int)i) {
+            ghosts_[gi].dy = y;
+            y += ghosts_[gi].h;
+            gi++;
+        }
+        if (i == V.size()) break;
+        V[i].dy = y;
+        V[i].dh = dh_[i];
+        y += dh_[i];
+    }
 }
 
 int Editor::row_of(const Line& L, int col) const {
@@ -655,7 +907,7 @@ int Editor::line_at_y(int mode, float y) const {
     int lo = 0, hi = (int)V.size() - 1;
     while (lo < hi) {
         int mid = (lo + hi + 1) / 2;
-        if (V[mid].y <= y) lo = mid;
+        if (V[mid].dy <= y) lo = mid;
         else hi = mid - 1;
     }
     return std::max(lo, 0);
@@ -688,7 +940,7 @@ ImVec2 Editor::pos_xy(TextPos p) const {
     int r = row_of(L, p.col);
     Metrics m = metrics(L.size);
     float x = row_x(L, r) + measure(lines_[p.line], L.style, L.rows[r], p.col, m);
-    return ImVec2(x, L.y + L.pad + r * L.row_h);
+    return ImVec2(x, L.dy + L.pad + r * L.row_h);
 }
 
 bool Editor::hit(int mode, ImVec2 d, int& line, int& col) const {
@@ -697,8 +949,8 @@ bool Editor::hit(int mode, ImVec2 d, int& line, int& col) const {
     if (d.y < 0) { line = 0; col = 0; return true; }
     line = line_at_y(mode, d.y);
     const Line& L = V[line];
-    if (d.y >= L.y + L.h && line == (int)V.size() - 1) { col = (int)text_of(mode, line).size(); return true; }
-    int r = std::clamp((int)std::floor((d.y - L.y - L.pad) / L.row_h), 0, (int)L.rows.size() - 1);
+    if (d.y >= L.dy + L.dh && line == (int)V.size() - 1) { col = (int)text_of(mode, line).size(); return true; }
+    int r = std::clamp((int)std::floor((d.y - L.dy - L.pad) / L.row_h), 0, (int)L.rows.size() - 1);
     col = col_at_x(mode, line, r, d.x);
     return true;
 }
@@ -1113,7 +1365,9 @@ void Editor::draw(const EditorParams& p) {
     view_h_ = p.max.y - p.min.y;
     col_x_ = std::round(p.min.x + (p.max.x - p.min.x - p.column) * 0.5f);
 
+    sync_edits();
     layout(0);
+    resolve_pending();
     if (mode) layout(1);
     if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
 
@@ -1150,10 +1404,14 @@ void Editor::draw(const EditorParams& p) {
         io.InputQueueCharacters.resize(0);
     }
     if (version_ != before) {
+        sync_edits();
         layout(0);
+        resolve_pending();
         if (mode) layout(1);
         if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
     }
+
+    animate_layout(dt);
 
     // Auto-scroll while drag-selecting past the edges.
     if (active && drag_mode_ && !reader_) {
@@ -1211,6 +1469,40 @@ void Editor::draw(const EditorParams& p) {
     origin_y_ = p.min.y + p.top_pad - scroll_;
     auto& V = lay_[mode];
 
+    // Change pulse: what an undo, redo or paste changed glows softly and
+    // fades. Any further edit clears it (its positions would be stale).
+    if (pulse_.active && (version_ != pulse_.version || reader_)) pulse_.active = false;
+    if (pulse_.active) {
+        float t = anim::progress(pulse_.start, now, 0.4f);
+        float a = (1.0f - t) * (1.0f - t);
+        if (t >= 1.0f || a <= 0.0f) {
+            pulse_.active = false;
+        } else {
+            ImU32 col = fade(col_alpha(T.accent, 0.16f * a));
+            TextPos pa = pulse_.a, pb = pulse_.b;
+            for (int l = std::max(0, pa.line); l <= pb.line && l < (int)V.size(); l++) {
+                const Line& L = V[l];
+                float ly = origin_y_ + L.dy + L.pad + yoff_[l];
+                if (ly > p.max.y || ly + L.dh < p.min.y) continue;
+                Metrics m = metrics(L.size);
+                int la = l == pa.line ? pa.col : 0;
+                int lb = l == pb.line ? pb.col : (int)lines_[l].size();
+                for (int r = 0; r < (int)L.rows.size(); r++) {
+                    int ra = L.rows[r];
+                    int rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)lines_[l].size();
+                    int sa = std::max(la, ra), sb = std::min(lb, rb);
+                    bool eol = l != pb.line && r + 1 == (int)L.rows.size();
+                    if (sa > sb || (sa == sb && !eol)) continue;
+                    float x1 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sa, m);
+                    float x2 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sb, m);
+                    if (eol) x2 += m.sans->GetCharAdvance(' ');
+                    float ry = ly + r * L.row_h;
+                    dl->AddRectFilled(ImVec2(std::round(x1), ry), ImVec2(std::round(x2), ry + L.row_h), col);
+                }
+            }
+        }
+    }
+
     // Selection behind text. Each visual row of the selection is a rect whose
     // edges glide to their targets, like the caret: extending a selection
     // grows it, a new row grows in from the side the caret is moving from,
@@ -1228,7 +1520,7 @@ void Editor::draw(const EditorParams& p) {
             bool forward = anchor_ < cur_;
             for (int l = a.line; l <= b.line; l++) {
                 const Line& L = V[l];
-                float ly = origin_y_ + L.y + L.pad + yoff_[l];
+                float ly = origin_y_ + L.dy + L.pad + yoff_[l];
                 if (ly > p.max.y || ly + L.h < p.min.y) continue;
                 Metrics m = metrics(L.size);
                 int la = l == a.line ? a.col : 0;
@@ -1279,7 +1571,7 @@ void Editor::draw(const EditorParams& p) {
         if (reader_) sel_rects_.clear();
         for (auto& s : sel_rects_) {
             const Line& L = V[s.line];
-            float ry = origin_y_ + L.y + L.pad + yoff_[s.line] + s.row * L.row_h;
+            float ry = origin_y_ + L.dy + L.pad + yoff_[s.line] + s.row * L.row_h;
             if (ry > p.max.y || ry + L.row_h < p.min.y || s.x2 - s.x1 < 0.5f) continue;
             dl->AddRectFilled(ImVec2(std::round(col_x_ + s.x1), ry), ImVec2(std::round(col_x_ + s.x2), ry + L.row_h),
                               fade(col_alpha(T.selection, s.a)));
@@ -1288,8 +1580,33 @@ void Editor::draw(const EditorParams& p) {
 
     int first = V.empty() ? 0 : line_at_y(mode, std::max(0.0f, scroll_ - p.top_pad - view_h_ * 0.5f));
     for (int i = first; i < (int)V.size(); i++) {
-        if (origin_y_ + V[i].y - view_h_ * 0.5f > p.max.y) break;
+        if (origin_y_ + V[i].dy - view_h_ * 0.5f > p.max.y) break;
         draw_line(dl, mode, i, col_x_, origin_y_);
+    }
+
+    // Removed lines: the text fades out, then the space closes. Lines merged
+    // into a neighbour have no text to fade and just give up their space.
+    if (mode == 0) {
+        for (const Ghost& g : ghosts_) {
+            float top = origin_y_ + g.dy;
+            if (top > p.max.y || top + g.h < p.min.y) continue;
+            // Inside a code block the background fills the ghost's space for
+            // as long as it's there, so the block never shows a hole.
+            if (g.lay.info.kind == LineKind::CodeBlock || g.lay.info.kind == LineKind::Fence) {
+                float pad_x = std::round(P_.size * 0.6f);
+                float from = top + g.lay.pad, to = top + g.h;
+                if (to > from)
+                    dl->AddRectFilled(ImVec2(col_x_ - pad_x, from), ImVec2(col_x_ + P_.column + pad_x, to), fade(T.code_bg));
+            }
+            if (!g.show_text) continue;
+            float saved = P_.alpha;
+            P_.alpha *= g.a;
+            if (g.a <= 0.0f) { P_.alpha = saved; continue; }
+            dl->PushClipRect(ImVec2(p.min.x, std::max(p.min.y, top)), ImVec2(p.max.x, std::min(p.max.y, top + g.h)), true);
+            draw_line_body(dl, 0, g.lay, g.text, g.lay.style, top + g.lay.pad, -1, col_x_, g.full);
+            dl->PopClipRect();
+            P_.alpha = saved;
+        }
     }
 
     // Caret.
@@ -1368,16 +1685,47 @@ void Editor::draw(const EditorParams& p) {
 
 void Editor::draw_line(ImDrawList* dl, int mode, int i, float x0, float y0) {
     const Line& L = lay_[mode][i];
-    const std::string& s = text_of(mode, i);
-    const std::vector<uint16_t>& st = style_of(mode, i);
-    float y = y0 + L.y + L.pad + yoff_[i];
-    line_mark_a_ = mode == 0 && syntax_ == Syntax::Markdown && i < (int)mark_a_.size() ? mark_a_[i] : 1.0f;
+    float top = y0 + L.dy + yoff_[i];
+    // While a line's space is still opening (new, or grown a wrapped row),
+    // rows that don't have their room yet stay hidden and fade in once they
+    // do. Drawn whole, never clipped.
+    draw_line_body(dl, mode, L, text_of(mode, i), style_of(mode, i), top + L.pad, i, x0, mode == 0 ? L.dh : L.h);
+}
+
+// Draws a laid-out line with its first row's top at y. `index` is its line
+// number, or -1 for a ghost (no line number or problems). `shown_h` is how
+// much of its height has opened: a row fades in only once its room is there.
+void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::string& s,
+                            const std::vector<uint16_t>& st, float y, int index, float x0, float shown_h) {
+    const int i = index;
+    line_mark_a_ = i < 0 ? 0.25f
+                 : mode == 0 && syntax_ == Syntax::Markdown && i < (int)mark_a_.size() ? mark_a_[i] : 1.0f;
     Metrics m = metrics(L.size);
+
+    // Space first, then text: a row stays hidden until most of its room has
+    // opened, then fades in over the rest.
+    struct Restore { float& a; float v; ~Restore() { a = v; } } restore{P_.alpha, P_.alpha};
+    const float base = P_.alpha;
+    auto row_alpha = [&](int r) {
+        float cover = (shown_h - L.pad - r * L.row_h) / std::max(1.0f, L.row_h);
+        if (cover >= 1.0f) return 1.0f;
+        return anim::ease_out(std::clamp((cover - 0.6f) / 0.4f, 0.0f, 1.0f));
+    };
     float pad_x = std::round(P_.size * 0.6f);
     float block_h = L.rows.size() * L.row_h;
 
-    if (L.info.kind == LineKind::CodeBlock || L.info.kind == LineKind::Fence)
-        dl->AddRectFilled(ImVec2(x0 - pad_x, y), ImVec2(x0 + P_.column + pad_x, y + block_h), fade(T.code_bg));
+    // A code block's background belongs to the space, not the text: it
+    // covers exactly the height that's open and doesn't fade, so the block
+    // stays whole while lines inside it open or close. (Ghosts draw their
+    // own, since their space outlives their text.)
+    if (index >= 0 && (L.info.kind == LineKind::CodeBlock || L.info.kind == LineKind::Fence)) {
+        float open = std::clamp(shown_h - L.pad, 0.0f, block_h);
+        if (open > 0.0f)
+            dl->AddRectFilled(ImVec2(x0 - pad_x, y), ImVec2(x0 + P_.column + pad_x, y + open), col_alpha(T.code_bg, base));
+    }
+
+    P_.alpha = base * row_alpha(0);
+    if (P_.alpha <= 0.0f && shown_h < L.h) return;
 
     if (L.info.kind == LineKind::Rule) {
         float mid = std::round(y + L.row_h * 0.5f);
@@ -1386,7 +1734,7 @@ void Editor::draw_line(ImDrawList* dl, int mode, int i, float x0, float y0) {
     }
 
     // Line number in the left margin, only where there's room.
-    if (mode == 0 && P_.line_numbers && x0 - P_.min.x > P_.size * 4) {
+    if (i >= 0 && mode == 0 && P_.line_numbers && x0 - P_.min.x > P_.size * 4) {
         float ns = std::round(P_.size * 0.8f);
         char buf[16];
         snprintf(buf, sizeof buf, "%d", i + 1);
@@ -1399,12 +1747,15 @@ void Editor::draw_line(ImDrawList* dl, int mode, int i, float x0, float y0) {
     for (int r = 0; r < (int)L.rows.size(); r++) {
         int a = L.rows[r];
         int b = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)s.size();
+        P_.alpha = base * row_alpha(r);
+        if (P_.alpha <= 0.0f) continue;
         draw_row(dl, mode, L, m, s, st, a, b, x0 + row_x(L, r), y + r * L.row_h);
     }
+    P_.alpha = base * row_alpha(0);
 
     // A problem on this line: a mark in the margin and the message after
     // the text, where the eye already is.
-    if (mode == 0) {
+    if (mode == 0 && i >= 0) {
         auto d = diag_.find(i);
         if (d != diag_.end()) {
             float bw = std::max(2.0f, std::round(2 * P_.dpi));

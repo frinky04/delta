@@ -156,7 +156,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     if (!open_) {
         if (close_t_ >= 1.0f) { page_a_ = 1.0f; return {}; }
         // A pick takes a little longer: it has a beat where the choice lingers.
-        close_t_ = std::min(1.0f, close_t_ + f.dt / ((committed_ ? 0.22f : 0.11f) / anim::speed));
+        close_t_ = std::min(1.0f, close_t_ + anim::step(f.dt) / ((committed_ ? 0.22f : 0.11f) / anim::speed));
         anim::active = true;
     }
 
