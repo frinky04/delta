@@ -14,8 +14,7 @@
 #include "theme.h"
 #include "util.h"
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
+#include "stb_image_write.h"  // implemented in images.cpp
 
 // Frames still owed after an input event: ImGui needs a couple of frames to
 // settle hover/active state, then the loop can go back to sleeping.
@@ -85,6 +84,13 @@ static void on_size(GLFWwindow* w, int, int) {
 static void on_focus(GLFWwindow*, int focused) {
     wake();
     if (g_app) g_app->on_focus(focused != 0);
+}
+static void on_drop(GLFWwindow* w, int count, const char** paths) {
+    wake();
+    if (!g_app) return;
+    double x = 0, y = 0;
+    glfwGetCursorPos(w, &x, &y);
+    g_app->on_drop(std::vector<std::string>(paths, paths + count), ImVec2((float)x, (float)y));
 }
 static void on_scale(GLFWwindow*, float x, float) {
     wake();
@@ -162,6 +168,7 @@ int main(int argc, char** argv) {
     glfwSetWindowFocusCallback(window, on_focus);
     glfwSetWindowSizeCallback(window, on_size);
     glfwSetWindowRefreshCallback(window, on_refresh);
+    glfwSetDropCallback(window, on_drop);
     glfwSetWindowContentScaleCallback(window, on_scale);
 
     IMGUI_CHECKVERSION();

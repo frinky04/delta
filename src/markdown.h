@@ -25,7 +25,9 @@ enum : uint16_t {
     S_WikiLink  = 1 << 15,  // [[note]]
 };
 
-enum class LineKind : uint8_t { Blank, Para, Heading, Fence, CodeBlock, Rule };
+// Image: a line holding nothing but ![alt](src). It's shown as the image
+// itself, an object the caret steps over, rather than as text.
+enum class LineKind : uint8_t { Blank, Para, Heading, Fence, CodeBlock, Rule, Image };
 
 struct LineInfo {
     LineKind kind = LineKind::Para;
@@ -46,6 +48,24 @@ struct LinkSpan {
 };
 
 bool md_is_fence(const std::string& s);
+// One image in a line: ![alt](src), where alt may end in a size the way
+// Obsidian writes it, "|300" (width) or "|300x200" (a box to fit in).
+struct ImageRef {
+    int begin = 0, end = 0;   // the whole ![...](...) in the line
+    std::string alt;          // without the size
+    std::string src;
+    int w = 0, h = 0;         // size asked for, 0 = none
+};
+// Is this line nothing but images, one ![alt](src) or several separated by
+// spaces (a row)? <angle brackets> around src and a "title" after it are
+// allowed. `out` gets them in order.
+bool md_image_row(const std::string& s, std::vector<ImageRef>* out = nullptr);
+// The same, for callers that care about the first (or only) image.
+bool md_image_line(const std::string& s, std::string* alt = nullptr, std::string* src = nullptr);
+// An image as markdown, with its size in the alt text (w = 0: no size).
+std::string md_image_text(const std::string& alt, const std::string& src, int w, int h = 0);
+// The same image with a different width asked for (0: its own size).
+std::string md_image_resized(const std::string& token, int w);
 void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<uint16_t>& style,
                 std::vector<LinkSpan>* links = nullptr);
 

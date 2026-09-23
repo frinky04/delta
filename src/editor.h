@@ -28,7 +28,23 @@ struct Diagnostic {
     std::string msg;
 };
 
+// Where the editor gets images from. The app implements it: it knows which
+// folder the note is in and owns the textures.
+class ImageSource {
+public:
+    virtual ~ImageSource() = default;
+    // Pixel size of the image a note refers to as `src`; false if there's
+    // nothing there that can be shown.
+    virtual bool size(const std::string& src, int& w, int& h) = 0;
+    // Its texture, wanted `want_w` pixels wide, once loaded (0 until then:
+    // asking starts the load). `shown` is how far it has faded in, 0..1.
+    virtual ImTextureID texture(const std::string& src, int want_w, float& shown) = 0;
+    // A word to show on the placeholder while there's no picture yet ("" for none).
+    virtual std::string label(const std::string& src) { (void)src; return {}; }
+};
+
 struct EditorParams {
+    ImageSource* images = nullptr;
     ImFont* sans = nullptr;
     ImFont* mono = nullptr;
     ImFont* sans_bold = nullptr;  // SemiBold; null falls back to a double-drawn bold
@@ -47,6 +63,7 @@ struct EditorParams {
     enum class Caret { Bar, Thick, Block } caret = Caret::Thick;
     bool caret_trail = false;  // the caret smears on its way to a new spot
     bool scroll_past_end = true;
+    float px = 1;             // screen pixels per CSS px (image sizes like |300)
     bool keyboard = true;     // take keyboard input this frame
     bool mouse = true;        // take mouse input this frame
     float alpha = 1;          // fade (note switch / mode switch / palette)
@@ -88,6 +105,28 @@ public:
     void set_hints(std::map<int, std::string> h) { hints_ = std::move(h); }
     // Insert text as one undoable edit; returns where it ends.
     TextPos insert_text(TextPos at, const std::string& text);
+    // Insert whole lines (images, say) at the caret as one undoable edit:
+    // onto an empty line, before or after the caret's line, or splitting it
+    // around them. The caret ends after the last one.
+    void insert_lines(const std::vector<std::string>& lines);
+    // Swap every line equal to `from` for `to`, in the text and in the undo
+    // history, without it being an edit of its own (a download landing).
+    bool replace_line_everywhere(const std::string& from, const std::string& to);
+
+    // Images on screen (last frame's layout, whichever view is showing). An
+    // image is (line, tile): a line can hold a row of them.
+    bool image_at(ImVec2 screen, int& line, int& tile) const;           // an image under this point?
+    bool image_rect(int line, int tile, ImVec2& a, ImVec2& b) const;    // where it's drawn
+    std::string image_src(int line, int tile = 0) const;                // its src, "" if none
+    std::string image_markdown(int line, int tile) const;               // its ![...](...)
+    std::vector<std::pair<int, int>> image_list() const;                // every image, in order
+    // The image the caret is on (edit view, nothing selected), or the one
+    // image a selection is exactly: its line (-1 if none) and tile.
+    int image_for_caret(int* tile = nullptr) const;
+    void delete_image(int line, int tile);                              // one undoable edit
+    bool over_image_handle() const { return hover_handle_ || resize_line_ >= 0; }
+    // The text position under a screen point (edit view), for drops.
+    TextPos position_at(ImVec2 screen) const;
 
     // Bindable edit commands.
     void undo();
@@ -175,6 +214,20 @@ private:
         std::vector<int> rmap;
         std::vector<int> rows;           // byte offset where each visual row starts
         float size = 0, row_h = 0, pad = 0, y = 0, h = 0;
+        // Image lines: when the images can be shown, one "row" as tall as
+        // them (plus a margin) instead of the text's rows, kept in text_*.
+        // One image, or several (a justified row, wrapping every 4 or so).
+        bool img = false;
+        struct Tile {
+            std::string src;
+            int b0 = 0, b1 = 0;            // its ![...](...) in the line
+            float x = 0, y = 0, w = 0, h = 0;  // drawn at, from the first row's top-left
+            int iw = 0, ih = 0;            // pixel size
+        };
+        std::vector<Tile> tiles;
+        float img_m = 0;                   // margin above and below
+        std::vector<int> text_rows;
+        float text_row_h = 0;
     };
     struct Metrics {
         ImFontBaked* sans;
@@ -199,6 +252,34 @@ private:
     float measure(const std::string& s, const std::vector<uint16_t>& st, int a, int b, const Metrics& m) const;
     int row_of(const Line& L, int col) const;
     static float row_x(const Line& L, int row) { return row > 0 ? L.hang : 0.0f; }
+    // Is line i showing as an image (an object the caret steps over)?
+    // (The layout can be a step behind within a frame, so the text is
+    // checked too.)
+    bool is_img(int i) const {
+        return i >= 0 && i < (int)lay_[0].size() && i < (int)lines_.size() && lay_[0][i].img && md_image_line(lines_[i]);
+    }
+    void layout_image(Line& L, const std::string& s, int index);
+    void step_off_image();
+    bool image_backspace();
+    bool image_delete();
+    // The caret's places in an image line are "stops": before the first
+    // image (0), between images, after the last (n).
+    static int img_stop(const Line& L, int col);
+    static int stop_col(const Line& L, int k, int len);
+    static int img_tile(const Line& L, int col) { return std::max(0, img_stop(L, col) - 1); }  // the one it's "on"
+    void img_caret(const Line& L, int col, float& x, float& y, float& h) const;
+    int img_col_at(const Line& L, int len, float x, float y) const;
+    int img_tile_at(const Line& L, float x, float y) const;     // -1 if none there
+    void delete_tile(int line, int tile);
+    bool resize_handle(int line, ImVec2& a, ImVec2& b) const;   // doc coords
+    bool handle_image_mouse(bool hovered, ImVec2 doc);          // true: it took the mouse this frame
+    void finish_resize();
+    void move_image();                                          // to the drop target (sets land_*)
+    bool drop_changes() const;                                  // would dropping here move it?
+    void let_go_image(bool drop);                               // end a drag: drop, or fly home
+    bool tile_rect(int line, int tile, ImVec2& a, ImVec2& b) const;  // doc coords, edit view
+    void draw_image_drag(ImDrawList* dl);
+    void draw_image(ImDrawList* dl, const Line& L, float x, float y, float alpha, int index);
     int col_at_x(int mode, int line, int row, float x) const;
     ImVec2 pos_xy(TextPos p) const;              // doc coords of caret position (edit layout)
     bool hit(int mode, ImVec2 doc, int& line, int& col) const;
@@ -260,6 +341,41 @@ private:
     };
     std::vector<Mark> marks_;
     bool marks_snap_ = false;
+
+    // Resizing an image by its handle: the line, the width being dragged to
+    // (screen px) and what it snapped to ("" for none).
+    int resize_line_ = -1;
+    float resize_w_ = 0, resize_from_ = 0;
+    std::string resize_snap_;
+    int hover_img_line_ = -1;         // image under the pointer (edit view)
+    bool hover_handle_ = false;
+    // Dragging an image to another place: pressed on (line, tile); once it
+    // moves, `img_drag_` and the drop target (join a row at a stop, or a line
+    // of its own before `own_before`).
+    int press_img_line_ = -1, press_img_tile_ = -1;
+    ImVec2 press_at_;
+    bool img_drag_ = false;
+    int drop_line_ = -1, drop_stop_ = -1, drop_own_ = -1;
+    ImVec2 drag_at_;                  // pointer, doc coords
+    // How it looks while carried: picked up where it was grabbed, following
+    // the pointer (eased), shrinking from full size to a carried size.
+    ImVec2 grab_off_;                 // grab point from the image's top-left, at full size
+    ImVec2 ghost_at_;                 // eased pointer (doc)
+    float ghost_k_ = 1;               // size, 1 = full
+    // The drop marker: glides between places of one kind (upright beside an
+    // image, 1; across between lines, 2); switching kind, the old one fades
+    // out where it is while the new one fades in, never an in-between shape.
+    struct DropMark { ImVec2 a, b; float alpha = 0; int kind = 0; };
+    DropMark mark_, mark_old_;
+    float caret_shown_ = 1;           // the caret steps back while an image is carried (0..1)
+    int hover_tile_ = -1;             // the image under the pointer (with hover_img_line_)
+    float hover_glow_ = 0;            // its faint lift, eased
+    bool nudge_image(int dir);        // ctrl+alt+left/right: swap with its neighbour in the row
+    // Landing: after a drop (or a cancel), the image flies from where it was
+    // let go to its place, drawn over the page until it arrives.
+    int land_line_ = -1, land_tile_ = -1;
+    bool land_drag_ = false;          // after a drag (the caret waits it out), not a nudge
+    ImVec2 land_a_, land_b_;          // doc rect, easing to the tile's
     std::map<int, std::string> hints_;
     uint64_t version_ = 1;
 

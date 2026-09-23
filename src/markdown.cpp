@@ -1,6 +1,8 @@
 #include "markdown.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 
 static bool is_ws(char c) { return c == ' ' || c == '\t'; }
@@ -22,6 +24,111 @@ bool md_is_fence(const std::string& s) {
     size_t i = 0;
     while (i < s.size() && i < 3 && s[i] == ' ') i++;
     return s.compare(i, 3, "```") == 0 || s.compare(i, 3, "~~~") == 0;
+}
+
+// One ![alt](src) starting at s[a]; sets `end` past its ")".
+static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
+    size_t n = s.size();
+    if (a + 5 > n || s.compare(a, 2, "![") != 0) return false;
+    // The alt text runs to the matching "]" (brackets inside it must balance).
+    size_t i = a + 2;
+    int depth = 0;
+    for (; i < n; i++) {
+        if (s[i] == '\\') { i++; continue; }
+        if (s[i] == '[') depth++;
+        else if (s[i] == ']' && depth-- == 0) break;
+    }
+    if (i + 1 >= n || s[i + 1] != '(') return false;
+    size_t alt_end = i;
+    // The target runs to the ")" that closes it: past <...> if bracketed,
+    // past a "title" if there is one.
+    size_t t0 = i + 2, j = t0;
+    std::string path;
+    if (j < n && s[j] == '<') {
+        size_t close = s.find('>', j);
+        if (close == std::string::npos) return false;
+        path = s.substr(j + 1, close - j - 1);
+        j = close + 1;
+    } else {
+        while (j < n && s[j] != ')' && !is_ws(s[j])) j++;
+        path = s.substr(t0, j - t0);
+    }
+    while (j < n && is_ws(s[j])) j++;
+    if (j < n && s[j] == '"') {
+        size_t q = s.find('"', j + 1);
+        if (q == std::string::npos) return false;
+        j = q + 1;
+        while (j < n && is_ws(s[j])) j++;
+    }
+    if (j >= n || s[j] != ')' || path.empty() || path.find(')') != std::string::npos) return false;
+    ref.begin = (int)a;
+    ref.end = (int)j + 1;
+    ref.src = path;
+    ref.alt = s.substr(a + 2, alt_end - (a + 2));
+    ref.w = ref.h = 0;
+    // "alt|300" or "alt|300x200": Obsidian's size.
+    size_t bar = ref.alt.rfind('|');
+    if (bar != std::string::npos) {
+        std::string size = ref.alt.substr(bar + 1);
+        size_t x = size.find('x');
+        auto digits = [](const std::string& d) { return !d.empty() && d.size() <= 5 && std::all_of(d.begin(), d.end(), [](char c) { return c >= '0' && c <= '9'; }); };
+        std::string ws = size.substr(0, x), hs = x == std::string::npos ? std::string() : size.substr(x + 1);
+        if (digits(ws) && (x == std::string::npos || digits(hs))) {
+            ref.w = std::atoi(ws.c_str());
+            ref.h = hs.empty() ? 0 : std::atoi(hs.c_str());
+            ref.alt = ref.alt.substr(0, bar);
+        }
+    }
+    return true;
+}
+
+bool md_image_row(const std::string& s, std::vector<ImageRef>* out) {
+    if (out) out->clear();
+    size_t i = 0, n = s.size();
+    int count = 0;
+    while (true) {
+        while (i < n && is_ws(s[i])) i++;
+        if (i >= n) break;
+        ImageRef ref;
+        if (!parse_image(s, i, ref)) return false;
+        // Images need space between them, or they'd be one word.
+        if (count > 0 && !is_ws(s[i - 1])) return false;
+        if (out) out->push_back(ref);
+        count++;
+        i = ref.end;
+    }
+    return count > 0;
+}
+
+bool md_image_line(const std::string& s, std::string* alt, std::string* src) {
+    std::vector<ImageRef> refs;
+    if (!md_image_row(s, &refs)) return false;
+    if (alt) *alt = refs[0].alt;
+    if (src) *src = refs[0].src;
+    return true;
+}
+
+std::string md_image_text(const std::string& alt, const std::string& src, int w, int h) {
+    std::string a = alt;
+    if (w > 0) a += "|" + std::to_string(w) + (h > 0 ? "x" + std::to_string(h) : std::string());
+    bool spaced = src.find_first_of(" \t") != std::string::npos;
+    return "![" + a + "](" + (spaced ? "<" + src + ">" : src) + ")";
+}
+
+std::string md_image_resized(const std::string& token, int w) {
+    ImageRef ref;
+    if (!parse_image(token, 0, ref)) return token;
+    // Keep everything after the alt text (the target, any title) as it was.
+    size_t close = token.find("](", 0);
+    int depth = 0;
+    for (size_t i = 2; i < token.size(); i++) {
+        if (token[i] == '\\') { i++; continue; }
+        if (token[i] == '[') depth++;
+        else if (token[i] == ']' && depth-- == 0) { close = i; break; }
+    }
+    std::string alt = ref.alt;
+    if (w > 0) alt += "|" + std::to_string(w);
+    return "![" + alt + token.substr(close);
 }
 
 static bool is_rule(const std::string& s) {
@@ -173,6 +280,11 @@ void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<
     size_t i = 0;
     while (i < n && is_ws(s[i])) i++;
     if (i == n) { info.kind = LineKind::Blank; return; }
+    if (md_image_line(s)) {
+        info.kind = LineKind::Image;
+        mark(st, 0, n, S_Marker);
+        return;
+    }
     if (is_rule(s)) {
         info.kind = LineKind::Rule;
         mark(st, 0, n, S_Marker);
@@ -242,7 +354,7 @@ void md_reader(const std::string& s, const LineInfo& info, const std::vector<uin
     auto emit = [&](const char* text, uint16_t style, int src) {
         for (const char* c = text; *c; c++) { out += *c; ost.push_back(style); map.push_back(src); }
     };
-    if (info.kind == LineKind::Fence || info.kind == LineKind::Rule) return;
+    if (info.kind == LineKind::Fence || info.kind == LineKind::Rule || info.kind == LineKind::Image) return;
     if (info.kind == LineKind::CodeBlock) {
         out = s; ost = st;
         for (int i = 0; i < (int)s.size(); i++) map.push_back(i);

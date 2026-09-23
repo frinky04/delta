@@ -11,7 +11,7 @@ build/delta.exe
 build/delta_tests.exe   # headless editor/markdown tests
 ```
 
-ImGui 1.92.9b and GLFW 3.4 are vendored in `third_party/`. Both fonts are embedded in the exe. With MinGW the exe is statically linked, so it runs on its own.
+ImGui 1.92.9b, GLFW 3.4 and stb_image 2.30 are vendored in `third_party/`. Both fonts are embedded in the exe. With MinGW the exe is statically linked, so it runs on its own.
 
 ## Spaces
 
@@ -78,6 +78,27 @@ Tools that act on the note in view live in the status line, so the note stays in
 Choosing from a list stays in the palette, headings included (`ctrl+shift+o`, or `[sections]` in the config).
 
 Expand selection grows word, sentence, line, paragraph, section (under its heading), then the whole note.
+
+## Images
+
+A line holding just an image, `![](path)`, shows the image itself: at its own pixel size (a screenshot shows 1:1), no wider than the column and no taller than most of the window. The caret treats it as one object with a before and an after: arrows step over it, typing beside it starts a new line on that side, and backspace or delete removes it (undoable). With the caret beside it, it's outlined; a selection tints it. Reader mode shows it the same way. An image that can't be shown stays as text, with a quiet note saying why. Showing a note never touches the network: web images are only ever fetched once, when you paste one.
+
+Getting images in:
+
+- **Paste** (`ctrl+v`). Image files copied in Explorer, a screenshot, or "copy image" in a browser all become images in the note. Pasting a web address on its own onto an empty line fetches it in the background (a placeholder holds its spot); if it turns out to be an image it's stored, otherwise it stays the link. `ctrl+shift+v` pastes plain text: nothing is fetched.
+- **Drop** image files onto the note, and they go where you drop them.
+
+Pasted and dropped images land on lines of their own (a line with text is split around them), and one undo takes them back. Several at once land as a row. BMPs and other bulky formats are stored as PNG.
+
+**Sizing**, as Obsidian writes it: `![|300](path)` is 300px wide (it scales with zoom), `![|300x200](path)` fits a box. You don't type it: with the caret on an image (or the pointer over it) a handle sits on its right edge; drag it, and it snaps to a quarter, half, three quarters or all of the column, or the image's own size. Double-click the handle for its own size again.
+
+**Rows**: images on the same line, `![](a.png) ![](b.png)`, sit side by side, all one height, the row exactly as wide as the column; past four they wrap into more rows. Other markdown tools show same-line images side by side too. The caret steps from image to image; backspace and delete take out one; typing between two splits the row around the text; `ctrl+alt+←` / `ctrl+alt+→` swap the image the caret is on with its neighbour. Drag an image by its body onto another's left or right half to join its row there, or between lines to give it a line of its own; that's also how you reorder them.
+
+**Copying** an image (the caret beside it, or selected) puts the picture on the clipboard as well as its markdown: other apps get the picture, another note gets the same stored file.
+
+**Viewing**: double-click an image, press `space` beside it, or click it in reader mode. It grows to fill the window; the wheel or `ctrl+=` / `ctrl+-` zoom, drag pans, `0` fits it again, `←` / `→` go through the note's other images, and `esc`, `space` or a click outside puts it back.
+
+Images live out of sight in one store for the whole notes folder, `.delta/images` (hidden), named by a hash of their contents, so the same image is stored once and renaming or moving notes never touches it. Notes refer to them with ordinary markdown, `![](../.delta/images/<hash>.png)`, which other markdown tools show too. PNG, JPEG, GIF (first frame), BMP, TGA and PSD are read. Large images are decoded in the background, scaled down to the size they're shown at.
 
 ## Config
 

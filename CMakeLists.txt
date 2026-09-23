@@ -54,20 +54,23 @@ add_library(delta_core STATIC
   src/keys.cpp
   src/theme.cpp
   src/platform.cpp
+  src/images.cpp
   ${FONT_SANS_CPP}
   ${FONT_MONO_CPP}
   ${FONT_SANS_BOLD_CPP}
   ${FONT_MONO_BOLD_CPP})
 target_include_directories(delta_core PUBLIC src)
-target_link_libraries(delta_core PUBLIC imgui)
+target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/deps)
+find_package(Threads REQUIRED)
+target_link_libraries(delta_core PUBLIC imgui Threads::Threads)
 if(WIN32)
-  target_link_libraries(delta_core PUBLIC dwmapi shell32)
+  target_link_libraries(delta_core PUBLIC dwmapi shell32 wininet)
 endif()
 if(MSVC)
   target_compile_options(delta_core PUBLIC /utf-8)
 endif()
 
-add_executable(delta WIN32 src/main.cpp src/app.cpp)
+add_executable(delta WIN32 src/main.cpp src/app.cpp src/app_images.cpp src/image_cache.cpp)
 target_include_directories(delta PRIVATE third_party/glfw/deps)
 target_link_libraries(delta PRIVATE delta_core)
 if(MINGW)

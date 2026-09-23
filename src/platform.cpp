@@ -1,6 +1,8 @@
 #include "platform.h"
 
+#include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -10,6 +12,7 @@
 #include <windows.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <wininet.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
@@ -135,5 +138,170 @@ void style_native_window(GLFWwindow* w, unsigned rgb_bg, unsigned rgb_text, bool
     DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border, sizeof border);
 #else
     (void)w; (void)rgb_bg; (void)rgb_text; (void)dark;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard
+
+#ifdef _WIN32
+static UINT png_format() {
+    static UINT f = RegisterClipboardFormatW(L"PNG");
+    return f;
+}
+
+static bool clipboard_bytes(UINT format, std::string& out) {
+    if (!IsClipboardFormatAvailable(format) || !OpenClipboard(nullptr)) return false;
+    bool ok = false;
+    if (HANDLE h = GetClipboardData(format)) {
+        if (const void* p = GlobalLock(h)) {
+            out.assign((const char*)p, GlobalSize(h));
+            GlobalUnlock(h);
+            ok = !out.empty();
+        }
+    }
+    CloseClipboard();
+    return ok;
+}
+
+static HGLOBAL global_copy(const void* data, size_t size) {
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!g) return nullptr;
+    if (void* p = GlobalLock(g)) {
+        std::memcpy(p, data, size);
+        GlobalUnlock(g);
+        return g;
+    }
+    GlobalFree(g);
+    return nullptr;
+}
+#endif
+
+std::vector<fs::path> clipboard_files() {
+    std::vector<fs::path> out;
+#ifdef _WIN32
+    if (!IsClipboardFormatAvailable(CF_HDROP) || !OpenClipboard(nullptr)) return out;
+    if (HANDLE h = GetClipboardData(CF_HDROP)) {
+        HDROP drop = (HDROP)h;
+        UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        for (UINT i = 0; i < n; i++) {
+            UINT len = DragQueryFileW(drop, i, nullptr, 0);
+            std::wstring w(len + 1, L'\0');
+            DragQueryFileW(drop, i, w.data(), len + 1);
+            w.resize(len);
+            out.push_back(fs::path(w));
+        }
+    }
+    CloseClipboard();
+#endif
+    return out;
+}
+
+bool clipboard_png(std::string& png) {
+#ifdef _WIN32
+    return clipboard_bytes(png_format(), png);
+#else
+    (void)png;
+    return false;
+#endif
+}
+
+bool clipboard_dib(std::string& dib) {
+#ifdef _WIN32
+    // CF_DIBV5 keeps alpha where the source had it; CF_DIB is the fallback
+    // everyone offers (Windows makes one from the other).
+    return clipboard_bytes(CF_DIBV5, dib) || clipboard_bytes(CF_DIB, dib);
+#else
+    (void)dib;
+    return false;
+#endif
+}
+
+bool clipboard_put_image(GLFWwindow* w, const std::string& png, const std::string& dib, const std::string& text) {
+#ifdef _WIN32
+    // An owner window is needed for SetClipboardData to take.
+    if (!OpenClipboard(glfwGetWin32Window(w))) return false;
+    EmptyClipboard();
+    bool ok = false;
+    if (!png.empty())
+        if (HGLOBAL g = global_copy(png.data(), png.size())) ok |= SetClipboardData(png_format(), g) != nullptr;
+    if (!dib.empty())
+        if (HGLOBAL g = global_copy(dib.data(), dib.size())) ok |= SetClipboardData(CF_DIB, g) != nullptr;
+    if (!text.empty()) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0);
+        std::wstring wt(n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), wt.data(), n);
+        if (HGLOBAL g = global_copy(wt.c_str(), (wt.size() + 1) * sizeof(wchar_t))) ok |= SetClipboardData(CF_UNICODETEXT, g) != nullptr;
+    }
+    CloseClipboard();
+    return ok;
+#else
+    (void)w; (void)png; (void)dib; (void)text;
+    return false;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// HTTP
+
+bool http_get(const std::string& url, size_t max_bytes, int timeout_ms, const std::string& want_type,
+              std::string& body, std::string& content_type, std::string& err) {
+    body.clear();
+    content_type.clear();
+#ifdef _WIN32
+    auto widen = [](const std::string& s) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+        std::wstring w(n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+        return w;
+    };
+    HINTERNET net = InternetOpenW(L"delta", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    if (!net) { err = "no internet connection"; return false; }
+    DWORD t = (DWORD)timeout_ms;
+    InternetSetOptionW(net, INTERNET_OPTION_CONNECT_TIMEOUT, &t, sizeof t);
+    InternetSetOptionW(net, INTERNET_OPTION_RECEIVE_TIMEOUT, &t, sizeof t);
+    InternetSetOptionW(net, INTERNET_OPTION_SEND_TIMEOUT, &t, sizeof t);
+    ULONGLONG start = GetTickCount64();
+    HINTERNET req = InternetOpenUrlW(net, widen(url).c_str(), nullptr, 0,
+                                     INTERNET_FLAG_NO_UI | INTERNET_FLAG_NO_COOKIES | INTERNET_FLAG_RELOAD, 0);
+    bool ok = false;
+    if (!req) {
+        err = "couldn't reach it";
+    } else {
+        DWORD status = 0, len = sizeof status;
+        HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &len, nullptr);
+        wchar_t type[256] = {};
+        DWORD tlen = sizeof type;
+        if (HttpQueryInfoW(req, HTTP_QUERY_CONTENT_TYPE, type, &tlen, nullptr)) {
+            int n = WideCharToMultiByte(CP_UTF8, 0, type, -1, nullptr, 0, nullptr, nullptr);
+            content_type.assign(n > 0 ? n - 1 : 0, '\0');
+            if (n > 1) WideCharToMultiByte(CP_UTF8, 0, type, -1, content_type.data(), n, nullptr, nullptr);
+        }
+        std::string lowered = content_type;
+        for (char& c : lowered) c = (char)std::tolower((unsigned char)c);
+        if (status < 200 || status >= 300) {
+            err = "the server said " + std::to_string(status);
+        } else if (!want_type.empty() && lowered.rfind(want_type, 0) != 0) {
+            err = "not " + want_type;
+        } else {
+            char buf[64 * 1024];
+            DWORD got = 0;
+            ok = true;
+            while (InternetReadFile(req, buf, sizeof buf, &got) && got > 0) {
+                body.append(buf, got);
+                if (body.size() > max_bytes) { err = "too big"; ok = false; break; }
+                if (GetTickCount64() - start > (ULONGLONG)timeout_ms) { err = "took too long"; ok = false; break; }
+            }
+            if (ok && body.empty()) { err = "it was empty"; ok = false; }
+        }
+        InternetCloseHandle(req);
+    }
+    InternetCloseHandle(net);
+    if (!ok) body.clear();
+    return ok;
+#else
+    (void)url; (void)max_bytes; (void)timeout_ms; (void)want_type;
+    err = "not supported here";
+    return false;
 #endif
 }

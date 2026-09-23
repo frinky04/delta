@@ -2,6 +2,8 @@
 #include <ctime>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,6 +11,8 @@
 #include "config.h"
 #include "editor.h"
 #include "keys.h"
+#include "image_cache.h"
+#include "images.h"
 #include "palette.h"
 #include "store.h"
 
@@ -26,6 +30,8 @@ public:
     void shutdown();
 
     bool should_quit() const { return quit_; }
+    // Files dropped on the window (UTF-8 paths), at a point in the window.
+    void on_drop(std::vector<std::string> paths, ImVec2 at) { drops_.push_back({std::move(paths), at}); }
     double next_wake(double now);       // when the idle loop must render next
     ImU32 background() const;
     void set_dpi(float dpi) { dpi_ = dpi; }
@@ -75,6 +81,18 @@ private:
     void history_step(int dir);
     void set_title();
 
+    // images
+    void paste(bool plain);
+    void copy_out(bool cut);
+    std::string import_image(const std::string& bytes, std::string& err);  // -> the line for it, "" if not
+    std::vector<std::string> import_files(const std::vector<fs::path>& files, int& skipped);
+    static std::string as_row(const std::vector<std::string>& lines);
+    void fetch_image(const std::string& url);
+    void poll_downloads();
+    void handle_drops();
+    void open_viewer(int line, int tile);
+    void draw_viewer();
+
     // ui
     void dispatch_keys(bool& fired);
     void build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total);
@@ -116,6 +134,40 @@ private:
     Store store_;
     Editor editor_;
     Palette palette_;
+    ImageCache images_;       // what the editor draws images with
+    ImageStore image_store_;  // where they're kept: <notes>/.delta/images
+
+    struct Drop { std::vector<std::string> paths; ImVec2 at; };
+    std::vector<Drop> drops_;
+
+    // An image URL being fetched. Its line reads ![](delta-pending:<id>) until
+    // it lands (then it's the stored image) or fails (then it's the URL).
+    struct Download {
+        int id = 0;
+        std::string url, marker;
+        fs::path note;               // the note it was pasted into
+        std::mutex mu;
+        bool done = false, ok = false;
+        std::string bytes, err;
+    };
+    std::vector<std::shared_ptr<Download>> downloads_;
+    int next_download_ = 1;
+
+    // Full-window image viewer.
+    struct Viewer {
+        bool open = false, closing = false;
+        std::string src;
+        int line = -1, tile = 0;     // where it is in the note (to zoom back to)
+        ImVec2 from_a, from_b;       // its rect in the note when opened
+        float t = 0;                 // 0 = in the note, 1 = full window
+        float zoom = 1;              // on top of fitting the window (as shown)
+        ImVec2 pan{0, 0};
+        float zoom_to = 1;           // where input has sent them; the shown
+        ImVec2 pan_to{0, 0};         // values ease there
+        bool pressed = false, dragged = false;
+        ImVec2 press_at;
+        int opened_frame = -1;       // the key or click that opened it isn't also a close
+    } viewer_;
     std::vector<Command> cmds_;
     std::vector<std::string> pending_run_;
     double run_after_ = 0;             // --run steps wait until this time

@@ -154,6 +154,7 @@ int Editor::word_count() {
     if (words_version_ == version_) return words_;
     int n = 0;
     for (auto& l : lines_) {
+        if (md_image_line(l)) continue;  // an image isn't words
         bool in_word = false, has_alnum = false;
         for (size_t i = 0; i <= l.size(); i++) {
             unsigned char c = i < l.size() ? (unsigned char)l[i] : ' ';
@@ -326,6 +327,7 @@ void Editor::paste() {
         TextPos end = insert({cur_.line, 0}, text);
         cur_ = anchor_ = {end.line, col};
     } else {
+        step_off_image();
         replace_selection(text);
     }
     renumber_lists(start.line, cur_.line);
@@ -342,6 +344,156 @@ TextPos Editor::insert_text(TextPos at, const std::string& text) {
     end_edit();
     pulse_changes(before);
     return end;
+}
+
+void Editor::insert_lines(const std::vector<std::string>& block) {
+    if (block.empty()) return;
+    std::vector<std::string> before = lines_;
+    begin_edit(Edit::Other);
+    delete_selection();
+    step_off_image();
+    int l = cur_.line;
+    const std::string s = lines_[l];
+    int at;  // where the block's first line goes
+    if (trim(s).empty()) {
+        lines_.erase(lines_.begin() + l);  // an empty line takes them
+        at = l;
+    } else if (cur_.col == 0) {
+        at = l;
+    } else if (cur_.col >= (int)s.size()) {
+        at = l + 1;
+    } else {
+        lines_[l] = s.substr(0, cur_.col);
+        lines_.insert(lines_.begin() + l + 1, s.substr(cur_.col));
+        at = l + 1;
+    }
+    lines_.insert(lines_.begin() + at, block.begin(), block.end());
+    int last = at + (int)block.size() - 1;
+    cur_ = anchor_ = {last, (int)lines_[last].size()};
+    end_edit();
+    pulse_changes(before);
+}
+
+bool Editor::replace_line_everywhere(const std::string& from, const std::string& to) {
+    bool found = false;
+    auto swap_in = [&](std::vector<std::string>& v) {
+        for (auto& l : v)
+            if (l == from) { l = to; found = true; }
+    };
+    swap_in(lines_);
+    for (auto& s : undo_) swap_in(s.lines);
+    for (auto& s : redo_) swap_in(s.lines);
+    if (found) {
+        for (auto* p : {&cur_, &anchor_}) clamp(*p);
+        version_++;
+    }
+    return found;
+}
+
+bool Editor::image_rect(int line, int tile, ImVec2& a, ImVec2& b) const {
+    int mode = reader_ ? 1 : 0;
+    if (line < 0 || line >= (int)lay_[mode].size() || line >= (int)lines_.size()) return false;
+    const Line& L = lay_[mode][line];
+    if (!L.img || tile < 0 || tile >= (int)L.tiles.size()) return false;
+    const auto& t = L.tiles[tile];
+    float y = origin_y_ + L.dy + L.pad + t.y + (mode == 0 && line < (int)yoff_.size() ? yoff_[line] : 0.0f);
+    a = ImVec2(std::round(col_x_ + t.x), std::round(y));
+    b = ImVec2(a.x + t.w, a.y + t.h);
+    return true;
+}
+
+bool Editor::image_at(ImVec2 screen, int& line, int& tile) const {
+    int mode = reader_ ? 1 : 0;
+    if (lay_[mode].empty()) return false;
+    int l = line_at_y(mode, screen.y - origin_y_);
+    if (l >= (int)lay_[mode].size() || !lay_[mode][l].img) return false;
+    for (int k = 0; k < (int)lay_[mode][l].tiles.size(); k++) {
+        ImVec2 a, b;
+        if (image_rect(l, k, a, b) && screen.x >= a.x && screen.x < b.x && screen.y >= a.y && screen.y < b.y) {
+            line = l;
+            tile = k;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string Editor::image_src(int line, int tile) const {
+    std::vector<ImageRef> refs;
+    if (line < 0 || line >= (int)lines_.size() || !md_image_row(lines_[line], &refs) || tile < 0 || tile >= (int)refs.size()) return {};
+    return refs[tile].src;
+}
+
+std::string Editor::image_markdown(int line, int tile) const {
+    std::vector<ImageRef> refs;
+    if (line < 0 || line >= (int)lines_.size() || !md_image_row(lines_[line], &refs) || tile < 0 || tile >= (int)refs.size()) return {};
+    return lines_[line].substr(refs[tile].begin, refs[tile].end - refs[tile].begin);
+}
+
+std::vector<std::pair<int, int>> Editor::image_list() const {
+    std::vector<std::pair<int, int>> out;
+    for (int l = 0; l < (int)lines_.size() && l < (int)lay_[0].size(); l++)
+        if (lay_[0][l].img)
+            for (int k = 0; k < (int)lay_[0][l].tiles.size(); k++) out.push_back({l, k});
+    return out;
+}
+
+int Editor::image_for_caret(int* tile) const {
+    if (reader_) return -1;
+    if (!has_selection()) {
+        if (!is_img(cur_.line)) return -1;
+        if (tile) *tile = img_tile(lay_[0][cur_.line], cur_.col);
+        return cur_.line;
+    }
+    TextPos a = std::min(cur_, anchor_), b = std::max(cur_, anchor_);
+    if (!is_img(a.line)) return -1;
+    const Line& L = lay_[0][a.line];
+    int len = (int)lines_[a.line].size();
+    // The whole line, with or without its break, when it's one image...
+    bool whole = a.col == 0 && ((b.line == a.line && b.col == len) || (b.line == a.line + 1 && b.col == 0));
+    if (whole && L.tiles.size() == 1) {
+        if (tile) *tile = 0;
+        return a.line;
+    }
+    // ...or exactly one image of a row.
+    if (b.line != a.line) return -1;
+    for (int k = 0; k < (int)L.tiles.size(); k++)
+        if (L.tiles[k].b0 == a.col && L.tiles[k].b1 == b.col) {
+            if (tile) *tile = k;
+            return a.line;
+        }
+    return -1;
+}
+
+// Takes one image out of its line; a row closes up around the gap, and a
+// line left with nothing is left empty. The caret stays where it was.
+void Editor::delete_tile(int line, int tile) {
+    std::vector<ImageRef> refs;
+    if (!md_image_row(lines_[line], &refs) || tile < 0 || tile >= (int)refs.size()) return;
+    std::vector<std::string> keep;
+    for (int k = 0; k < (int)refs.size(); k++)
+        if (k != tile) keep.push_back(lines_[line].substr(refs[k].begin, refs[k].end - refs[k].begin));
+    std::string out;
+    for (auto& t : keep) out += (out.empty() ? "" : " ") + t;
+    lines_[line] = out;
+    // Where the gap is: before what followed the removed one.
+    int col = 0;
+    if (tile >= (int)keep.size()) col = (int)out.size();
+    else for (int k = 0; k < tile; k++) col += (int)keep[k].size() + 1;
+    cur_ = anchor_ = {line, col};
+}
+
+void Editor::delete_image(int line, int tile) {
+    if (line < 0 || line >= (int)lines_.size()) return;
+    begin_edit(Edit::Other);
+    delete_tile(line, tile);
+    end_edit();
+}
+
+TextPos Editor::position_at(ImVec2 screen) const {
+    int line = 0, col = 0;
+    if (!hit(0, ImVec2(screen.x - col_x_, screen.y - origin_y_), line, col)) return cur_;
+    return {line, col};
 }
 
 // Highlight what an undo, redo or paste changed: the span of text that
@@ -398,6 +550,7 @@ void Editor::find_recompute(TextPos from) {
     bool exact = std::any_of(find_q_.begin(), find_q_.end(), [](char c) { return std::isupper((unsigned char)c); });
     std::string q = exact ? find_q_ : lower(find_q_);
     for (int l = 0; l < (int)lines_.size() && matches_.size() < 10000; l++) {
+        if (is_img(l)) continue;  // its text is hidden: nothing to find there
         std::string s = exact ? lines_[l] : lower(lines_[l]);
         for (size_t at = s.find(q); at != std::string::npos; at = s.find(q, at + q.size()))
             matches_.push_back({{l, (int)at}, {l, (int)(at + q.size())}});
@@ -1053,7 +1206,13 @@ void Editor::layout(int mode) {
 
             // Blank lines are paragraph spacing, not a full line.
             if (L.info.kind == LineKind::Blank) L.row_h = std::max(1.0f, std::round(L.row_h * P_.blank_line));
+            L.text_rows = L.rows;
+            L.text_row_h = L.row_h;
         }
+        // Images are sized every time: they can arrive (or go) on disk, and
+        // they're capped by the view's height.
+        if (L.info.kind == LineKind::Image) layout_image(L, s, i);
+        else L.img = false;
         L.pad = 0;
         if (L.info.kind == LineKind::Heading && i > 0)
             L.pad = std::round(P_.size * (L.info.level <= 2 ? 0.5f : 0.25f));
@@ -1064,6 +1223,151 @@ void Editor::layout(int mode) {
         if (L.info.kind == LineKind::Fence) in_code = !in_code;
     }
     total_h_[mode] = y;
+}
+
+// An image line that can be shown is one row: the image at its own pixel
+// size (a screenshot shows 1:1), no wider than the column and no taller
+// than most of the view, with a little air above and below. One that can't
+// (missing file, a web address) keeps its text rows.
+//
+// A single image is the size asked for (|300 is 300 CSS px, scaled with
+// zoom), or its own; several on a line are a row: justified, like a photo
+// grid, every image in a row the same height and the row exactly the
+// column's width, nothing cropped. Past four they wrap into more rows,
+// balanced. Sizes asked for are ignored in a row (the row decides).
+void Editor::layout_image(Line& L, const std::string& s, int index) {
+    L.img = false;
+    L.tiles.clear();
+    std::vector<ImageRef> refs;
+    if (P_.images && md_image_row(s, &refs)) {
+        std::vector<Line::Tile> tiles;
+        for (auto& r : refs) {
+            Line::Tile t;
+            if (!P_.images->size(r.src, t.iw, t.ih)) { tiles.clear(); break; }
+            t.src = r.src;
+            t.b0 = r.begin;
+            t.b1 = r.end;
+            tiles.push_back(t);
+        }
+        if (!tiles.empty()) {
+            const float col = P_.column;
+            const float max_h = std::max(P_.size * 6, (P_.max.y - P_.min.y) * 0.7f);
+            const float gap = std::round(P_.size * 0.4f);
+            L.img_m = std::round(P_.size * 0.5f);
+            float y = L.img_m;
+            int n = (int)tiles.size();
+            if (n == 1) {
+                Line::Tile& t = tiles[0];
+                const ImageRef& r = refs[0];
+                float w = (float)t.iw;
+                if (r.w > 0 && r.h > 0) w = std::min(r.w * P_.px, (float)t.iw * (r.h * P_.px) / t.ih);  // fit the box
+                else if (r.w > 0) w = r.w * P_.px;
+                if (index == resize_line_ && resize_line_ >= 0) w = resize_w_;  // being resized: follow the handle
+                w = std::min(w, col);
+                float h = w * t.ih / t.iw;
+                if (h > max_h) { h = max_h; w = h * t.iw / t.ih; }
+                t.x = 0;
+                t.y = y;
+                t.w = std::max(1.0f, std::round(w));
+                t.h = std::max(1.0f, std::round(h));
+                y += t.h;
+            } else {
+                int rows = (n + 3) / 4, base = n / rows, extra = n % rows;
+                int k = 0;
+                for (int r = 0; r < rows; r++) {
+                    int count = base + (r < extra ? 1 : 0);
+                    float sum_a = 0;
+                    for (int j = k; j < k + count; j++) sum_a += (float)tiles[j].iw / tiles[j].ih;
+                    float h = std::min((col - gap * (count - 1)) / sum_a, max_h);
+                    float x = 0;
+                    for (int j = k; j < k + count; j++) {
+                        Line::Tile& t = tiles[j];
+                        float w = h * t.iw / t.ih;
+                        t.x = std::round(x);
+                        t.y = y;
+                        // The last one takes up the rounding, so the row ends
+                        // exactly at the column's edge.
+                        float right = j == k + count - 1 && h < max_h ? col : std::round(x + w);
+                        t.w = std::max(1.0f, right - t.x);
+                        t.h = std::max(1.0f, std::round(h));
+                        x += w + gap;
+                    }
+                    y += std::round(h) + (r + 1 < rows ? gap : 0);
+                    k += count;
+                }
+            }
+            L.img = true;
+            L.tiles = std::move(tiles);
+            L.rows.assign(1, 0);
+            L.row_h = y + L.img_m;
+            L.hang = 0;
+            return;
+        }
+    }
+    L.rows = L.text_rows;
+    L.row_h = L.text_row_h;
+}
+
+// ---- the caret among images
+
+int Editor::img_stop(const Line& L, int col) {
+    int k = 0;
+    for (auto& t : L.tiles)
+        if (t.b1 <= col) k++;
+    return k;
+}
+
+int Editor::stop_col(const Line& L, int k, int len) {
+    int n = (int)L.tiles.size();
+    if (k <= 0) return 0;
+    if (k >= n) return len;
+    return L.tiles[k].b0;
+}
+
+// Where the caret stands at `col` in an image line: just clear of the edge
+// of the image it's beside, as tall as that image (relative to the line).
+void Editor::img_caret(const Line& L, int col, float& x, float& y, float& h) const {
+    int n = (int)L.tiles.size(), k = img_stop(L, col);
+    float gap = std::round(P_.size * 0.3f);
+    if (k >= n) {
+        const auto& t = L.tiles[n - 1];
+        x = t.x + t.w + gap;
+        y = t.y;
+        h = t.h;
+        return;
+    }
+    const auto& t = L.tiles[k];
+    bool same_row = k > 0 && L.tiles[k - 1].y == t.y;
+    x = same_row ? std::round((L.tiles[k - 1].x + L.tiles[k - 1].w + t.x) * 0.5f) : t.x - gap;
+    y = t.y;
+    h = t.h;
+}
+
+int Editor::img_tile_at(const Line& L, float x, float y) const {
+    for (int i = 0; i < (int)L.tiles.size(); i++) {
+        const auto& t = L.tiles[i];
+        if (x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h) return i;
+    }
+    return -1;
+}
+
+// The stop nearest a point: the row of images at that height (or nearest),
+// then before or after the image under x by which half.
+int Editor::img_col_at(const Line& L, int len, float x, float y) const {
+    int n = (int)L.tiles.size();
+    float best = 1e9f, row_y = L.tiles[0].y;
+    for (auto& t : L.tiles) {
+        float d = y < t.y ? t.y - y : (y > t.y + t.h ? y - (t.y + t.h) : 0.0f);
+        if (d < best) { best = d; row_y = t.y; }
+    }
+    int k = -1;
+    for (int i = 0; i < n; i++) {
+        const auto& t = L.tiles[i];
+        if (t.y != row_y) continue;
+        if (k < 0) k = i;                 // first in the row
+        if (x >= t.x + t.w * 0.5f) k = i + 1;
+    }
+    return stop_col(L, std::max(k, 0), len);
 }
 
 // Work out which lines survived the latest edit(s), which are new and which
@@ -1282,6 +1586,8 @@ int Editor::line_at_y(int mode, float y) const {
 
 int Editor::col_at_x(int mode, int line, int row, float x) const {
     const Line& L = lay_[mode][line];
+    // Images have places before, between and after them.
+    if (L.img) return img_col_at(L, (int)lines_[line].size(), x, L.tiles[0].y + 1);
     const std::string& s = text_of(mode, line);
     const std::vector<uint16_t>& st = style_of(mode, line);
     Metrics m = metrics(L.size);
@@ -1304,6 +1610,11 @@ int Editor::col_at_x(int mode, int line, int row, float x) const {
 
 ImVec2 Editor::pos_xy(TextPos p) const {
     const Line& L = lay_[0][p.line];
+    if (L.img) {
+        float x, y, h;
+        img_caret(L, p.col, x, y, h);
+        return ImVec2(x, L.dy + L.pad + y);  // the top of the image it's beside
+    }
     int r = row_of(L, p.col);
     Metrics m = metrics(L.size);
     float x = row_x(L, r) + measure(lines_[p.line], L.style, L.rows[r], p.col, m);
@@ -1317,6 +1628,10 @@ bool Editor::hit(int mode, ImVec2 d, int& line, int& col) const {
     line = line_at_y(mode, d.y);
     const Line& L = V[line];
     if (d.y >= L.dy + L.dh && line == (int)V.size() - 1) { col = (int)text_of(mode, line).size(); return true; }
+    if (L.img) {
+        col = img_col_at(L, (int)lines_[line].size(), d.x, d.y - L.dy - L.pad);
+        return true;
+    }
     int r = std::clamp((int)std::floor((d.y - L.dy - L.pad) / L.row_h), 0, (int)L.rows.size() - 1);
     col = col_at_x(mode, line, r, d.x);
     return true;
@@ -1337,6 +1652,10 @@ void Editor::move_to(TextPos p, bool select) {
 TextPos Editor::left_of(TextPos p, bool word) const {
     const std::string& s = lines_[p.line];
     if (p.col == 0) return p.line > 0 ? TextPos{p.line - 1, (int)lines_[p.line - 1].size()} : p;
+    if (is_img(p.line)) {  // over an image in one step
+        const Line& L = lay_[0][p.line];
+        return {p.line, stop_col(L, img_stop(L, p.col) - 1, (int)s.size())};
+    }
     if (!word) return {p.line, utf8::prev(s, p.col)};
     int i = p.col;
     while (i > 0 && char_class(s[i - 1]) == 0) i--;
@@ -1350,6 +1669,10 @@ TextPos Editor::left_of(TextPos p, bool word) const {
 TextPos Editor::right_of(TextPos p, bool word) const {
     const std::string& s = lines_[p.line];
     if (p.col >= (int)s.size()) return p.line + 1 < (int)lines_.size() ? TextPos{p.line + 1, 0} : p;
+    if (is_img(p.line)) {
+        const Line& L = lay_[0][p.line];
+        return {p.line, stop_col(L, img_stop(L, p.col) + 1, (int)s.size())};
+    }
     if (!word) return {p.line, utf8::next(s, p.col)};
     int i = p.col, n = (int)s.size();
     while (i < n && char_class(s[i]) == 0) i++;
@@ -1418,6 +1741,11 @@ void Editor::move_vertical(int n, bool select) {
 void Editor::select_word_at(TextPos p) {
     const std::string& s = lines_[p.line];
     int n = (int)s.size();
+    if (is_img(p.line)) {  // an image is one word
+        anchor_ = {p.line, 0};
+        cur_ = {p.line, n};
+        return;
+    }
     int a = p.col, b = p.col;
     int cls = a < n ? char_class(s[a]) : (a > 0 ? char_class(s[a - 1]) : 0);
     while (a > 0 && char_class(s[a - 1]) == cls) a--;
@@ -1434,7 +1762,7 @@ void Editor::type_char(unsigned c) {
     utf8::append(s, c);
     static const char* pairs[][2] = {{"*", "*"}, {"_", "_"}, {"`", "`"}, {"~", "~"}, {"=", "="},
                                      {"(", ")"}, {"[", "]"}, {"\"", "\""}};
-    if (has_selection() && cur_.line == anchor_.line) {
+    if (has_selection() && cur_.line == anchor_.line && !is_img(cur_.line)) {
         for (auto& p : pairs) {
             if (s != p[0]) continue;
             begin_edit(Edit::Other);
@@ -1451,8 +1779,109 @@ void Editor::type_char(unsigned c) {
         }
     }
     begin_edit(has_selection() ? Edit::Other : Edit::Type);
+    step_off_image();
     replace_selection(s);
     end_edit();
+}
+
+// Typing or pasting with the caret beside an image starts a line of its own
+// on that side, so the image's line stays just the image. Call inside an edit.
+void Editor::step_off_image() {
+    if (has_selection() || !is_img(cur_.line)) return;
+    int l = cur_.line;
+    const Line& L = lay_[0][l];
+    int k = img_stop(L, cur_.col), n = (int)L.tiles.size();
+    if (k == 0) {
+        lines_.insert(lines_.begin() + l, std::string());
+        cur_ = anchor_ = {l, 0};
+    } else if (k >= n) {
+        lines_.insert(lines_.begin() + l + 1, std::string());
+        cur_ = anchor_ = {l + 1, 0};
+    } else {
+        // Between images in a row: the row splits, the text between.
+        std::string s = lines_[l];
+        int at = L.tiles[k].b0;
+        lines_[l] = trim(s.substr(0, at));
+        lines_.insert(lines_.begin() + l + 1, {std::string(), trim(s.substr(at))});
+        cur_ = anchor_ = {l + 1, 0};
+    }
+}
+
+// Backspace around images (no selection). Returns false to leave it to the
+// normal backspace. Joining lines would pull text onto an image's line
+// (turning it back into text), so instead:
+//  - after an image: it's removed, its line left empty;
+//  - before an image: an empty line above is removed; text above is just
+//    stepped onto (the caret moves to its end);
+//  - at the start of a line below an image: an empty line is removed; a line
+//    with text steps onto the image (the next backspace removes it).
+bool Editor::image_backspace() {
+    int l = cur_.line;
+    if (is_img(l) && cur_.col > 0) {  // the image before the caret
+        begin_edit(Edit::Other);
+        delete_tile(l, img_stop(lay_[0][l], cur_.col) - 1);
+        end_edit();
+        return true;
+    }
+    if (cur_.col != 0 || l == 0) return false;
+    if (is_img(l)) {
+        if (trim(lines_[l - 1]).empty()) {
+            begin_edit(Edit::Other);
+            lines_.erase(lines_.begin() + l - 1);
+            cur_ = anchor_ = {l - 1, 0};
+            end_edit();
+        } else {
+            move_to({l - 1, (int)lines_[l - 1].size()}, false);
+        }
+        return true;
+    }
+    if (is_img(l - 1)) {
+        if (lines_[l].empty()) {
+            begin_edit(Edit::Other);
+            lines_.erase(lines_.begin() + l);
+            cur_ = anchor_ = {l - 1, (int)lines_[l - 1].size()};
+            end_edit();
+        } else {
+            move_to({l - 1, (int)lines_[l - 1].size()}, false);
+        }
+        return true;
+    }
+    return false;
+}
+
+// Delete around images, the mirror of image_backspace.
+bool Editor::image_delete() {
+    int l = cur_.line;
+    int n = (int)lines_.size();
+    if (is_img(l) && cur_.col < (int)lines_[l].size()) {  // the image after the caret
+        begin_edit(Edit::Other);
+        delete_tile(l, img_stop(lay_[0][l], cur_.col));
+        end_edit();
+        return true;
+    }
+    if (cur_.col != (int)lines_[l].size() || l + 1 >= n) return false;
+    if (is_img(l)) {
+        if (trim(lines_[l + 1]).empty()) {
+            begin_edit(Edit::Other);
+            lines_.erase(lines_.begin() + l + 1);
+            end_edit();
+        } else {
+            move_to({l + 1, 0}, false);
+        }
+        return true;
+    }
+    if (is_img(l + 1)) {
+        if (lines_[l].empty()) {
+            begin_edit(Edit::Other);
+            lines_.erase(lines_.begin() + l);
+            cur_ = anchor_ = {l, 0};
+            end_edit();
+        } else {
+            move_to({l + 1, 0}, false);
+        }
+        return true;
+    }
+    return false;
 }
 
 void Editor::newline() {
@@ -1507,6 +1936,7 @@ void Editor::backspace(bool word) {
         return;
     }
     if (cur_.line == 0 && cur_.col == 0) return;
+    if (image_backspace()) return;
     begin_edit(Edit::Delete);
     const std::string& s = lines_[cur_.line];
     TextPos from;
@@ -1541,6 +1971,7 @@ void Editor::del(bool word) {
         end_edit();
         return;
     }
+    if (image_delete()) return;
     TextPos to = right_of(cur_, word);
     if (to == cur_) return;
     begin_edit(Edit::Delete);
@@ -1568,6 +1999,12 @@ void Editor::handle_keys() {
     bool ctrl = io.KeyCtrl, shift = io.KeyShift, alt = io.KeyAlt;
     auto K = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
 
+    // ctrl+alt+left/right: the image the caret is on swaps places with its
+    // neighbour in the row (as alt+up/down moves lines).
+    if (ctrl && alt && !shift) {
+        if (K(ImGuiKey_LeftArrow)) nudge_image(-1);
+        if (K(ImGuiKey_RightArrow)) nudge_image(1);
+    }
     if (!alt) {
         if (K(ImGuiKey_LeftArrow)) {
             if (has_selection() && !shift) move_to(std::min(cur_, anchor_), false);
@@ -1621,10 +2058,442 @@ void Editor::handle_keys() {
     io.InputQueueCharacters.resize(0);
 }
 
+// The mouse around images (edit view): the resize handle, dragging an image
+// to join a row or a line of its own, double-clicking one in a row. Returns
+// true when it has taken the mouse, so text selection leaves it alone.
+bool Editor::handle_image_mouse(bool hovered, ImVec2 d) {
+    ImGuiIO& io = ImGui::GetIO();
+    auto& V = lay_[0];
+    float dpi = P_.dpi;
+
+    // Resizing: follow the pointer, snapping to quarters of the column and
+    // the image's own size; let go to keep it.
+    if (resize_line_ >= 0) {
+        if (resize_line_ >= (int)V.size() || !V[resize_line_].img || V[resize_line_].tiles.size() != 1) { resize_line_ = -1; return false; }
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const Line::Tile& t = V[resize_line_].tiles[0];
+            float w = std::clamp(d.x - t.x, 24 * dpi, P_.column);
+            struct Snap { float w; const char* name; };
+            float own = std::min((float)t.iw, P_.column);
+            Snap snaps[] = {{own, "own size"}, {P_.column, "full width"}, {P_.column * 0.75f, "3/4"}, {P_.column * 0.5f, "1/2"}, {P_.column * 0.25f, "1/4"}};
+            resize_snap_.clear();
+            for (auto& s : snaps)
+                if (std::fabs(w - s.w) < 10 * dpi) { w = s.w; resize_snap_ = s.name; break; }
+            resize_w_ = w;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            activity_ = ImGui::GetTime();
+        } else {
+            finish_resize();
+        }
+        return true;
+    }
+
+    // Dragging an image: where it would go.
+    if (press_img_line_ >= 0) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            bool was = img_drag_;
+            if (img_drag_) let_go_image(true);
+            press_img_line_ = press_img_tile_ = -1;
+            img_drag_ = false;
+            return was;
+        }
+        if (img_drag_ && ImGui::IsKeyPressed(ImGuiKey_Escape)) {  // changed your mind: it flies home
+            let_go_image(false);
+            img_drag_ = false;
+            press_img_line_ = -1;  // (stays that way until the button is let go)
+            return true;
+        }
+        if (!img_drag_ && std::fabs(d.x - press_at_.x) + std::fabs(d.y - press_at_.y) > 6 * dpi) {
+            img_drag_ = true;
+            anchor_ = cur_;  // not a text selection
+            drag_mode_ = 0;
+            // Picked up where it was grabbed, at full size.
+            ImVec2 ta, tb;
+            if (tile_rect(press_img_line_, press_img_tile_, ta, tb)) grab_off_ = ImVec2(press_at_.x - ta.x, press_at_.y - ta.y);
+            ghost_at_ = press_at_;
+            ghost_k_ = 1.0f;
+            mark_ = mark_old_ = DropMark{};
+            land_line_ = -1;
+        }
+        if (img_drag_) {
+            drag_at_ = d;
+            // Near the top or bottom of the view, the page scrolls to bring
+            // more into reach.
+            float my = io.MousePos.y, edge = 24 * dpi;
+            if (my < P_.min.y + edge) scroll_target_ -= (P_.min.y + edge - my) * io.DeltaTime * 14;
+            if (my > P_.max.y - edge) scroll_target_ += (my - P_.max.y + edge) * io.DeltaTime * 14;
+            drop_line_ = drop_stop_ = drop_own_ = -1;
+            if (!V.empty()) {
+                int l = std::clamp(line_at_y(0, d.y), 0, (int)V.size() - 1);
+                const Line& L = V[l];
+                float ly = d.y - L.dy - L.pad - (l < (int)yoff_.size() ? yoff_[l] : 0.0f);
+                // Anywhere across a row of images (blank space beside them
+                // too) joins it; only a strip along its top and bottom edge,
+                // and the space between lines, means a line of its own.
+                if (L.img) {
+                    for (int i = 0; i < (int)L.tiles.size(); i++) {
+                        const Line::Tile& t = L.tiles[i];
+                        float edge = std::min(t.h * 0.2f, 22 * dpi);
+                        if (ly < t.y + edge || ly > t.y + t.h - edge) continue;
+                        // This row: before the image whose middle is past x.
+                        int k = i;
+                        for (int j = i; j < (int)L.tiles.size() && L.tiles[j].y == t.y; j++)
+                            if (d.x >= L.tiles[j].x + L.tiles[j].w * 0.5f) k = j + 1;
+                        drop_line_ = l;
+                        drop_stop_ = k;
+                        break;
+                    }
+                }
+                if (drop_line_ < 0) drop_own_ = d.y < L.dy + L.dh * 0.5f ? l : l + 1;  // a line of its own
+            }
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            anim::active = true;
+            return true;
+        }
+        return false;
+    }
+    // After an Escape, the press is spent until the button comes up.
+    if (img_drag_ == false && press_img_line_ < 0 && land_line_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) return true;
+
+    // Hover: which image the pointer is over, and whether it's on a handle.
+    int was_line = hover_img_line_, was_tile = hover_tile_;
+    hover_img_line_ = -1;
+    hover_handle_ = false;
+    hover_tile_ = -1;
+    int hover_tile = -1;
+    if (!hovered || V.empty()) return false;
+    int l = std::clamp(line_at_y(0, d.y), 0, (int)V.size() - 1);
+    if (V[l].img) {
+        const Line& L = V[l];
+        hover_tile = img_tile_at(L, d.x, d.y - L.dy - L.pad - (l < (int)yoff_.size() ? yoff_[l] : 0.0f));
+        if (hover_tile >= 0) hover_img_line_ = l;
+    }
+    for (int cand : {hover_img_line_, is_img(cur_.line) ? cur_.line : -1}) {
+        ImVec2 a, b;
+        float slop = 6 * dpi;
+        if (cand >= 0 && resize_handle(cand, a, b) && d.x >= a.x - slop && d.x <= b.x + slop && d.y >= a.y - slop && d.y <= b.y + slop) {
+            hover_handle_ = true;
+            hover_img_line_ = cand;
+            break;
+        }
+    }
+    if (hover_handle_) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    else if (hover_tile >= 0) hover_tile_ = hover_tile;  // (the caller shows a hand: it can be picked up)
+    if (hover_img_line_ != was_line || hover_tile_ != was_tile) hover_glow_ = 0.0f;
+
+    if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left) || io.KeyShift) return hover_handle_;
+    int clicks = io.MouseClickedCount[0];
+    if (hover_handle_) {
+        if (clicks >= 2) {
+            // Double-click the handle: back to its own size.
+            const Line::Tile& t = V[hover_img_line_].tiles[0];
+            std::string token = lines_[hover_img_line_].substr(t.b0, t.b1 - t.b0);
+            std::string sized = md_image_resized(token, 0);
+            if (sized != token) {
+                begin_edit(Edit::Other);
+                lines_[hover_img_line_].replace(t.b0, t.b1 - t.b0, sized);
+                cur_ = anchor_ = {hover_img_line_, (int)lines_[hover_img_line_].size()};
+                end_edit(false);
+            }
+        } else {
+            resize_line_ = hover_img_line_;
+            resize_w_ = resize_from_ = V[resize_line_].tiles[0].w;
+            resize_snap_.clear();
+            cur_ = anchor_ = {resize_line_, (int)lines_[resize_line_].size()};
+        }
+        drag_mode_ = 0;
+        return true;
+    }
+    if (hover_img_line_ >= 0 && hover_tile >= 0) {
+        // A double-click opens the viewer (the app sees to it); nothing is
+        // selected, so closing it leaves things as they were.
+        if (clicks >= 2) {
+            drag_mode_ = 0;
+            return true;
+        }
+        if (clicks == 1) {
+            press_img_line_ = hover_img_line_;
+            press_img_tile_ = hover_tile;
+            press_at_ = d;
+        }
+    }
+    return false;  // the click still places the caret as usual
+}
+
+// Let go of the resize handle: the width goes into the image's alt text
+// ("|300", in CSS px); its own size means no size at all.
+void Editor::finish_resize() {
+    int l = resize_line_;
+    resize_line_ = -1;
+    if (l < 0 || l >= (int)lay_[0].size() || !lay_[0][l].img || lay_[0][l].tiles.size() != 1) return;
+    if (std::fabs(resize_w_ - resize_from_) < 1.0f) return;  // a click, not a resize
+    const Line::Tile& t = lay_[0][l].tiles[0];
+    int w = resize_snap_ == "own size" ? 0 : (int)std::lround(resize_w_ / P_.px);
+    std::string token = lines_[l].substr(t.b0, t.b1 - t.b0);
+    std::string sized = md_image_resized(token, w);
+    if (sized == token) return;
+    begin_edit(Edit::Other);
+    lines_[l].replace(t.b0, t.b1 - t.b0, sized);
+    cur_ = anchor_ = {l, (int)lines_[l].size()};
+    end_edit(false);
+}
+
+// Swap the image the caret is on with the one beside it in its row. It
+// glides to its new place (the landing flight); the caret stays on it.
+bool Editor::nudge_image(int dir) {
+    int tile = 0;
+    int line = image_for_caret(&tile);
+    if (line < 0) return false;
+    std::vector<ImageRef> refs;
+    if (!md_image_row(lines_[line], &refs)) return false;
+    int other = tile + dir;
+    if (other < 0 || other >= (int)refs.size()) return false;  // at the end of the row
+    std::vector<std::string> tokens;
+    for (auto& r : refs) tokens.push_back(lines_[line].substr(r.begin, r.end - r.begin));
+    ImVec2 a, b;
+    bool fly = tile_rect(line, tile, a, b);
+    std::swap(tokens[tile], tokens[other]);
+    begin_edit(Edit::Other);
+    std::string s;
+    int col = 0;
+    for (int k = 0; k < (int)tokens.size(); k++) {
+        s += (k ? " " : "") + tokens[k];
+        if (k == other) col = (int)s.size();  // just after it: the caret is on it
+    }
+    lines_[line] = s;
+    cur_ = anchor_ = {line, col};
+    end_edit();
+    if (fly) {
+        land_line_ = line;
+        land_tile_ = other;
+        land_drag_ = false;
+        land_a_ = a;
+        land_b_ = b;
+    }
+    return true;
+}
+
+bool Editor::tile_rect(int line, int tile, ImVec2& a, ImVec2& b) const {
+    if (line < 0 || line >= (int)lay_[0].size() || !lay_[0][line].img) return false;
+    const Line& L = lay_[0][line];
+    if (tile < 0 || tile >= (int)L.tiles.size()) return false;
+    const Line::Tile& t = L.tiles[tile];
+    a = ImVec2(t.x, L.dy + L.pad + t.y + (line < (int)yoff_.size() ? yoff_[line] : 0.0f));
+    b = ImVec2(a.x + t.w, a.y + t.h);
+    return true;
+}
+
+// Would dropping at the current target change anything? (Beside itself,
+// or back on the line it's alone on, it wouldn't.)
+bool Editor::drop_changes() const {
+    int from = press_img_line_, tile = press_img_tile_;
+    if (from < 0 || from >= (int)lay_[0].size()) return false;
+    if (drop_line_ >= 0) return !(drop_line_ == from && (drop_stop_ == tile || drop_stop_ == tile + 1));
+    if (drop_own_ < 0) return false;
+    return !(lay_[0][from].tiles.size() == 1 && (drop_own_ == from || drop_own_ == from + 1));
+}
+
+// End a drag. Dropped somewhere new, it moves there; otherwise (or on
+// Escape) it goes back. Either way it flies from where it was let go.
+void Editor::let_go_image(bool drop) {
+    // Where the carried copy is now: that's where the flight starts.
+    const Line& S = lay_[0][press_img_line_];
+    const Line::Tile& t = S.tiles[press_img_tile_];
+    ImVec2 a(ghost_at_.x - grab_off_.x * ghost_k_, ghost_at_.y - grab_off_.y * ghost_k_);
+    land_a_ = a;
+    land_b_ = ImVec2(a.x + t.w * ghost_k_, a.y + t.h * ghost_k_);
+    land_line_ = press_img_line_;
+    land_tile_ = press_img_tile_;
+    land_drag_ = true;
+    if (drop && drop_changes()) move_image();  // sets land_* to where it went
+    mark_ = mark_old_ = DropMark{};
+}
+
+// Drop a dragged image: into a row beside another image, or onto a line
+// of its own. Rows are rebuilt from their images, one space apart.
+void Editor::move_image() {
+    int from = press_img_line_, tile = press_img_tile_;
+    auto tokens = [&](int l) {
+        std::vector<ImageRef> refs;
+        std::vector<std::string> out;
+        if (l >= 0 && l < (int)lines_.size() && md_image_row(lines_[l], &refs))
+            for (auto& r : refs) out.push_back(lines_[l].substr(r.begin, r.end - r.begin));
+        return out;
+    };
+    auto join = [](const std::vector<std::string>& t) {
+        std::string s;
+        for (auto& x : t) s += (s.empty() ? "" : " ") + x;
+        return s;
+    };
+    std::vector<std::string> src = tokens(from);
+    if (tile < 0 || tile >= (int)src.size()) return;
+    std::string moving = src[tile];
+
+    if (drop_line_ >= 0) {
+        if (drop_line_ == from && (drop_stop_ == tile || drop_stop_ == tile + 1)) return;  // where it already is
+        begin_edit(Edit::Other);
+        if (drop_line_ == from) {
+            src.erase(src.begin() + tile);
+            int k = drop_stop_ > tile ? drop_stop_ - 1 : drop_stop_;
+            src.insert(src.begin() + k, moving);
+            lines_[from] = join(src);
+            int col = 0;
+            for (int j = 0; j <= k; j++) col += (int)src[j].size() + (j ? 1 : 0);
+            cur_ = anchor_ = {from, col};
+            land_line_ = from;
+            land_tile_ = k;
+        } else {
+            std::vector<std::string> dst = tokens(drop_line_);
+            dst.insert(dst.begin() + std::clamp(drop_stop_, 0, (int)dst.size()), moving);
+            lines_[drop_line_] = join(dst);
+            int to = drop_line_;
+            src.erase(src.begin() + tile);
+            if (src.empty()) {
+                lines_.erase(lines_.begin() + from);
+                if (to > from) to--;
+            } else {
+                lines_[from] = join(src);
+            }
+            int at = std::clamp(drop_stop_, 0, (int)dst.size() - 1);
+            int col = 0;
+            for (int j = 0; j <= at; j++) col += (int)dst[j].size() + (j ? 1 : 0);
+            cur_ = anchor_ = {to, col};
+            land_line_ = to;
+            land_tile_ = at;
+        }
+        end_edit();
+        return;
+    }
+    if (drop_own_ < 0) return;
+    int before = drop_own_;
+    // Already alone on its line, dropped right where it is: nothing to do.
+    if (src.size() == 1 && (before == from || before == from + 1)) return;
+    begin_edit(Edit::Other);
+    src.erase(src.begin() + tile);
+    if (src.empty()) {
+        lines_.erase(lines_.begin() + from);
+        if (before > from) before--;
+    } else {
+        lines_[from] = join(src);
+    }
+    before = std::clamp(before, 0, (int)lines_.size());
+    lines_.insert(lines_.begin() + before, moving);
+    cur_ = anchor_ = {before, (int)moving.size()};
+    land_line_ = before;
+    land_tile_ = 0;
+    end_edit();
+}
+
+// Moving images, drawn over the page. While carried: the drop marker (an
+// upright bar beside an image in a row, a line across the column between
+// lines) easing from place to place, and the image itself, lifted, under
+// the pointer. After a drop or a cancel: the image flying to its place.
+void Editor::draw_image_drag(ImDrawList* dl) {
+    float dt = anim::step(ImGui::GetIO().DeltaTime);
+    auto ease = [&](float rate) { return anim::enabled ? 1.0f - std::exp(-rate * anim::speed * dt) : 1.0f; };
+    auto toward = [](ImVec2& v, ImVec2 to, float k) { v.x += (to.x - v.x) * k; v.y += (to.y - v.y) * k; };
+    float round = std::round(3 * P_.dpi);
+    ImVec2 o(col_x_, origin_y_);  // doc -> screen
+    auto screen = [&](ImVec2 p) { return ImVec2(std::round(p.x + o.x), std::round(p.y + o.y)); };
+    auto picture = [&](const Line::Tile& t, ImVec2 a, ImVec2 b, float alpha) {
+        float shown = 0;
+        ImTextureID tex = P_.images ? P_.images->texture(t.src, (int)t.w, shown) : ImTextureID{};
+        if (tex) dl->AddImageRounded(ImTextureRef(tex), a, b, ImVec2(0, 0), ImVec2(1, 1), fade(col_alpha(IM_COL32_WHITE, alpha)), round);
+        else dl->AddRectFilled(a, b, fade(col_alpha(T.code_bg, alpha)), round);
+    };
+    // A soft shadow: a few widening, fainter rounds of the background's dark.
+    auto shadow = [&](ImVec2 a, ImVec2 b, float alpha) {
+        ImU32 dark = T.dark ? IM_COL32(0, 0, 0, 255) : IM_COL32(40, 40, 40, 255);
+        for (int i = 3; i >= 1; i--) {
+            float g = i * 3 * P_.dpi;
+            dl->AddRectFilled(ImVec2(a.x - g, a.y - g + 2 * i * P_.dpi), ImVec2(b.x + g, b.y + g + 2 * i * P_.dpi),
+                              fade(col_alpha(dark, alpha * 0.10f)), round + g);
+        }
+    };
+
+    // Landing.
+    if (land_line_ >= 0 && !img_drag_) {
+        ImVec2 ta, tb;
+        if (!tile_rect(land_line_, land_tile_, ta, tb)) {
+            land_line_ = -1;
+        } else {
+            float k = ease(24.0f);
+            toward(land_a_, ta, k);
+            toward(land_b_, tb, k);
+            bool there = std::fabs(land_a_.x - ta.x) + std::fabs(land_a_.y - ta.y) + std::fabs(land_b_.x - tb.x) + std::fabs(land_b_.y - tb.y) < 1.0f;
+            const Line::Tile& t = lay_[0][land_line_].tiles[land_tile_];
+            ImVec2 a = screen(land_a_), b = screen(land_b_);
+            float lift = std::clamp((std::fabs(land_a_.x - ta.x) + std::fabs(land_a_.y - ta.y)) / (20 * P_.dpi), 0.0f, 1.0f);
+            if (lift > 0) shadow(a, b, lift);
+            picture(t, a, b, 1.0f);
+            if (there) land_line_ = -1;
+            else anim::active = true;
+        }
+    }
+
+    if (!img_drag_ || press_img_line_ < 0 || press_img_line_ >= (int)lay_[0].size()) return;
+    const Line& S = lay_[0][press_img_line_];
+    if (press_img_tile_ < 0 || press_img_tile_ >= (int)S.tiles.size()) return;
+    const Line::Tile& t = S.tiles[press_img_tile_];
+
+    // The marker: where it would land (not there at all where dropping would
+    // change nothing). Within a kind it glides; across kinds it crossfades.
+    float bar = std::max(2.0f, std::round(2 * P_.dpi));
+    int kind = 0;
+    ImVec2 ma, mb;
+    if (drop_changes()) {
+        if (drop_line_ >= 0 && drop_line_ < (int)lay_[0].size() && lay_[0][drop_line_].img) {
+            const Line& L = lay_[0][drop_line_];
+            float x, y, h;
+            img_caret(L, stop_col(L, drop_stop_, (int)lines_[drop_line_].size()), x, y, h);
+            float top = L.dy + L.pad + y + yoff_[drop_line_];
+            ma = ImVec2(x - bar * 0.5f, top);
+            mb = ImVec2(x + bar * 0.5f, top + h);
+            kind = 1;
+        } else if (drop_own_ >= 0) {
+            float y = drop_own_ < (int)lay_[0].size() ? lay_[0][drop_own_].dy : total_h_[0];
+            ma = ImVec2(0, y - bar * 0.5f);
+            mb = ImVec2(P_.column, y + bar * 0.5f);
+            kind = 2;
+        }
+    }
+    if (kind != mark_.kind) {
+        // A different kind (or none): the current one fades out where it
+        // stands, and a new one starts where it belongs.
+        if (mark_.kind && mark_.alpha > mark_old_.alpha) mark_old_ = mark_;
+        mark_ = DropMark{ma, mb, 0.0f, kind};
+    }
+    if (mark_.kind) {
+        float k = ease(30.0f);
+        toward(mark_.a, ma, k);
+        toward(mark_.b, mb, k);
+    }
+    float fk = ease(28.0f);
+    mark_.alpha += ((mark_.kind ? 1.0f : 0.0f) - mark_.alpha) * fk;
+    mark_old_.alpha += (0.0f - mark_old_.alpha) * fk;
+    for (const DropMark* m : {&mark_old_, &mark_})
+        if (m->kind && m->alpha > 0.01f) dl->AddRectFilled(screen(m->a), screen(m->b), fade(col_alpha(T.accent, m->alpha)), bar);
+
+    // The image, carried: held where it was grabbed, easing after the
+    // pointer, shrinking from full size to a size you can see past.
+    float carry = std::min(1.0f, std::round(150 * P_.dpi) / std::max(t.w, t.h));
+    ghost_k_ += (carry - ghost_k_) * ease(18.0f);
+    toward(ghost_at_, drag_at_, ease(40.0f));
+    ImVec2 a(ghost_at_.x - grab_off_.x * ghost_k_, ghost_at_.y - grab_off_.y * ghost_k_);
+    ImVec2 b(a.x + t.w * ghost_k_, a.y + t.h * ghost_k_);
+    ImVec2 sa = screen(a), sb = screen(b);
+    shadow(sa, sb, 1.0f);
+    picture(t, sa, sb, 0.92f);
+    float th = std::max(1.0f, std::round(P_.dpi));
+    dl->AddRect(ImVec2(sa.x - th, sa.y - th), ImVec2(sb.x + th, sb.y + th), fade(col_alpha(T.accent, 0.7f)), round + th, th);
+    anim::active = true;
+}
+
 void Editor::handle_mouse(bool hovered, bool active, ImVec2 d) {
     ImGuiIO& io = ImGui::GetIO();
     int mode = reader_ ? 1 : 0;
     int line, col;
+    if (!reader_ && handle_image_mouse(hovered, d)) return;
 
     // Links: ctrl+click in the editor, plain click in the reader.
     bool link_mod = reader_ || io.KeyCtrl;
@@ -1652,7 +2521,7 @@ void Editor::handle_mouse(bool hovered, bool active, ImVec2 d) {
     }
     if (hovered) {
         if ((hover_link && link_mod) || on_box) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        else if (!reader_) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+        else if (!reader_) ImGui::SetMouseCursor(hover_tile_ >= 0 ? ImGuiMouseCursor_Hand : ImGuiMouseCursor_TextInput);
     }
 
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1901,6 +2770,7 @@ void Editor::draw(const EditorParams& p) {
             bool forward = anchor_ < cur_;
             for (int l = a.line; l <= b.line; l++) {
                 const Line& L = V[l];
+                if (L.img) continue;  // tinted over the image instead (draw_image)
                 float ly = origin_y_ + L.dy + L.pad + yoff_[l];
                 if (ly > p.max.y || ly + L.h < p.min.y) continue;
                 Metrics m = metrics(L.size);
@@ -1990,6 +2860,8 @@ void Editor::draw(const EditorParams& p) {
         }
     }
 
+    if (!reader_) draw_image_drag(dl);
+
     // Caret.
     if (!reader_ && !lay_[0].empty()) {
         ImVec2 c = pos_xy(cur_);
@@ -1999,11 +2871,17 @@ void Editor::draw(const EditorParams& p) {
         // character will appear, so starting to type never moves it.
         float full_row = L.info.kind == LineKind::Blank ? std::round(P_.size / kEm * P_.line_height) : L.row_h;
         float tx = c.x, ty = c.y + (full_row - ch) * 0.5f + yoff_[cur_.line];
+        // Beside an image the caret stands as tall as the image.
+        if (L.img) {
+            float ix, iy;
+            img_caret(L, cur_.col, ix, iy, ch);
+            ty = c.y + yoff_[cur_.line];
+        }
         // Block covers the character after the caret (a space's width at the
         // end of a line); bars sit in the gap before it.
         const std::string& line = lines_[cur_.line];
         Metrics m = metrics(L.size);
-        bool block = p.caret == EditorParams::Caret::Block;
+        bool block = p.caret == EditorParams::Caret::Block && !L.img;
         float tw = caret_width(p.caret, p.size, p.dpi);
         if (block) {
             if (cur_.col < (int)line.size()) {
@@ -2024,9 +2902,13 @@ void Editor::draw(const EditorParams& p) {
         }
         caret_.set(cmin, cmax, p.caret_trail, 50.0f);
         caret_.update(dt);
-        bool on = !p.blink || !p.keyboard || std::fmod(now - activity_, 1.1) < 0.6;
+        // Carrying an image, the caret steps back so the drop marker is the
+        // only accent mark saying "here".
+        bool carrying = img_drag_ || (land_line_ >= 0 && land_drag_);
+        caret_shown_ = anim::approach(caret_shown_, carrying ? 0.0f : 1.0f, 24.0f, dt, 0.01f);
+        bool on = (!p.blink || !p.keyboard || std::fmod(now - activity_, 1.1) < 0.6) && caret_shown_ > 0.0f;
         if (on) {
-            ImU32 col = p.keyboard ? T.accent : col_alpha(T.accent, 0.4f);
+            ImU32 col = col_alpha(p.keyboard ? T.accent : col_alpha(T.accent, 0.4f), caret_shown_);
             caret_.draw(dl, ImVec2(col_x_, origin_y_), fade(col), block ? std::round(p.dpi) : 0.0f);
 
             // Knock the covered character out of the block once it has
@@ -2078,6 +2960,7 @@ void Editor::draw_span(ImDrawList* dl, TextPos a, TextPos b, ImU32 col) {
     auto& V = lay_[0];
     for (int l = std::max(0, a.line); l <= b.line && l < (int)V.size(); l++) {
         const Line& L = V[l];
+        if (L.img) continue;
         float ly = origin_y_ + L.dy + L.pad + yoff_[l];
         if (ly > P_.max.y || ly + L.dh < P_.min.y) continue;
         Metrics m = metrics(L.size);
@@ -2164,6 +3047,12 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
         const std::string& src = lines_[i];
         const std::string& rt = L1.rtext;
         Metrics m0 = metrics(L0.size), m1 = metrics(L1.size);
+
+        // Images are the same in both views: they just glide with their line.
+        if (L0.img && L1.img) {
+            draw_image(dl, L0, x0, lerp(ye, yr, wg), base, -1);
+            continue;
+        }
 
         // Code blocks reshape between the two heights (fences are thinner
         // in the reader), staying solid throughout.
@@ -2273,6 +3162,109 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
     return true;
 }
 
+// An image line's pictures, its row's top at y. While one loads, a quiet
+// placeholder holds its exact space; the picture fades in over it. `index`
+// is its line in the editor (-1 in the reader, the morph or for a ghost):
+// the image the caret is on is outlined, images inside a selection take its
+// tint, and a lone image has a handle on its right edge to resize it by.
+void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float alpha, int index) {
+    if (alpha <= 0.0f) return;
+    float round = std::round(3 * P_.dpi);
+    bool editing = index >= 0 && !reader_;
+    TextPos s0 = std::min(cur_, anchor_), s1 = std::max(cur_, anchor_);
+    int on = editing && !has_selection() && cur_.line == index ? img_tile(L, cur_.col) : -1;
+    for (int k = 0; k < (int)L.tiles.size(); k++) {
+        const Line::Tile& t = L.tiles[k];
+        ImVec2 a(std::round(x + t.x), std::round(y + t.y));
+        ImVec2 b(a.x + t.w, a.y + t.h);
+        if (b.y < P_.min.y || a.y > P_.max.y) continue;
+        if (editing && land_line_ == index && land_tile_ == k) continue;  // in flight (draw_image_drag)
+        // Carried elsewhere: what's left behind is a faint trace of it.
+        float tile_alpha = editing && img_drag_ && press_img_line_ == index && press_img_tile_ == k ? alpha * 0.22f : alpha;
+        float shown = 0.0f;
+        ImTextureID tex = P_.images ? P_.images->texture(t.src, (int)std::ceil(t.w), shown) : ImTextureID{};
+        if (!tex) shown = 0.0f;
+        if (shown < 1.0f) {
+            dl->AddRectFilled(a, b, col_alpha(T.code_bg, tile_alpha * (1.0f - shown)), round);
+            anim::active = true;  // waiting for it, or fading it in
+            std::string label = P_.images && !tex ? P_.images->label(t.src) : std::string();
+            if (!label.empty()) {
+                float ls = std::round(P_.size * 0.86f);
+                ImVec2 sz = P_.mono->CalcTextSizeA(ls, FLT_MAX, 0, label.c_str());
+                if (sz.x < t.w && ls < t.h)
+                    dl->AddText(P_.mono, ls, ImVec2(std::round((a.x + b.x - sz.x) * 0.5f), std::round((a.y + b.y - ls) * 0.5f)),
+                                col_alpha(T.dim, tile_alpha), label.c_str());
+            }
+        }
+        if (tex) dl->AddImageRounded(ImTextureRef(tex), a, b, ImVec2(0, 0), ImVec2(1, 1), col_alpha(IM_COL32_WHITE, tile_alpha * shown), round);
+        if (!editing || tile_alpha < alpha) continue;
+        // Under the pointer (and free to pick up): a faint lift.
+        if (index == hover_img_line_ && k == hover_tile_ && !img_drag_ && resize_line_ < 0) {
+            hover_glow_ = anim::approach(hover_glow_, 1.0f, 20.0f, ImGui::GetIO().DeltaTime, 0.01f);
+            dl->AddRectFilled(a, b, col_alpha(T.bright, alpha * 0.07f * hover_glow_), round);
+        }
+        bool selected = has_selection() && !(TextPos{index, t.b0} < s0) && !(s1 < TextPos{index, t.b1});
+        if (selected) {
+            dl->AddRectFilled(a, b, col_alpha(T.selection, alpha), round);
+        } else if (k == on && caret_shown_ > 0.0f) {  // (steps back with the caret while an image is carried)
+            float th = std::max(1.0f, std::round(1.5f * P_.dpi));
+            dl->AddRect(ImVec2(a.x - th, a.y - th), ImVec2(b.x + th, b.y + th), col_alpha(T.accent, alpha * 0.7f * caret_shown_), round + th, th);
+        }
+    }
+
+    // The resize handle: a lone image, with the caret on it, the pointer
+    // over it, or being resized.
+    ImVec2 ha, hb;
+    if (!editing || !(resize_line_ == index || hover_img_line_ == index || on >= 0) || !resize_handle(index, ha, hb)) return;
+    ha = ImVec2(std::round(ha.x + col_x_), std::round(ha.y + origin_y_));  // doc -> screen
+    hb = ImVec2(std::round(hb.x + col_x_), std::round(hb.y + origin_y_));
+    bool hot = resize_line_ == index || (hover_handle_ && hover_img_line_ == index);
+    float pad = std::max(1.0f, std::round(P_.dpi));
+    // While resizing, where it snaps: faint ticks at a quarter, half, three
+    // quarters and all of the column, and at its own size; the one it's on
+    // lit.
+    if (resize_line_ == index) {
+        const Line::Tile& t = L.tiles[0];
+        float left = std::round(x + t.x), top = std::round(y + t.y), bottom = std::round(y + t.y + t.h);
+        float own = std::min((float)t.iw, P_.column);
+        struct Guide { float w; const char* name; };
+        Guide guides[] = {{P_.column * 0.25f, "1/4"}, {P_.column * 0.5f, "1/2"}, {P_.column * 0.75f, "3/4"}, {P_.column, "full width"}, {own, "own size"}};
+        float lw = std::max(1.0f, std::round(P_.dpi)), ext = std::round(6 * P_.dpi);
+        for (auto& g : guides) {
+            bool lit = resize_snap_ == g.name;
+            float gx = std::round(left + g.w);
+            dl->AddRectFilled(ImVec2(gx, top - ext), ImVec2(gx + lw, bottom + ext),
+                              col_alpha(lit ? T.accent : T.faint, alpha * (lit ? 0.9f : 0.7f)));
+        }
+    }
+    dl->AddRectFilled(ImVec2(ha.x - pad, ha.y - pad), ImVec2(hb.x + pad, hb.y + pad), col_alpha(T.bg, alpha * 0.9f), (hb.x - ha.x) * 0.5f + pad);
+    dl->AddRectFilled(ha, hb, col_alpha(hot ? T.accent : T.bright, alpha * (hot ? 1.0f : 0.8f)), (hb.x - ha.x) * 0.5f);
+    // While resizing: the width, and what it snapped to.
+    if (resize_line_ == index) {
+        const Line::Tile& t = L.tiles[0];
+        std::string label = !resize_snap_.empty() ? resize_snap_ : std::to_string((int)std::lround(t.w / P_.px)) + "px";
+        float ls = std::round(P_.size * 0.8f);
+        ImVec2 sz = P_.mono->CalcTextSizeA(ls, FLT_MAX, 0, label.c_str());
+        float lx = std::round(hb.x + 8 * P_.dpi), ly = std::round((ha.y + hb.y - ls) * 0.5f);
+        if (lx + sz.x > P_.max.x - 4 * P_.dpi) lx = std::round(ha.x - 8 * P_.dpi - sz.x);
+        dl->AddText(P_.mono, ls, ImVec2(lx, ly), col_alpha(T.text, alpha), label.c_str());
+    }
+}
+
+// Where a lone image's resize handle is (doc coords of the edit view): a
+// pill straddling its right edge, halfway down.
+bool Editor::resize_handle(int line, ImVec2& a, ImVec2& b) const {
+    if (line < 0 || line >= (int)lay_[0].size() || !lay_[0][line].img || lay_[0][line].tiles.size() != 1) return false;
+    const Line& L = lay_[0][line];
+    const Line::Tile& t = L.tiles[0];
+    float w = std::max(3.0f, std::round(4 * P_.dpi)), h = std::min(std::round(36 * P_.dpi), std::round(t.h * 0.4f));
+    if (h < 8 * P_.dpi) return false;
+    float cx = t.x + t.w, cy = L.dy + L.pad + t.y + t.h * 0.5f + (line < (int)yoff_.size() ? yoff_[line] : 0.0f);
+    a = ImVec2(cx - w * 0.5f, cy - h * 0.5f);
+    b = ImVec2(cx + w * 0.5f, cy + h * 0.5f);
+    return true;
+}
+
 void Editor::draw_line(ImDrawList* dl, int mode, int i, float x0, float y0) {
     const Line& L = lay_[mode][i];
     float top = y0 + L.dy + yoff_[i];
@@ -2330,8 +3322,14 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         snprintf(buf, sizeof buf, "%d", i + 1);
         ImVec2 sz = P_.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
         float ty = y + (L.row_h - L.size) * 0.5f + (L.size - ns) * 0.78f;
+        if (L.img) ty = y + L.img_m;  // level with the image's top
         ImU32 col = i == cur_.line ? T.accent : T.faint;  // where you are
         dl->AddText(P_.mono, ns, ImVec2(std::round(x0 - P_.size * 1.3f - sz.x), std::round(ty)), fade(col), buf);
+    }
+
+    if (L.img) {
+        draw_image(dl, L, x0, y, P_.alpha, mode == 0 ? i : -1);
+        return;
     }
 
     for (int r = 0; r < (int)L.rows.size(); r++) {
@@ -2351,6 +3349,13 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
             if (k.d.line == i && (!mk || k.a > mk->a)) mk = &k;
         float pa = mk ? mk->a : 0.0f;
         auto hint = hints_.find(i);
+        // An image line whose image can't be shown says so, quietly.
+        std::string hint_text = hint != hints_.end() ? hint->second : std::string();
+        if (hint_text.empty() && L.info.kind == LineKind::Image && !L.img) {
+            std::string src;
+            md_image_line(lines_[i], nullptr, &src);
+            hint_text = src.find("://") != std::string::npos ? "web images aren't shown" : "image not found";
+        }
 
         int last = L.rows.back();
         float ex = x0 + row_x(L, (int)L.rows.size() - 1) + measure(s, st, last, (int)s.size(), m) + P_.size * 1.2f;
@@ -2363,8 +3368,8 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
             dl->PopClipRect();
         };
 
-        if (hint != hints_.end() && pa < 1.0f)
-            note(hint->second, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), 1.0f - pa));
+        if (!hint_text.empty() && pa < 1.0f)
+            note(hint_text, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), 1.0f - pa));
         if (pa > 0.0f) {
             ImU32 err = col_alpha(fade(T.error), pa);
             // The underline, row by row if the range wraps. No range: the

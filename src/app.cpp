@@ -56,6 +56,7 @@ fs::file_time_type mtime_of(const fs::path& p) {
 
 bool App::init(GLFWwindow* window, const AppOptions& opts) {
     win_ = window;
+    images_.start();
     cfg_path_ = opts.config_path.empty() ? config_dir() / "delta.ini" : opts.config_path;
     state_path_ = cfg_path_.parent_path() / "state.ini";
     pending_run_ = opts.run;
@@ -152,6 +153,7 @@ void App::load_settings() {
     fs::create_directories(root, ec);
     if (ec) issues.push_back(issue_at(cfg_, "general.notes_dir", true, "can't create this folder: " + ec.message()));
     store_.set_root(root);
+    image_store_.set_root(root);
     if (!Store::check_name(cfg_.default_space, "space").empty()) cfg_.default_space = "default";
     if (!Store::check_name(cfg_.daily_space, "space").empty()) cfg_.daily_space = "daily";
 
@@ -414,9 +416,16 @@ void App::register_commands() {
     // Editing
     add("edit.undo", "Undo", "ctrl+z", ed(&Editor::undo), true);
     add("edit.redo", "Redo", "ctrl+y ctrl+shift+z", ed(&Editor::redo), true);
-    add("edit.cut", "Cut", "ctrl+x", ed(&Editor::cut));
-    add("edit.copy", "Copy", "ctrl+c", [this] { if (note_) editor_.copy(); });
-    add("edit.paste", "Paste", "ctrl+v", ed(&Editor::paste), true);
+    add("edit.cut", "Cut", "ctrl+x", [this] { if (editing()) copy_out(true); });
+    add("edit.copy", "Copy", "ctrl+c", [this] { if (note_) copy_out(false); });
+    add("edit.paste", "Paste", "ctrl+v", [this] { paste(false); }, true);
+    add("edit.paste_plain", "Paste as plain text", "ctrl+shift+v", [this] { paste(true); }, true);
+    add("image.view", "View image", "", [this] {
+        int tile = 0;
+        int line = editor_.image_for_caret(&tile);
+        if (line >= 0) open_viewer(line, tile);
+        else status("Put the caret beside an image to view it");
+    });
     add("edit.select_all", "Select all", "ctrl+a", ed(&Editor::select_all));
     add("edit.select_line", "Select line", "ctrl+l", ed(&Editor::select_line), true);
     add("edit.line_up", "Move line up", "alt+up", [this] { if (editing()) editor_.move_lines(-1); }, true);
@@ -448,6 +457,13 @@ void App::remember_view() {
 bool App::save() {
     if (!note_ || editor_.version() == saved_version_) return true;
     std::string text = editor_.text();
+    // A download still on its way is saved as the address it came from; the
+    // placeholder is only ever on screen.
+    for (auto& d : downloads_) {
+        if (d->note != note_->path) continue;
+        for (size_t at = text.find(d->marker); at != std::string::npos; at = text.find(d->marker, at))
+            text.replace(at, d->marker.size(), d->url);
+    }
     if (crlf_) {
         std::string out;
         out.reserve(text.size() + text.size() / 20);
@@ -492,6 +508,7 @@ void App::open_note(const NoteRef& n, bool push_history) {
         editor_.set_reader(reader_pref_, false);
     }
     editor_.set_syntax(config ? Syntax::Ini : Syntax::Markdown);
+    images_.set_note_dir(n.path.parent_path());  // images are found from the note's folder
     editor_.set_text(text);
     note_ = n;
     if (config) show_problems(ImGui::GetTime());
@@ -1008,6 +1025,7 @@ void App::toggle_fullscreen() {
 
 void App::dispatch_keys(bool& fired) {
     fired = false;
+    if (viewer_.open) return;  // the viewer takes the keys it uses, and nothing else runs
     bool pal = palette_.is_open() || bar_ != Bar::None;  // modal: only global commands
     for (auto& c : cmds_) {
         if (pal && !c.global) continue;
@@ -1407,7 +1425,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
             ImVec2 mouse = ImGui::GetIO().MousePos;
             bool over = n && mouse.x >= right - W(t) && mouse.x < right && mouse.y >= min.y && mouse.y < max.y;
             if (over) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !palette_.visible()) goto_problem(1);
+            if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !palette_.visible() && !viewer_.open) goto_problem(1);
         } else {
             int w = editor_.word_count();
             put_right(std::to_string(w) + (w == 1 ? " word" : " words"), T.dim);
@@ -1436,6 +1454,9 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
 void App::frame() {
     ImGuiIO& io = ImGui::GetIO();
     double now = ImGui::GetTime();
+    images_.frame(now);
+    poll_downloads();
+    handle_drops();
 
     // Commands passed on the command line (used for testing and scripting).
     // A scripted key press (see "key:" below) is released the frame after.
@@ -1457,6 +1478,10 @@ void App::frame() {
                 break;
             }
             if (id.rfind("open:", 0) == 0) { open_by_name(id.substr(5)); continue; }
+            // "drop:<path>" drops a file at the caret; "fetch:<url>" pastes
+            // an address as if it were on the clipboard.
+            if (id.rfind("drop:", 0) == 0) { on_drop({id.substr(5)}, ImVec2(-1, -1)); continue; }
+            if (id.rfind("fetch:", 0) == 0) { if (editing()) fetch_image(id.substr(6)); continue; }
             if (id.rfind("palette:", 0) == 0) { open_palette(id.substr(8)); continue; }
             if (id.rfind("find:", 0) == 0 || id.rfind("replace:", 0) == 0) {
                 bool rep = id[0] == 'r';
@@ -1539,10 +1564,21 @@ void App::frame() {
         p.caret = caret;
         p.caret_trail = cfg_.caret_trail;
         p.fade_syntax = cfg_.fade_syntax;
+        p.images = &images_;
+        p.px = dpi_ * zoom_;  // image sizes (|300) are CSS px, like the font's
         p.blank_line = cfg_.blank_line_height;
         p.scroll_past_end = cfg_.scroll_past_end;
-        p.keyboard = !palette_.is_open() && bar_ == Bar::None && !fired;
-        p.mouse = !palette_.visible();
+        p.keyboard = !palette_.is_open() && bar_ == Bar::None && !fired && !viewer_.open;
+        p.mouse = !palette_.visible() && !viewer_.open;
+        // Space beside an image opens it (no text goes there anyway).
+        if (p.keyboard && editing() && !editor_.has_selection() && editor_.image_for_caret() >= 0 &&
+            !io.KeyCtrl && !io.KeyAlt && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+            int tile = 0;
+            int line = editor_.image_for_caret(&tile);
+            open_viewer(line, tile);
+            io.InputQueueCharacters.resize(0);
+            p.keyboard = p.mouse = false;
+        }
         p.alpha = fade * page;
         if (fired) io.InputQueueCharacters.resize(0);
         if (is_config()) {
@@ -1562,6 +1598,11 @@ void App::frame() {
             show_problems(now);
         }
         editor_.draw(p);
+        // Double-click an image to view it (in the reader, a click will do).
+        int img_line = -1, img_tile = 0;
+        if (p.mouse && !editor_.over_image_handle() && editor_.image_at(io.MousePos, img_line, img_tile) &&
+            (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || (editor_.reader() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))
+            open_viewer(img_line, img_tile);
     } else {
         draw_empty(min, max, page);
     }
@@ -1593,6 +1634,7 @@ void App::frame() {
     auto chosen = palette_.draw(
         pf, [this](const std::string& t, std::vector<PaletteItem>& out, int& total) { build_palette(t, out, total); }, prompt_for);
     if (chosen) chosen();
+    draw_viewer();
     if (palette_.is_open() && note_) {
         std::string t = palette_.text();
         if (!t.empty() && t[0] == ':') {
@@ -1613,6 +1655,7 @@ void App::frame() {
 
 void App::shutdown() {
     save();
+    images_.shutdown();  // while the GL context is still around
     std::map<std::string, std::string> kv;
     kv["space"] = space_;
     kv["note"] = note_ ? note_->name : "";
