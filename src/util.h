@@ -60,11 +60,37 @@ inline bool enabled = true;
 inline float speed = 1.0f;
 inline bool active = false;
 
-// The most time one frame may count towards an animation. delta sleeps
-// between inputs, so the first frame after a pause can be seconds after the
-// last one; uncapped, that frame would finish every animation at once, and
-// motion would seem to randomly not happen whenever you'd paused first.
-inline float step(float dt) { return dt < 1.0f / 30 ? dt : 1.0f / 30; }
+// Animation time advances in whole display frames, not measured time.
+//
+// Measured frame times are misleading here: delta sleeps between inputs, so
+// the first frame after a pause "took" seconds, and the frames right after
+// waking come in a burst (the driver refilling its queue) yet are still shown
+// one per refresh. Stepping by measured time made every tap jump most of the
+// way on its first frame, then stall for a few. Stepping by the refresh
+// interval moves every displayed frame by the same amount.
+//
+// tick() runs once per frame (from the main loop): one interval per frame,
+// two if a frame was genuinely missed. `clock` is animation time, for
+// transitions timed from a start point.
+inline double clock = 0;
+inline float frame_step = 0;  // this frame's animation dt; 0 until tick() runs
+
+inline void tick(float dt, bool woke, float interval) {
+    float s;
+    if (interval > 0) {
+        float n = woke ? 1.0f : std::round(dt / interval);
+        s = (n < 1 ? 1 : n > 2 ? 2 : n) * interval;
+    } else {
+        s = dt < 1.0f / 30 ? dt : 1.0f / 30;  // no display rate known: cap it
+    }
+    frame_step = s;
+    clock += s;
+}
+
+inline float step(float dt) {
+    if (frame_step > 0) return frame_step;
+    return dt < 1.0f / 30 ? dt : 1.0f / 30;
+}
 
 inline float approach(float cur, float target, float rate, float dt, float eps = 0.25f) {
     float d = target - cur;

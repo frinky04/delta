@@ -52,7 +52,7 @@ void Palette::set_text(const std::string& t) {
 
 void Palette::open(const std::string& text) {
     if (!open_) {
-        open_time_ = ImGui::GetTime();
+        open_time_ = anim::clock;
         snap_ = true;
         // Only a real mouse move should pick a row, not wherever it rests.
         last_mouse_ = ImGui::GetIO().MousePos;
@@ -167,7 +167,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     auto phase = [](float x, float a, float b) { return anim::ease_out(std::clamp((x - a) / (b - a), 0.0f, 1.0f)); };
     float vis, vis_pick;
     if (open_) {
-        float t = anim::ease_out(anim::progress(open_time_, f.now, 0.13f));
+        float t = anim::ease_out(anim::progress(open_time_, anim::clock, 0.13f));
         page_a_ = t >= 0.5f ? 0.0f : 1.0f - t * 2.0f;
         vis = vis_pick = std::clamp((t - 0.4f) / 0.6f, 0.0f, 1.0f);
     } else if (committed_) {
@@ -358,7 +358,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         float pick_a = vis_pick * mode_a_;
         if (!invert) {
             float hy = list_y + (sel_y_ - scroll_) * row_h;
-            dl->AddText(mono_b, ms, ImVec2(std::round(x0 - margin * 0.75f), std::round(hy + row_text_y)), col_alpha(T.bright, pick_a), ">");
+            dl->AddText(mono_b, ms, ImVec2(std::round(x0 - margin * 0.75f), std::round(hy + row_text_y)), col_alpha(T.accent, pick_a), ">");
         }
 
         ImVec2 mouse = ImGui::GetIO().MousePos;
@@ -409,7 +409,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             ImVec2 boff(0, list_y - scroll_ * row_h);
             bar_.set(ImVec2(tx, by), ImVec2(tx + tw, by + bh), false, 45.0f);
             bar_.update(f.dt);
-            bar_.draw(dl, boff, col_alpha(T.bright, pick_a), std::round(f.dpi));
+            bar_.draw(dl, boff, col_alpha(T.accent, pick_a), std::round(f.dpi));
 
             // Then the text under the bar, knocked out in the background
             // colour and clipped to wherever the bar actually is, so mid-glide

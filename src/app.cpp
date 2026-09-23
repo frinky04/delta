@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <set>
 
 #include "theme.h"
 #include "util.h"
@@ -102,6 +103,13 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
         }
     }
     if (state["reader"] == "1") editor_.set_reader(true, false);
+    // Carets and scroll from last time ("view:<path> = line col scroll").
+    for (auto& [key, value] : state) {
+        if (key.rfind("view:", 0) != 0) continue;
+        int line = 0, col = 0, scroll = 0;
+        if (std::sscanf(value.c_str(), "%d %d %d", &line, &col, &scroll) != 3) continue;
+        views_[path_u8(store_.root() / u8path(key.substr(5)))] = {TextPos{line, col}, (float)scroll};
+    }
 
     editor_.on_link = [this](const LinkSpan& l) { open_link(l); };
 
@@ -125,7 +133,7 @@ void App::load_settings() {
     std::error_code ec;
     if (!fs::exists(cfg_path_, ec)) {
         fs::create_directories(cfg_path_.parent_path(), ec);
-        atomic_write(cfg_path_, default_config_text(binding_docs()), nullptr);
+        atomic_write(cfg_path_, default_config_text(), nullptr);
     }
     Config c;
     if (!load_config(cfg_path_, c, issues)) issues.push_back({-1, "couldn't read " + path_u8(cfg_path_)});
@@ -137,35 +145,110 @@ void App::load_settings() {
     style_native_window(win_, col_rgb(T.bg), col_rgb(T.dim), T.dark);
     anim::enabled = cfg_.animations;
     anim::speed = cfg_.animation_speed;
-    apply_bindings(issues);
+    apply_bindings();
+    check_settings(cfg_, issues);
 
     fs::path root = expand_user(cfg_.notes_dir);
     fs::create_directories(root, ec);
-    if (ec) issues.push_back({cfg_.line_of("general.notes_dir"), "can't create this folder: " + ec.message()});
+    if (ec) issues.push_back(issue_at(cfg_, "general.notes_dir", true, "can't create this folder: " + ec.message()));
     store_.set_root(root);
-    if (!Store::check_name(cfg_.default_space, "space").empty()) {
-        issues.push_back({cfg_.line_of("general.default_space"), "not a valid folder name, using \"default\""});
-        cfg_.default_space = "default";
-    }
-    if (!Store::check_name(cfg_.daily_space, "space").empty()) {
-        issues.push_back({cfg_.line_of("general.daily_space"), "not a valid folder name, using \"daily\""});
-        cfg_.daily_space = "daily";
-    }
+    if (!Store::check_name(cfg_.default_space, "space").empty()) cfg_.default_space = "default";
+    if (!Store::check_name(cfg_.daily_space, "space").empty()) cfg_.daily_space = "daily";
 
     // Problems show on their lines when the config is open in delta;
     // otherwise the first one goes to the status bar.
-    config_issues_ = (int)issues.size();
-    std::map<int, std::string> diag;
-    for (auto& is : issues)
-        if (is.line >= 0 && !diag.count(is.line)) diag[is.line] = is.msg;
-    if (is_config()) editor_.set_diagnostics(diag);
-    config_diag_ = std::move(diag);
-    if (!issues.empty() && !is_config()) {
-        const ConfigIssue& first = issues[0];
+    set_problems(std::move(issues));
+    hints_version_ = UINT64_MAX;  // colour defaults follow the theme
+    const auto& all = config_problems_;
+    if (!all.empty() && !is_config()) {
+        const ConfigIssue& first = all[0];
         std::string msg = "Config: " + (first.line >= 0 ? "line " + std::to_string(first.line + 1) + ", " : std::string()) + first.msg;
-        if (issues.size() > 1) msg += " (+" + std::to_string(issues.size() - 1) + " more)";
+        if (all.size() > 1) msg += " (+" + std::to_string(all.size() - 1) + " more)";
         status(msg, true);
     }
+}
+
+// Problems the rest of delta finds in a config: key chords and command ids
+// (checked against the commands) and space names.
+void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) const {
+    std::vector<std::string> ids;
+    for (auto& cmd : cmds_) ids.push_back(cmd.id);
+    for (auto& [id, v] : c.keys) {
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
+            std::string near = suggest(id, ids);
+            issues.push_back(issue_at(c, "keys." + id, false, near.empty() ? "no command with this name" : "no command with this name; did you mean " + near + "?"));
+            continue;
+        }
+        std::vector<std::string> bad;
+        parse_chords(v, &bad);
+        for (auto& b : bad) {
+            ConfigIssue is = issue_at(c, "keys." + id, true, "can't read the chord \"" + b + "\", ignored");
+            // Underline just that chord.
+            auto w = c.where.find("keys." + id);
+            if (w != c.where.end()) {
+                size_t at = v.find(b);
+                if (at != std::string::npos) { is.col0 = w->second.val0 + (int)at; is.col1 = is.col0 + (int)b.size(); }
+            }
+            issues.push_back(is);
+        }
+    }
+    if (!Store::check_name(c.default_space, "space").empty())
+        issues.push_back(issue_at(c, "general.default_space", true, "not a valid folder name, using default"));
+    if (!Store::check_name(c.daily_space, "space").empty())
+        issues.push_back(issue_at(c, "general.daily_space", true, "not a valid folder name, using daily"));
+}
+
+// Keeps the problems in line order, for the count and F8.
+void App::set_problems(std::vector<ConfigIssue> issues) {
+    std::stable_sort(issues.begin(), issues.end(), [](const ConfigIssue& a, const ConfigIssue& b) {
+        return a.line != b.line ? a.line < b.line : a.col0 < b.col0;
+    });
+    config_problems_ = std::move(issues);
+}
+
+// Hands the problems to the editor. Those on the line being typed on wait
+// for a pause, so a half-typed value doesn't flash an error at you.
+void App::show_problems(double now) {
+    bool typing = now - last_change_ < 0.9;
+    if (typing) next_problem_check_ = last_change_ + 0.9;
+    std::vector<Diagnostic> d;
+    std::set<int> seen;
+    for (auto& is : config_problems_) {
+        if (is.line < 0 || seen.count(is.line)) continue;  // one per line: the first
+        if (typing && is.line == editor_.cursor().line) continue;
+        seen.insert(is.line);
+        d.push_back({is.line, is.col0, is.col1, is.msg});
+    }
+    editor_.set_diagnostics(d);
+}
+
+void App::goto_problem(int dir) {
+    std::vector<const ConfigIssue*> list;
+    for (auto& is : config_problems_)
+        if (is.line >= 0) list.push_back(&is);
+    if (list.empty()) { status("No problems in the config"); return; }
+    const ConfigIssue* to = nullptr;
+    if (!is_config()) {
+        open_config();
+        to = dir > 0 ? list.front() : list.back();
+    } else {
+        TextPos a = editor_.cursor(), b = editor_.anchor();
+        TextPos from = dir > 0 ? std::max(a, b) : std::min(a, b);
+        auto pos = [](const ConfigIssue* is) { return TextPos{is->line, std::max(0, is->col0)}; };
+        if (dir > 0) {
+            for (auto* is : list)
+                if (from < pos(is)) { to = is; break; }
+            if (!to) to = list.front();  // wrap
+        } else {
+            for (auto it = list.rbegin(); it != list.rend(); ++it)
+                if (pos(*it) < from) { to = *it; break; }
+            if (!to) to = list.back();
+        }
+    }
+    if (!is_config()) return;
+    // The part it's about comes selected, ready to retype.
+    TextPos s{to->line, std::max(0, to->col0)}, e{to->line, to->col0 >= 0 ? to->col1 : 0};
+    editor_.select_range(s, e);
 }
 
 void App::open_config() {
@@ -176,6 +259,55 @@ void App::open_config() {
     r.path = cfg_path_;
     open_note(r);
     if (status_error_) status_.clear();  // the problems are on their lines now
+}
+
+// Picks a setting the config doesn't set yet and writes it in with its
+// default, value selected, ready to change.
+void App::add_setting() {
+    if (!is_config()) open_config();
+    if (!is_config()) return;
+    std::set<std::string> have;
+    for (auto& e : scan_config(editor_.lines())) have.insert(e.section + "." + e.key);
+
+    auto insert = [this](std::string section, std::string key, std::string value) {
+        if (!is_config()) return;
+        const auto& lines = editor_.lines();
+        bool header = false;
+        int at = config_insert_line(lines, section, header);
+        // Written at the end of the line before, so the new text ends
+        // exactly after the value.
+        std::string text = "\n";
+        if (header) {
+            bool empty_file = lines.size() == 1 && lines[0].empty();
+            text = empty_file ? "" : lines.back().empty() ? "\n" : "\n\n";
+            text += "[" + section + "]\n";
+        }
+        text += key + " = " + value;
+        int prev = std::max(0, at - 1);
+        TextPos end = editor_.insert_text({prev, (int)lines[prev].size()}, text);
+        editor_.select_range({end.line, end.col - (int)value.size()}, end);
+    };
+
+    std::vector<PaletteItem> items;
+    for (auto& s : all_settings()) {
+        std::string id = std::string(s.section) + "." + s.key;
+        if (have.count(id)) continue;
+        PaletteItem it;
+        it.label = id;
+        std::string def = s.default_for(cfg_.theme);
+        it.meta = (*s.desc ? std::string(s.desc) + ", " : std::string()) + "default " + def;
+        it.action = [insert, sec = std::string(s.section), key = std::string(s.key), def] { insert(sec, key, def); };
+        items.push_back(std::move(it));
+    }
+    for (auto& c : cmds_) {
+        if (have.count("keys." + c.id)) continue;
+        PaletteItem it;
+        it.label = "keys." + c.id;
+        it.meta = c.title;
+        it.action = [insert, id = c.id, def = c.defaults] { insert("keys", id, def); };
+        items.push_back(std::move(it));
+    }
+    palette_.pick("add setting: ", std::move(items));
 }
 
 std::vector<BindingDoc> App::binding_docs() const {
@@ -196,15 +328,12 @@ std::string App::chord_for(const std::string& id) const {
     return {};
 }
 
-void App::apply_bindings(std::vector<ConfigIssue>& issues) {
+// Unreadable chords are skipped (check_settings reports them).
+void App::apply_bindings() {
     for (auto& c : cmds_) {
         auto it = cfg_.keys.find(c.id);
-        std::vector<std::string> bad;
-        c.chords = parse_chords(it != cfg_.keys.end() ? it->second : c.defaults, &bad);
-        for (auto& b : bad) issues.push_back({cfg_.line_of("keys." + c.id), "can't read the chord \"" + b + "\""});
+        c.chords = parse_chords(it != cfg_.keys.end() ? it->second : c.defaults);
     }
-    for (auto& [id, v] : cfg_.keys)
-        if (!find_command(id)) issues.push_back({cfg_.line_of("keys." + id), "no command with this name"});
 }
 
 void App::register_commands() {
@@ -227,7 +356,19 @@ void App::register_commands() {
     add("palette.spaces", "Switch space", "ctrl+shift+s", [this] { open_palette("#"); }, false, true);
     add("palette.headings", "Jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
     add("palette.line", "Go to line", "ctrl+g", [this] { open_palette(":"); }, false, true);
-    add("palette.search", "Search notes in this space", "ctrl+f ctrl+shift+f", [this] {
+    add("find.open", "Find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
+    add("find.replace", "Find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
+    add("nav.heading_next", "Go to the next heading", "ctrl+alt+down", [this] { if (editing()) editor_.goto_heading(1); }, true);
+    add("nav.heading_prev", "Go to the previous heading", "ctrl+alt+up", [this] { if (editing()) editor_.goto_heading(-1); }, true);
+    add("edit.expand_selection", "Expand selection", "alt+shift+right", [this] { if (editing()) editor_.expand_selection(); }, true);
+    add("edit.shrink_selection", "Shrink selection", "alt+shift+left", [this] { if (editing()) editor_.shrink_selection(); }, true);
+    add("edit.follow_link", "Follow the link at the caret", "alt+enter", [this] {
+        LinkSpan link;
+        if (!editing()) return;
+        if (editor_.link_at_caret(link)) open_link(link);
+        else status("No link at the caret");
+    });
+    add("palette.search", "Search notes in this space", "ctrl+shift+f", [this] {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
     }, false, true);
@@ -260,9 +401,12 @@ void App::register_commands() {
 
     // App
     add("config.open", "Edit config", "ctrl+,", [this] { open_config(); });
+    add("config.add_setting", "Add a setting", "", [this] { add_setting(); });
     add("config.open_external", "Open config in another app", "", [this] {
         if (!open_with_default_app(cfg_path_)) status("Couldn't open " + path_u8(cfg_path_), true);
     });
+    add("config.next_problem", "Go to the next config problem", "f8", [this] { goto_problem(1); }, true);
+    add("config.prev_problem", "Go to the previous config problem", "shift+f8", [this] { goto_problem(-1); }, true);
     add("config.reload", "Reload config", "", [this] { load_settings(); status("Config reloaded"); });
     add("app.open_folder", "Show this space's folder", "", [this] { open_with_default_app(store_.root() / u8path(space_)); });
     add("app.quit", "Quit", "ctrl+q", [this] { quit_ = true; }, false, true);
@@ -327,6 +471,7 @@ bool App::save() {
 }
 
 void App::open_note(const NoteRef& n, bool push_history) {
+    close_find();
     save();
     remember_view();
     std::string text;
@@ -349,12 +494,13 @@ void App::open_note(const NoteRef& n, bool push_history) {
     editor_.set_syntax(config ? Syntax::Ini : Syntax::Markdown);
     editor_.set_text(text);
     note_ = n;
-    if (config) editor_.set_diagnostics(config_diag_);
+    if (config) show_problems(ImGui::GetTime());
     else space_ = n.space;
+    hints_version_ = UINT64_MAX;
     saved_version_ = seen_version_ = editor_.version();
     disk_mtime_ = mtime_of(n.path);
     if (auto it = views_.find(path_u8(n.path)); it != views_.end()) editor_.restore_view(it->second.first, it->second.second);
-    fade_start_ = ImGui::GetTime();
+    fade_start_ = anim::clock;
     if (push_history) {
         if (hist_pos_ >= 0 && hist_pos_ < (int)history_.size() && history_[hist_pos_].path == n.path) {
             // same note, nothing to record
@@ -372,7 +518,7 @@ void App::close_note() {
     remember_view();
     note_.reset();
     editor_.set_text("");
-    fade_start_ = ImGui::GetTime();
+    fade_start_ = anim::clock;
     set_title();
 }
 
@@ -604,6 +750,7 @@ void App::history_step(int dir) {
 // Palette
 
 void App::open_palette(const std::string& prefix) {
+    close_find();
     cache_notes_ = store_.notes(space_);
     cache_all_.clear();
     cache_spaces_ = store_.spaces();
@@ -822,6 +969,7 @@ double App::next_wake(double now) {
     if (note_ && editor_.version() != saved_version_) t = std::min(t, last_change_ + cfg_.autosave_delay);
     double status_end = status_time_ + 3.4;
     if (status_end > now) t = std::min(t, status_end);
+    if (is_config() && next_problem_check_ > now) t = std::min(t, next_problem_check_);
     return t;
 }
 
@@ -875,7 +1023,7 @@ void App::toggle_fullscreen() {
 
 void App::dispatch_keys(bool& fired) {
     fired = false;
-    bool pal = palette_.is_open();
+    bool pal = palette_.is_open() || find_open_;  // modal: only global commands
     for (auto& c : cmds_) {
         if (pal && !c.global) continue;
         for (auto& ch : c.chords) {
@@ -891,7 +1039,7 @@ void App::dispatch_keys(bool& fired) {
 void App::draw_empty(ImVec2 min, ImVec2 max, float page) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float s = base_size(), em = s / kEm;
-    float a = anim::ease_out(anim::progress(fade_start_, ImGui::GetTime(), 0.14f)) * page;
+    float a = anim::ease_out(anim::progress(fade_start_, anim::clock, 0.14f)) * page;
     struct Row { std::string key, text; };
     std::vector<Row> rows;
     auto add = [&](const char* id, std::string text) {
@@ -923,9 +1071,126 @@ void App::draw_empty(ImVec2 min, ImVec2 max, float page) {
     y += title_h;
     for (auto& r : rows) {
         float kw = mono_->CalcTextSizeA(ks, FLT_MAX, 0, r.key.c_str()).x;
-        dl->AddText(mono_, ks, ImVec2(std::round(x + key_w - kw), std::round(y + (s - ks) * 0.7f)), col_alpha(T.accent, a), r.key.c_str());
+        dl->AddText(mono_, ks, ImVec2(std::round(x + key_w - kw), std::round(y + (s - ks) * 0.7f)), col_alpha(T.text, a), r.key.c_str());
         dl->AddText(sans_, s, ImVec2(x + key_w + gap, y), col_alpha(T.dim, a), r.text.c_str());
         y += row_h;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Find in this note: the status line becomes a minibuffer (like vim's / or
+// Emacs's C-s), so the note stays in full view while you search.
+
+void App::open_find(bool replace) {
+    if (!note_) return;
+    if (palette_.is_open()) palette_.close();
+    if (editor_.reader()) editor_.set_reader(false);
+    if (!find_open_) {
+        // A selection on one line becomes the query.
+        if (editor_.has_selection() && editor_.cursor().line == editor_.anchor().line)
+            std::snprintf(find_buf_, sizeof find_buf_, "%s", editor_.selected_text().c_str());
+        editor_.find_begin();
+        find_last_ = "\x01";  // match again on the next frame
+    }
+    find_open_ = true;
+    find_replace_ = replace;  // ctrl+f: find alone; ctrl+h: find and replace
+    // Always start in the find field, last query selected so typing replaces
+    // it. The texts are kept from last time; the focus isn't.
+    find_field_ = 1;
+    find_focus_ = true;
+    find_select_all_ = true;
+}
+
+void App::close_find() {
+    if (!find_open_) return;
+    find_open_ = false;
+    editor_.find_end();  // the current match stays selected
+}
+
+// Keeps a field's text selected (on opening) or the cursor at the end (on
+// refocus after Enter), whichever was asked for.
+int App::find_input_callback(ImGuiInputTextCallbackData* d) {
+    auto* app = static_cast<App*>(d->UserData);
+    if (app->find_select_pending_ == 1) { d->SelectionStart = 0; d->SelectionEnd = d->CursorPos = d->BufTextLen; }
+    if (app->find_select_pending_ == 2) { d->SelectionStart = d->SelectionEnd = d->CursorPos = d->BufTextLen; }
+    app->find_select_pending_ = 0;
+    return 0;
+}
+
+void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto W = [&](const char* t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t).x; };
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Keys first, against the field that was active last frame.
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { close_find(); return; }
+    if (enter && io.KeyCtrl && io.KeyAlt && find_replace_) {
+        int n = editor_.replace_all(repl_buf_);
+        status(n ? "Replaced " + std::to_string(n) : "Nothing to replace");
+        find_last_ = find_buf_;
+    } else if (enter && find_field_ == 2) {
+        editor_.replace_current(repl_buf_);
+        find_last_ = find_buf_;
+    } else if (enter) {
+        editor_.find_step(io.KeyShift ? -1 : 1);
+    }
+    if (enter) { find_focus_ = true; find_select_pending_ = 2; }
+    if (find_replace_ && ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+        find_field_ = find_field_ == 1 ? 2 : 1;
+        find_focus_ = true;
+        find_select_pending_ = 1;
+    }
+
+    // Prompt and fields, in the status line's mono type.
+    ImGui::PushFont(mono_, s);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(T.bright));
+    ImGui::GetStyle().InputTextCursorSize = std::max(1.0f, std::round(2 * dpi_));
+    float x = min.x + pad;
+    float field_w = std::min(24 * s, (max.x - min.x) * 0.3f);
+    auto field = [&](const char* label, const char* id, char* buf, size_t size, int which) {
+        dl->AddText(mono_, s, ImVec2(x, ty), T.dim, label);
+        x += W(label) + s * 0.5f;
+        ImGui::SetCursorScreenPos(ImVec2(x, ty));
+        ImGui::SetNextItemWidth(field_w);
+        if (find_focus_ && find_field_ == which) {
+            ImGui::SetKeyboardFocusHere();
+            if (find_select_all_) find_select_pending_ = 1;
+        }
+        // Tab is ours (switching fields), not ImGui's focus cycling.
+        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+        ImGui::InputText(id, buf, size, ImGuiInputTextFlags_CallbackAlways, &App::find_input_callback, this);
+        ImGui::PopItemFlag();
+        // Track the field you clicked into, but not while a switch we asked
+        // for is still landing (the old field is active until next frame).
+        if (ImGui::IsItemActive() && !find_focus_) find_field_ = which;
+        x += field_w + s * 1.6f;
+    };
+    field("find", "##find", find_buf_, sizeof find_buf_, 1);
+    if (find_replace_) field("replace", "##replace", repl_buf_, sizeof repl_buf_, 2);
+    find_focus_ = false;
+    find_select_all_ = false;
+    // Keep typing going to the bar: refocus if nothing's active (Enter ends
+    // a field's editing in ImGui).
+    if (!ImGui::IsAnyItemActive()) { find_focus_ = true; if (!find_select_pending_) find_select_pending_ = 2; }
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+
+    // Match as you type.
+    if (find_last_ != find_buf_) {
+        find_last_ = find_buf_;
+        editor_.find_set(find_buf_);
+    }
+
+    // Right: where you are among the matches.
+    std::string count;
+    if (find_buf_[0]) {
+        int n = editor_.find_count();
+        count = n ? std::to_string(editor_.find_index() + 1) + "/" + std::to_string(n) : "no matches";
+    }
+    if (!count.empty()) {
+        float w = W(count.c_str());
+        dl->AddText(mono_, s, ImVec2(max.x - pad - w, ty), editor_.find_count() ? T.dim : T.text, count.c_str());
     }
 }
 
@@ -934,6 +1199,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
     float s = std::round(base_size() * 0.86f);
     float pad = std::round(16 * dpi_);
     float ty = std::round(min.y + (max.y - min.y - s) * 0.5f);
+    if (find_open_) { draw_find_bar(min, max, s, pad, ty); return; }
     auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
 
     // Left: where you are.
@@ -962,7 +1228,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
         rx -= s * 1.6f;
     };
     if (note_) {
-        put_right(editor_.reader() ? "read" : "edit", editor_.reader() ? T.accent : T.dim);
+        put_right(editor_.reader() ? "read" : "edit", editor_.reader() ? T.text : T.dim);
         if (!editor_.reader()) {
             TextPos c = editor_.cursor();
             const std::string& line = editor_.lines()[c.line];
@@ -972,8 +1238,16 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
             put_right(std::to_string(c.line + 1) + ":" + std::to_string(col), T.dim);
         }
         if (is_config()) {
-            int n = config_issues_;
-            put_right(n == 0 ? "no problems" : std::to_string(n) + (n == 1 ? " problem" : " problems"), n ? T.text : T.dim);
+            // The count is a mark like the ones on the lines; click it (or
+            // press F8) to go to the next problem.
+            int n = (int)config_problems_.size();
+            std::string t = n == 0 ? "no problems" : std::to_string(n) + (n == 1 ? " problem" : " problems");
+            float right = rx;
+            put_right(t, n ? T.error : T.dim);
+            ImVec2 mouse = ImGui::GetIO().MousePos;
+            bool over = n && mouse.x >= right - W(t) && mouse.x < right && mouse.y >= min.y && mouse.y < max.y;
+            if (over) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !palette_.visible()) goto_problem(1);
         } else {
             int w = editor_.word_count();
             put_right(std::to_string(w) + (w == 1 ? " word" : " words"), T.dim);
@@ -989,7 +1263,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
         float in = anim::ease_out(std::min(1.0f, age / 0.1f));
         if (age < 0.1f) anim::active = true;
         if (age >= 3.0f) anim::active = true;
-        ImU32 col = status_error_ ? T.accent : T.text;
+        ImU32 col = status_error_ ? T.bright : T.text;
         float mx = std::max(left_end, std::round((min.x + max.x - W(status_)) * 0.5f));
         dl->PushClipRect(ImVec2(left_end, min.y), ImVec2(rx, max.y), true);
         dl->AddText(mono_, s, ImVec2(mx, ty), col_alpha(col, a * in), status_.c_str());
@@ -1004,6 +1278,13 @@ void App::frame() {
     double now = ImGui::GetTime();
 
     // Commands passed on the command line (used for testing and scripting).
+    // A scripted key press (see "key:" below) is released the frame after.
+    if (release_key_ != ImGuiKey_None) {
+        ImGuiIO& kio = ImGui::GetIO();
+        kio.AddKeyEvent(release_key_, false);
+        for (ImGuiKey m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) kio.AddKeyEvent(m, false);
+        release_key_ = ImGuiKey_None;
+    }
     // "wait:<seconds>" pauses the list, so later steps run once the page is up.
     if (!pending_run_.empty() && now >= run_after_) {
         auto run = std::move(pending_run_);
@@ -1017,6 +1298,33 @@ void App::frame() {
             }
             if (id.rfind("open:", 0) == 0) { open_by_name(id.substr(5)); continue; }
             if (id.rfind("palette:", 0) == 0) { open_palette(id.substr(8)); continue; }
+            if (id.rfind("find:", 0) == 0 || id.rfind("replace:", 0) == 0) {
+                bool rep = id[0] == 'r';
+                open_find(rep);
+                std::snprintf(find_buf_, sizeof find_buf_, "%s", id.c_str() + (rep ? 8 : 5));
+                continue;
+            }
+            // "key:<chord>" presses a key for a frame (then the list pauses a
+            // moment so it's released before the next step); "type:<text>"
+            // types text. For scripting UI checks.
+            if (id.rfind("key:", 0) == 0) {
+                Chord c;
+                if (parse_chord(id.substr(4), c)) {
+                    ImGuiIO& kio = ImGui::GetIO();
+                    for (ImGuiKey m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) kio.AddKeyEvent(m, (c.mods & m) != 0);
+                    kio.AddKeyEvent(c.key, true);
+                    release_key_ = c.key;
+                }
+                run_after_ = now + 0.1;
+                pending_run_.assign(run.begin() + k + 1, run.end());
+                break;
+            }
+            if (id.rfind("type:", 0) == 0) {
+                ImGui::GetIO().AddInputCharactersUTF8(id.c_str() + 5);
+                run_after_ = now + 0.1;
+                pending_run_.assign(run.begin() + k + 1, run.end());
+                break;
+            }
             if (Command* c = find_command(id)) c->run();
         }
     }
@@ -1051,7 +1359,7 @@ void App::frame() {
 
     // While the palette is up, the page steps aside entirely.
     float page = palette_.page_alpha();
-    float fade = anim::ease_out(anim::progress(fade_start_, now, 0.14f));
+    float fade = anim::ease_out(anim::progress(fade_start_, anim::clock, 0.14f));
     if (note_) {
         EditorParams p;
         p.sans = sans_;
@@ -1073,15 +1381,33 @@ void App::frame() {
         p.fade_syntax = cfg_.fade_syntax;
         p.blank_line = cfg_.blank_line_height;
         p.scroll_past_end = cfg_.scroll_past_end;
-        p.keyboard = !palette_.is_open() && !fired;
+        p.keyboard = !palette_.is_open() && !find_open_ && !fired;
         p.mouse = !palette_.visible();
         p.alpha = fade * page;
         if (fired) io.InputQueueCharacters.resize(0);
+        if (is_config()) {
+            if (editor_.version() != hints_version_) {
+                hints_version_ = editor_.version();
+                editor_.set_hints(config_hints(editor_.lines(), cfg_.theme, binding_docs()));
+                // Unsaved edits are checked as they're typed; once saved,
+                // load_settings has the file's own verdict.
+                if (editor_.version() != saved_version_) {
+                    Config live;
+                    std::vector<ConfigIssue> issues;
+                    parse_config(editor_.text(), live, issues);
+                    check_settings(live, issues);
+                    set_problems(std::move(issues));
+                }
+            }
+            show_problems(now);
+        }
         editor_.draw(p);
     } else {
         draw_empty(min, max, page);
     }
     draw_status(ImVec2(min.x, max.y), ImVec2(max.x, max.y + bar_h));
+    // Clicking into the note ends a find (the click places the caret there).
+    if (find_open_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && io.MousePos.y < max.y) close_find();
     ImGui::End();
 
     // Palette, set in the same column where the page's first line sits.
@@ -1124,6 +1450,18 @@ void App::shutdown() {
     kv["note"] = note_ ? note_->name : "";
     kv["zoom"] = std::to_string(zoom_);
     kv["reader"] = editor_.reader() ? "1" : "0";
+    // Where each note's caret and scroll were, so notes reopen where you left
+    // them. Paths are relative to the notes folder.
+    remember_view();
+    int kept = 0;
+    for (auto& [path, v] : views_) {
+        std::error_code ec;
+        fs::path rel = fs::relative(u8path(path), store_.root(), ec);
+        std::string key = path_u8(rel);
+        if (ec || key.empty() || key.rfind("..", 0) == 0 || key.find('=') != std::string::npos) continue;
+        if (++kept > 500) break;
+        kv["view:" + key] = std::to_string(v.first.line) + " " + std::to_string(v.first.col) + " " + std::to_string((int)v.second);
+    }
     if (!fullscreen_ && !glfwGetWindowAttrib(win_, GLFW_ICONIFIED) && !glfwGetWindowAttrib(win_, GLFW_MAXIMIZED)) {
         int x, y, w, h;
         glfwGetWindowPos(win_, &x, &y);

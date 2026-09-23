@@ -39,11 +39,32 @@ static void on_scale(GLFWwindow*, float x, float) {
     if (g_app) g_app->set_dpi(x);
 }
 
+// Seconds per refresh of the monitor the window is mostly on (0 if unknown).
+// Animations step by this much per frame; see anim::tick.
+static float refresh_interval(GLFWwindow* w) {
+    int wx, wy, ww, wh;
+    glfwGetWindowPos(w, &wx, &wy);
+    glfwGetWindowSize(w, &ww, &wh);
+    int cx = wx + ww / 2, cy = wy + wh / 2;
+    GLFWmonitor* best = glfwGetPrimaryMonitor();
+    int count = 0;
+    GLFWmonitor** mons = glfwGetMonitors(&count);
+    for (int i = 0; i < count; i++) {
+        int mx, my;
+        glfwGetMonitorPos(mons[i], &mx, &my);
+        const GLFWvidmode* m = glfwGetVideoMode(mons[i]);
+        if (m && cx >= mx && cx < mx + m->width && cy >= my && cy < my + m->height) best = mons[i];
+    }
+    const GLFWvidmode* m = best ? glfwGetVideoMode(best) : nullptr;
+    return m && m->refreshRate > 0 ? 1.0f / (float)m->refreshRate : 0.0f;
+}
+
 int main(int argc, char** argv) {
     AppOptions opts;
     std::string shot;
     int shot_w = 0, shot_h = 0;
     double shot_delay = 1.0;  // seconds after the first frame
+    FILE* frame_log = nullptr;  // --frame-log: one line per frame, for pacing checks
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -60,6 +81,7 @@ int main(int argc, char** argv) {
         } else if (a == "--screenshot") shot = next();
         else if (a == "--size") std::sscanf(next().c_str(), "%dx%d", &shot_w, &shot_h);
         else if (a == "--shot-delay") shot_delay = std::atof(next().c_str());
+        else if (a == "--frame-log") frame_log = std::fopen(next().c_str(), "w");
     }
 
     if (!glfwInit()) return 1;
@@ -68,9 +90,9 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // shown after the first frame: no white flash
     glfwWindowHint(GLFW_SAMPLES, 0);
-    if (!shot.empty()) {
-        // Screenshot runs must never steal focus (or keystrokes) from
-        // whatever the user is doing.
+    if (!shot.empty() || frame_log) {
+        // Screenshot and logging runs must never steal focus (or keystrokes)
+        // from whatever the user is doing.
         glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
         glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
     }
@@ -111,11 +133,13 @@ int main(int argc, char** argv) {
     int frames = 0;
     while (!glfwWindowShouldClose(window) && !app.should_quit()) {
         double now = glfwGetTime();
+        bool slept = false;
         if (g_wake > 0 || anim::active || !shown || !shot.empty()) {
             glfwPollEvents();
         } else {
             double wait = app.next_wake(now) - now;
             glfwWaitEventsTimeout(wait > 0.001 ? wait : 0.001);
+            slept = true;
         }
         if (g_wake > 0) g_wake--;
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) { glfwWaitEvents(); continue; }
@@ -124,6 +148,11 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        // Animations advance one display refresh per frame (see anim::tick).
+        static float interval = 0;
+        static int since_check = 1000;
+        if (++since_check > 60) { interval = refresh_interval(window); since_check = 0; }
+        anim::tick(io.DeltaTime, slept, interval);
         app.frame();
         ImGui::Render();
 
@@ -134,6 +163,7 @@ int main(int argc, char** argv) {
         glClearColor(bg.x, bg.y, bg.z, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (frame_log) std::fprintf(frame_log, "%.4f dt=%.4f step=%.4f slept=%d active=%d\n", glfwGetTime(), io.DeltaTime, anim::frame_step, slept, anim::active);
 
         // Capture once animations have had real time to settle.
         static double first_frame = glfwGetTime();
@@ -153,6 +183,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (frame_log) std::fclose(frame_log);
     app.shutdown();
     g_app = nullptr;
     ImGui_ImplOpenGL3_Shutdown();

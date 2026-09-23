@@ -44,8 +44,13 @@ private:
     // setup
     void register_commands();
     void load_settings();
-    void apply_bindings(std::vector<ConfigIssue>& issues);
+    void apply_bindings();
+    void check_settings(const Config& c, std::vector<ConfigIssue>& issues) const;
+    void set_problems(std::vector<ConfigIssue> issues);
+    void show_problems(double now);
+    void goto_problem(int dir);
     void open_config();
+    void add_setting();
     bool is_config() const { return note_ && note_->path == cfg_path_; }
     std::vector<BindingDoc> binding_docs() const;
     Command* find_command(const std::string& id);
@@ -76,6 +81,10 @@ private:
     void open_palette(const std::string& prefix);
     void draw_status(ImVec2 min, ImVec2 max);
     void draw_empty(ImVec2 min, ImVec2 max, float page);
+    void open_find(bool replace);
+    void close_find();
+    void draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+    static int find_input_callback(ImGuiInputTextCallbackData* d);
     void status(const std::string& msg, bool error = false);
     void poll_files(double now);
     float base_size() const;
@@ -86,8 +95,11 @@ private:
     Config cfg_;
     fs::path cfg_path_, state_path_;
     fs::file_time_type cfg_mtime_{};
-    int config_issues_ = 0;
-    std::map<int, std::string> config_diag_;  // line -> problem, for the editor
+    // The config's problems, in line order: from the file, or checked live
+    // from the text while it's open in delta.
+    std::vector<ConfigIssue> config_problems_;
+    double next_problem_check_ = 0;           // a held-back problem shows then
+    uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
     bool reader_pref_ = false;                // reader mode to restore after the config
     Store store_;
     Editor editor_;
@@ -95,6 +107,7 @@ private:
     std::vector<Command> cmds_;
     std::vector<std::string> pending_run_;
     double run_after_ = 0;             // --run steps wait until this time
+    ImGuiKey release_key_ = ImGuiKey_None;  // scripted key press to release next frame
 
     ImFont* sans_ = nullptr;
     ImFont* mono_ = nullptr;
@@ -128,4 +141,15 @@ private:
     bool fullscreen_ = false;
     int win_x_ = 0, win_y_ = 0, win_w_ = 0, win_h_ = 0;
     bool quit_ = false;
+
+    // Find bar (in the status line).
+    bool find_open_ = false;
+    bool find_replace_ = false;       // replace field shown
+    int find_field_ = 1;              // 1 find, 2 replace: which has focus
+    bool find_focus_ = false;
+    bool find_select_all_ = false;
+    int find_select_pending_ = 0;     // 1 select all, 2 cursor to end
+    char find_buf_[256] = {};
+    char repl_buf_[256] = {};
+    std::string find_last_;
 };

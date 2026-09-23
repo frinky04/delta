@@ -21,6 +21,13 @@ inline bool operator==(TextPos a, TextPos b) { return a.line == b.line && a.col 
 inline bool operator!=(TextPos a, TextPos b) { return !(a == b); }
 inline bool operator<(TextPos a, TextPos b) { return a.line < b.line || (a.line == b.line && a.col < b.col); }
 
+// A problem on a line: the message, and the byte range it's about
+// (underlined; col0 < 0 for none).
+struct Diagnostic {
+    int line = 0, col0 = -1, col1 = -1;
+    std::string msg;
+};
+
 struct EditorParams {
     ImFont* sans = nullptr;
     ImFont* mono = nullptr;
@@ -73,8 +80,14 @@ public:
     // Markdown for notes, Ini for delta.ini. Set before set_text().
     void set_syntax(Syntax s);
     Syntax syntax() const { return syntax_; }
-    // Problems shown at the end of their (0-based) line.
-    void set_diagnostics(std::map<int, std::string> d) { diag_ = std::move(d); }
+    // Problems shown at the end of their (0-based) line. They fade in, and
+    // out once they're gone from the list.
+    void set_diagnostics(const std::vector<Diagnostic>& d);
+    // Quieter notes shown the same way (config defaults); a problem on the
+    // same line wins.
+    void set_hints(std::map<int, std::string> h) { hints_ = std::move(h); }
+    // Insert text as one undoable edit; returns where it ends.
+    TextPos insert_text(TextPos at, const std::string& text);
 
     // Bindable edit commands.
     void undo();
@@ -91,6 +104,24 @@ public:
     void wrap_selection(const std::string& marker);
     void indent();
     void outdent();
+
+    // Find and replace in this note. Smart case: case-sensitive only when the
+    // query has a capital. The current match is selected; the rest are
+    // softly highlighted.
+    void find_begin();                            // remember where find started
+    void find_set(const std::string& query);      // match from there as you type
+    void find_step(int dir);                      // next (+1) / previous (-1), wrapping
+    void find_end();                              // clear highlights, keep the selection
+    int find_count() const { return (int)matches_.size(); }
+    int find_index() const { return match_; }
+    void replace_current(const std::string& with);
+    int replace_all(const std::string& with);     // one undo step
+
+    // Moving around.
+    void goto_heading(int dir);                   // next / previous heading
+    void expand_selection();                      // word, sentence, line, paragraph, section, note
+    void shrink_selection();
+    bool link_at_caret(LinkSpan& out) const;
 
     // Navigation.
     void goto_line(int line);                     // puts the line near the top
@@ -113,11 +144,12 @@ public:
 
     // The span the change pulse is highlighting, if any.
     bool pulse_range(TextPos& a, TextPos& b) const {
-        if (!pulse_.active) return false;
-        a = pulse_.a;
-        b = pulse_.b;
+        if (!pulse_.active || pulse_.spans.empty()) return false;
+        a = pulse_.spans.front().first;
+        b = pulse_.spans.front().second;
         return true;
     }
+    int pulse_spans() const { return pulse_.active ? (int)pulse_.spans.size() : 0; }
 
     // When the caret next changes blink state (for the idle loop).
     double next_blink(double now) const;
@@ -214,7 +246,17 @@ private:
     float want_x_ = -1;
     bool reader_ = false;
     Syntax syntax_ = Syntax::Markdown;
-    std::map<int, std::string> diag_;
+    // A problem as drawn: it follows its line's text, so lines moving above
+    // it don't restart its fade.
+    struct Mark {
+        Diagnostic d;
+        std::string text;   // the line's text when it was set
+        float a = 0;        // shown, 0..1
+        bool live = true;   // false: fading out
+    };
+    std::vector<Mark> marks_;
+    bool marks_snap_ = false;
+    std::map<int, std::string> hints_;
     uint64_t version_ = 1;
 
     std::vector<Line> lay_[2];
@@ -239,13 +281,30 @@ private:
     };
     std::vector<SelRect> sel_rects_;
 
-    // Soft highlight on what the last undo, redo or paste changed.
+    // Soft highlight on what the last undo, redo, paste or replace changed.
     struct Pulse {
         bool active = false;
-        TextPos a, b;
+        std::vector<std::pair<TextPos, TextPos>> spans;
         double start = 0;
         uint64_t version = 0;       // any later edit clears it
     } pulse_;
+
+    // Find state.
+    bool find_active_ = false;
+    std::string find_q_;
+    TextPos find_origin_;
+    std::vector<std::pair<TextPos, TextPos>> matches_;
+    int match_ = -1;
+    void find_recompute(TextPos from);           // matches for find_q_; current = first at/after `from`
+    void select_match();
+
+    // Expand-selection history, so shrink can walk back.
+    std::vector<std::pair<TextPos, TextPos>> expand_stack_;
+    std::pair<TextPos, TextPos> expand_last_;     // the selection expand made last
+
+    TextPos paragraph_move(int dir) const;
+    void renumber_lists(int l0, int l1);          // ordered lists touching these lines
+    void draw_span(ImDrawList* dl, TextPos a, TextPos b, ImU32 col);
 
     // Space opening and closing. Each line's drawn height chases its real
     // height, and lines are stacked by drawn heights, so whatever opens or

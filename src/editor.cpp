@@ -56,6 +56,8 @@ void Editor::set_text(const std::string& text) {
     yoff_.assign(lines_.size(), 0);
     mark_a_.clear();
     sel_rects_.clear();
+    find_end();
+    expand_stack_.clear();
     pulse_.active = false;
     // A different document appears as it is: nothing opens or collapses.
     ghosts_.clear();
@@ -65,6 +67,25 @@ void Editor::set_text(const std::string& text) {
     scroll_ = scroll_target_ = 0;
     snap_ = caret_snap_ = true;
     sync_line_ = -1;
+    marks_.clear();
+    marks_snap_ = true;  // problems set before the first draw arrive with the page
+}
+
+void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
+    for (auto& m : marks_) m.live = false;
+    for (auto& d : ds) {
+        if (d.line < 0 || d.line >= (int)lines_.size()) continue;
+        const std::string& text = lines_[d.line];
+        Mark* same = nullptr;
+        for (auto& m : marks_)
+            if (!m.live && m.d.msg == d.msg && m.text == text) { same = &m; break; }
+        if (same) {
+            same->d = d;
+            same->live = true;
+        } else {
+            marks_.push_back({d, text, marks_snap_ ? 1.0f : 0.0f, true});
+        }
+    }
 }
 
 void Editor::reload_text(const std::string& text) {
@@ -282,6 +303,7 @@ void Editor::cut() {
         clamp(cur_);
         anchor_ = cur_;
     }
+    renumber_lists(cur_.line - 1, cur_.line);
     end_edit();
 }
 
@@ -291,8 +313,14 @@ void Editor::paste() {
     std::string text = clip;
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
     std::vector<std::string> before = lines_;
+    TextPos start = std::min(cur_, anchor_);
     begin_edit(Edit::Other);
-    if (!has_selection() && !line_clip_.empty() && text == line_clip_) {
+    // A URL pasted over selected text (on one line) makes a link of it.
+    bool url = (text.rfind("http://", 0) == 0 || text.rfind("https://", 0) == 0) &&
+               text.find_first_of(" \t\n") == std::string::npos;
+    if (url && has_selection() && cur_.line == anchor_.line && syntax_ == Syntax::Markdown) {
+        replace_selection("[" + selected_text() + "](" + text + ")");
+    } else if (!has_selection() && !line_clip_.empty() && text == line_clip_) {
         // A whole-line copy pastes as a line above, like an IDE.
         int col = cur_.col;
         TextPos end = insert({cur_.line, 0}, text);
@@ -300,8 +328,20 @@ void Editor::paste() {
     } else {
         replace_selection(text);
     }
+    renumber_lists(start.line, cur_.line);
     end_edit();
     pulse_changes(before);
+}
+
+TextPos Editor::insert_text(TextPos at, const std::string& text) {
+    clamp(at);
+    std::vector<std::string> before = lines_;
+    begin_edit(Edit::Other);
+    TextPos end = insert(at, text);
+    cur_ = anchor_ = end;
+    end_edit();
+    pulse_changes(before);
+    return end;
 }
 
 // Highlight what an undo, redo or paste changed: the span of text that
@@ -336,11 +376,302 @@ void Editor::pulse_changes(const std::vector<std::string>& before) {
         }
         return p;
     };
-    pulse_.a = pos_of(pre);
-    pulse_.b = pos_of(end);
-    pulse_.start = ImGui::GetTime();
+    pulse_.spans = {{pos_of(pre), pos_of(end)}};
+    pulse_.start = anim::clock;
     pulse_.version = version_;
     pulse_.active = true;
+}
+
+// ---------------------------------------------------------------------------
+// Find and replace
+
+void Editor::find_begin() {
+    find_active_ = true;
+    find_origin_ = std::min(cur_, anchor_);
+}
+
+void Editor::find_recompute(TextPos from) {
+    matches_.clear();
+    match_ = -1;
+    if (find_q_.empty()) return;
+    // Smart case: a capital in the query makes it case-sensitive.
+    bool exact = std::any_of(find_q_.begin(), find_q_.end(), [](char c) { return std::isupper((unsigned char)c); });
+    std::string q = exact ? find_q_ : lower(find_q_);
+    for (int l = 0; l < (int)lines_.size() && matches_.size() < 10000; l++) {
+        std::string s = exact ? lines_[l] : lower(lines_[l]);
+        for (size_t at = s.find(q); at != std::string::npos; at = s.find(q, at + q.size()))
+            matches_.push_back({{l, (int)at}, {l, (int)(at + q.size())}});
+    }
+    if (matches_.empty()) return;
+    match_ = 0;
+    for (int k = 0; k < (int)matches_.size(); k++)
+        if (!(matches_[k].first < from)) { match_ = k; break; }
+}
+
+void Editor::select_match() {
+    if (match_ < 0 || match_ >= (int)matches_.size()) return;
+    anchor_ = matches_[match_].first;
+    cur_ = matches_[match_].second;
+    reveal_ = true;
+    reveal_mode_ = 3;
+    want_x_ = -1;
+    activity_ = ImGui::GetTime();
+}
+
+void Editor::find_set(const std::string& query) {
+    find_active_ = true;
+    find_q_ = query;
+    find_recompute(find_origin_);
+    if (match_ >= 0) select_match();
+    else cur_ = anchor_ = find_origin_;  // nothing found: back to where you started
+}
+
+void Editor::find_step(int dir) {
+    if (matches_.empty()) return;
+    int n = (int)matches_.size();
+    match_ = ((match_ < 0 ? 0 : match_) + dir + n) % n;
+    select_match();
+    find_origin_ = matches_[match_].first;  // editing the query continues from here
+}
+
+void Editor::find_end() {
+    find_active_ = false;
+    matches_.clear();
+    match_ = -1;
+}
+
+void Editor::replace_current(const std::string& with) {
+    if (match_ < 0 || match_ >= (int)matches_.size()) return;
+    auto [a, b] = matches_[match_];
+    begin_edit(Edit::Other);
+    erase(a, b);
+    TextPos e = insert(a, with);
+    cur_ = anchor_ = e;
+    end_edit();
+    pulse_.spans = {{a, e}};
+    pulse_.start = anim::clock;
+    pulse_.version = version_;
+    pulse_.active = e != a;
+    // On to the next match after what was just written.
+    find_origin_ = e;
+    find_recompute(e);
+    if (match_ >= 0) select_match();
+}
+
+int Editor::replace_all(const std::string& with) {
+    if (matches_.empty()) return 0;
+    int count = (int)matches_.size();
+    // Where each replacement will land: matches are single-line, so only
+    // earlier matches on the same line shift it.
+    std::vector<std::pair<TextPos, TextPos>> spans;
+    int line = -1, shift = 0;
+    for (auto& [a, b] : matches_) {
+        if (a.line != line) { line = a.line; shift = 0; }
+        TextPos s{a.line, a.col + shift};
+        spans.push_back({s, {a.line, s.col + (int)with.size()}});
+        shift += (int)with.size() - (b.col - a.col);
+    }
+    TextPos current = spans[std::clamp(match_, 0, count - 1)].second;
+    begin_edit(Edit::Other);  // one undo step for the lot
+    for (int k = count - 1; k >= 0; k--) {
+        erase(matches_[k].first, matches_[k].second);
+        insert(matches_[k].first, with);
+    }
+    cur_ = anchor_ = current;
+    end_edit();
+    pulse_.spans = with.empty() ? std::vector<std::pair<TextPos, TextPos>>{} : spans;
+    pulse_.start = anim::clock;
+    pulse_.version = version_;
+    pulse_.active = !pulse_.spans.empty();
+    find_origin_ = current;
+    find_recompute(current);
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Moving around
+
+void Editor::goto_heading(int dir) {
+    auto hs = headings();
+    int target = -1;
+    if (dir > 0) {
+        for (auto& h : hs) if (h.line > cur_.line) { target = h.line; break; }
+    } else {
+        for (auto& h : hs) if (h.line < cur_.line) target = h.line;
+    }
+    if (target < 0) return;
+    int col = 0;
+    if (syntax_ == Syntax::Markdown) {
+        LineInfo info;
+        std::vector<uint16_t> st;
+        md_analyze(lines_[target], in_code_before(target), info, st);
+        col = info.content_start;
+    }
+    move_to({target, col}, false);
+    reveal_mode_ = 3;
+    want_x_ = -1;
+}
+
+// Start of the next paragraph (dir > 0), or the start of this one / the
+// previous one (dir < 0). Paragraphs are separated by blank lines.
+TextPos Editor::paragraph_move(int dir) const {
+    const int n = (int)lines_.size();
+    auto blank = [&](int l) { return trim(lines_[l]).empty(); };
+    int l = cur_.line;
+    if (dir > 0) {
+        while (l < n && !blank(l)) l++;
+        while (l < n && blank(l)) l++;
+        if (l >= n) return {n - 1, (int)lines_[n - 1].size()};
+        return {l, 0};
+    }
+    if (cur_.col > 0 && !blank(l)) {
+        while (l > 0 && !blank(l - 1)) l--;
+        return {l, 0};
+    }
+    l--;
+    while (l >= 0 && blank(l)) l--;
+    if (l < 0) return {0, 0};
+    while (l > 0 && !blank(l - 1)) l--;
+    return {l, 0};
+}
+
+// Grow the selection one step: word, sentence, line (text), whole line,
+// paragraph, the section under its heading, the whole note.
+void Editor::expand_selection() {
+    TextPos a = std::min(cur_, anchor_), b = std::max(cur_, anchor_);
+    if (expand_stack_.empty() || !(expand_last_.first == a && expand_last_.second == b)) expand_stack_.clear();
+    const int n = (int)lines_.size();
+    auto contains = [&](TextPos ca, TextPos cb) { return !(a < ca) && !(cb < b) && (ca < a || b < cb); };
+    auto blank = [&](int l) { return trim(lines_[l]).empty(); };
+    std::vector<std::pair<TextPos, TextPos>> cands;
+
+    const std::string& s = lines_[a.line];
+    LineInfo info;
+    std::vector<uint16_t> st;
+    if (syntax_ == Syntax::Markdown) md_analyze(s, in_code_before(a.line), info, st);
+    int cs = std::min(info.content_start, (int)s.size()), ce = (int)s.size();
+    if (a.line == b.line) {
+        // Word.
+        int wa = a.col, wb = b.col;
+        auto word = [&](int i) { return i >= 0 && i < (int)s.size() && char_class(s[i]) == 1; };
+        while (wa > 0 && word(wa - 1)) wa--;
+        while (wb < (int)s.size() && word(wb)) wb++;
+        if (wb > wa) cands.push_back({{a.line, wa}, {a.line, wb}});
+        // Sentence: between sentence ends (. ! ? then a space) within the line.
+        int sa = cs;
+        for (int i = std::min(a.col, ce) - 1; i >= cs; i--)
+            if (std::strchr(".!?", s[i]) && i + 1 < ce && s[i + 1] == ' ') { sa = i + 1; break; }
+        while (sa < ce && s[sa] == ' ') sa++;
+        int sb = ce;
+        for (int i = std::max(b.col, sa); i < ce; i++)
+            if (std::strchr(".!?", s[i]) && (i + 1 == ce || s[i + 1] == ' ')) { sb = i + 1; break; }
+        cands.push_back({{a.line, sa}, {a.line, sb}});
+        cands.push_back({{a.line, cs}, {a.line, ce}});   // the line's text, without its marker
+        cands.push_back({{a.line, 0}, {a.line, ce}});    // the whole line
+    }
+    // Paragraph.
+    {
+        int p0 = a.line, p1 = b.line;
+        while (p0 > 0 && !blank(p0 - 1)) p0--;
+        while (p1 + 1 < n && !blank(p1 + 1)) p1++;
+        cands.push_back({{p0, 0}, {p1, (int)lines_[p1].size()}});
+    }
+    // Section: from the heading above to the next heading of the same or a
+    // higher level.
+    {
+        auto hs = headings();
+        for (int k = (int)hs.size() - 1; k >= 0; k--) {
+            if (hs[k].line > a.line) continue;
+            int end = n - 1;
+            for (size_t j = k + 1; j < hs.size(); j++)
+                if (hs[j].level <= hs[k].level) { end = hs[j].line - 1; break; }
+            while (end > hs[k].line && blank(end)) end--;
+            cands.push_back({{hs[k].line, 0}, {end, (int)lines_[end].size()}});
+        }
+    }
+    cands.push_back({{0, 0}, {n - 1, (int)lines_[n - 1].size()}});
+
+    for (auto& [ca, cb] : cands) {
+        if (!contains(ca, cb)) continue;
+        expand_stack_.push_back({anchor_, cur_});
+        anchor_ = ca;
+        cur_ = cb;
+        expand_last_ = {ca, cb};
+        activity_ = ImGui::GetTime();
+        return;
+    }
+}
+
+void Editor::shrink_selection() {
+    TextPos a = std::min(cur_, anchor_), b = std::max(cur_, anchor_);
+    if (expand_stack_.empty() || !(expand_last_.first == a && expand_last_.second == b)) {
+        expand_stack_.clear();
+        return;
+    }
+    auto [an, cu] = expand_stack_.back();
+    expand_stack_.pop_back();
+    anchor_ = an;
+    cur_ = cu;
+    expand_last_ = {std::min(an, cu), std::max(an, cu)};
+    activity_ = ImGui::GetTime();
+}
+
+bool Editor::link_at_caret(LinkSpan& out) const {
+    if (syntax_ != Syntax::Markdown) return false;
+    std::vector<LinkSpan> links;
+    LineInfo info;
+    std::vector<uint16_t> st;
+    md_analyze(lines_[cur_.line], in_code_before(cur_.line), info, st, &links);
+    for (auto& l : links)
+        if (cur_.col >= l.begin && cur_.col <= l.end) { out = l; return true; }
+    return false;
+}
+
+// Keep "1. 2. 3." lists numbered after items are added, removed or moved.
+// Renumbers the ordered lists touching lines l0..l1 (plus a line either
+// side), from each list's first number. Items of a nested list are a list
+// of their own. Runs inside an edit, so it's part of the same undo step.
+void Editor::renumber_lists(int l0, int l1) {
+    if (syntax_ != Syntax::Markdown) return;
+    const int n = (int)lines_.size();
+    std::vector<LineInfo> info(n);
+    std::vector<uint16_t> st;
+    bool code = false;
+    for (int k = 0; k < n; k++) {
+        md_analyze(lines_[k], code, info[k], st);
+        if (info[k].kind == LineKind::Fence) code = !code;
+    }
+    auto item = [&](int k, int indent) {
+        return info[k].kind == LineKind::Para && info[k].ordered && info[k].marker_begin == indent;
+    };
+    auto nested = [&](int k, int indent) {  // deeper lines that belong to an item
+        return info[k].kind == LineKind::Para && info[k].marker_begin > indent;
+    };
+    std::vector<char> done(n, 0);
+    for (int l = std::max(0, l0 - 1); l <= std::min(n - 1, l1 + 1); l++) {
+        if (done[l] || info[l].kind != LineKind::Para || !info[l].ordered) continue;
+        int indent = info[l].marker_begin;
+        int s = l, e = l;
+        while (s > 0 && (item(s - 1, indent) || nested(s - 1, indent))) s--;
+        while (e + 1 < n && (item(e + 1, indent) || nested(e + 1, indent))) e++;
+        long number = -1;
+        for (int k = s; k <= e; k++) {
+            if (!item(k, indent)) continue;
+            done[k] = 1;
+            std::string& text = lines_[k];
+            int d = indent;
+            while (d < (int)text.size() && std::isdigit((unsigned char)text[d])) d++;
+            if (number < 0) { number = std::strtol(text.c_str() + indent, nullptr, 10); continue; }
+            number++;
+            std::string want = std::to_string(number);
+            int have = d - indent;
+            if (text.compare(indent, have, want) == 0) continue;
+            text.replace(indent, have, want);
+            int delta = (int)want.size() - have;
+            for (TextPos* p : {&cur_, &anchor_})
+                if (p->line == k && p->col > indent) p->col = std::max(indent, p->col + delta);
+        }
+    }
 }
 
 void Editor::select_all() {
@@ -382,6 +713,7 @@ void Editor::move_lines(int dir) {
     }
     cur_.line += dir;
     anchor_.line += dir;
+    renumber_lists(std::min(a, a + dir), std::max(b, b + dir));
     end_edit();
 
     // Lines start where they were and slide into their new slots.
@@ -401,6 +733,7 @@ void Editor::duplicate_lines(int dir) {
         cur_.line += count;
         anchor_.line += count;
     }
+    renumber_lists(a, b + (b - a + 1));
     end_edit();
 }
 
@@ -412,6 +745,7 @@ void Editor::delete_lines() {
     cur_ = {std::min(a, (int)lines_.size() - 1), cur_.col};
     clamp(cur_);
     anchor_ = cur_;
+    renumber_lists(a - 1, a);
     end_edit();
 }
 
@@ -492,6 +826,7 @@ void Editor::indent() {
         if (cur_.line == l) cur_.col += P_.tab_size;
         if (anchor_.line == l) anchor_.col += P_.tab_size;
     }
+    renumber_lists(a, b);
     end_edit();
 }
 
@@ -507,6 +842,7 @@ void Editor::outdent() {
         if (cur_.line == l) cur_.col = std::max(0, cur_.col - k);
         if (anchor_.line == l) anchor_.col = std::max(0, anchor_.col - k);
     }
+    renumber_lists(a, b);
     end_edit();
 }
 
@@ -540,7 +876,8 @@ void Editor::set_syntax(Syntax s) {
     lay_[0].clear();  // styles are cached per line
     lay_[1].clear();
     snap_heights_ = true;
-    diag_.clear();
+    marks_.clear();
+    hints_.clear();
 }
 
 void Editor::set_reader(bool r, bool animate) {
@@ -560,7 +897,7 @@ void Editor::set_reader(bool r, bool animate) {
     morph_.active = animate && anim::enabled && lay_[0].size() == lines_.size();
     if (morph_.active) {
         morph_.to_reader = r;
-        morph_.start = ImGui::GetTime();
+        morph_.start = anim::clock;
         morph_.scroll_from = scroll_;
     }
     ghosts_.clear();
@@ -1138,6 +1475,7 @@ void Editor::newline() {
         if (cur_.col >= k) prefix = s.substr(0, k);
     }
     replace_selection("\n" + prefix);
+    renumber_lists(cur_.line - 1, cur_.line);
     end_edit();
 }
 
@@ -1172,6 +1510,7 @@ void Editor::backspace(bool word) {
     }
     erase(from, cur_);
     cur_ = anchor_ = from;
+    renumber_lists(cur_.line, cur_.line);
     end_edit();
 }
 
@@ -1220,11 +1559,11 @@ void Editor::handle_keys() {
         }
         float row = std::round(P_.size / kEm * P_.line_height);
         if (K(ImGuiKey_UpArrow)) {
-            if (ctrl) { scroll_target_ -= row; scroll_activity_ = ImGui::GetTime(); }
+            if (ctrl) { move_to(paragraph_move(-1), shift); want_x_ = -1; }  // previous paragraph
             else move_vertical(-1, shift);
         }
         if (K(ImGuiKey_DownArrow)) {
-            if (ctrl) { scroll_target_ += row; scroll_activity_ = ImGui::GetTime(); }
+            if (ctrl) { move_to(paragraph_move(1), shift); want_x_ = -1; }  // next paragraph
             else move_vertical(1, shift);
         }
         int page = std::max(1, (int)(view_h_ / row) - 2);
@@ -1375,6 +1714,11 @@ void Editor::draw(const EditorParams& p) {
     view_h_ = p.max.y - p.min.y;
     col_x_ = std::round(p.min.x + (p.max.x - p.min.x - p.column) * 0.5f);
 
+    // Problems fade in and out.
+    marks_snap_ = false;
+    for (auto& m : marks_) m.a = anim::approach(m.a, m.live ? 1.0f : 0.0f, 16.0f, dt, 0.004f);
+    marks_.erase(std::remove_if(marks_.begin(), marks_.end(), [](const Mark& m) { return !m.live && m.a <= 0.0f; }), marks_.end());
+
     sync_edits();
     layout(0);
     resolve_pending();
@@ -1441,6 +1785,12 @@ void Editor::draw(const EditorParams& p) {
             scroll_target_ = L.y + p.top_pad - view_h_ * 0.22f;
         } else if (reveal_mode_ == 2) {
             scroll_target_ = row_top - view_h_ * 0.4f;
+        } else if (reveal_mode_ == 3) {
+            // Jumps (find, headings): leave the view alone if the target is
+            // comfortably visible; otherwise bring it to the upper-middle.
+            float margin = std::min(L.row_h * 2.0f, view_h_ * 0.2f);
+            if (row_top - margin < scroll_target_ || row_bot + margin > scroll_target_ + view_h_)
+                scroll_target_ = row_top - view_h_ * 0.4f;
         } else {
             float margin = std::min(L.row_h * 2.5f, view_h_ * 0.25f);
             if (row_top - margin < scroll_target_) scroll_target_ = row_top - margin;
@@ -1482,43 +1832,35 @@ void Editor::draw(const EditorParams& p) {
     // Switching between edit and reader: the morph draws the page instead.
     bool morphing = false;
     if (morph_.active) {
-        float elapsed = anim::enabled ? (float)(now - morph_.start) * anim::speed : 1e9f;
+        float elapsed = anim::enabled ? (float)(anim::clock - morph_.start) * anim::speed : 1e9f;
         if (lay_[1].size() != lines_.size() || !draw_morph(dl, elapsed)) morph_.active = false;
         else { morphing = true; anim::active = true; }
     }
     if (!morphing) {
 
-    // Change pulse: what an undo, redo or paste changed glows softly and
-    // fades. Any further edit clears it (its positions would be stale).
+    // Change pulse: what an undo, redo, paste or replace changed glows softly
+    // and fades. Any further edit clears it (its positions would be stale).
     if (pulse_.active && (version_ != pulse_.version || reader_)) pulse_.active = false;
     if (pulse_.active) {
-        float t = anim::progress(pulse_.start, now, 0.4f);
+        float t = anim::progress(pulse_.start, anim::clock, 0.4f);
         float a = (1.0f - t) * (1.0f - t);
         if (t >= 1.0f || a <= 0.0f) {
             pulse_.active = false;
         } else {
             ImU32 col = fade(col_alpha(T.accent, 0.16f * a));
-            TextPos pa = pulse_.a, pb = pulse_.b;
-            for (int l = std::max(0, pa.line); l <= pb.line && l < (int)V.size(); l++) {
-                const Line& L = V[l];
-                float ly = origin_y_ + L.dy + L.pad + yoff_[l];
-                if (ly > p.max.y || ly + L.dh < p.min.y) continue;
-                Metrics m = metrics(L.size);
-                int la = l == pa.line ? pa.col : 0;
-                int lb = l == pb.line ? pb.col : (int)lines_[l].size();
-                for (int r = 0; r < (int)L.rows.size(); r++) {
-                    int ra = L.rows[r];
-                    int rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)lines_[l].size();
-                    int sa = std::max(la, ra), sb = std::min(lb, rb);
-                    bool eol = l != pb.line && r + 1 == (int)L.rows.size();
-                    if (sa > sb || (sa == sb && !eol)) continue;
-                    float x1 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sa, m);
-                    float x2 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sb, m);
-                    if (eol) x2 += m.sans->GetCharAdvance(' ');
-                    float ry = ly + r * L.row_h;
-                    dl->AddRectFilled(ImVec2(std::round(x1), ry), ImVec2(std::round(x2), ry + L.row_h), col);
-                }
-            }
+            for (auto& s : pulse_.spans) draw_span(dl, s.first, s.second, col);
+        }
+    }
+
+    // Find: every match softly lit; the current one is the selection.
+    if (find_active_ && !reader_ && !matches_.empty()) {
+        ImU32 col = fade(col_alpha(T.bright, 0.10f));  // other matches: neutral; the current one is the (accent) selection
+        int first = std::max(0, line_at_y(0, std::max(0.0f, scroll_ - p.top_pad)) - 1);
+        for (int k = 0; k < (int)matches_.size(); k++) {
+            if (k == match_) continue;
+            if (matches_[k].first.line < first) continue;
+            if (origin_y_ + V[std::min(matches_[k].first.line, (int)V.size() - 1)].dy > p.max.y) break;
+            draw_span(dl, matches_[k].first, matches_[k].second, col);
         }
     }
 
@@ -1711,6 +2053,31 @@ void Editor::draw(const EditorParams& p) {
 // fade in where they'll be. Each view keeps its own scroll, so lines ease
 // between their two screen positions. At t = 1 this draws exactly what the
 // normal reader (or editor) frame does, so the hand-off is invisible.
+// Fill the visual rows covering text a..b (edit view), as the selection does.
+void Editor::draw_span(ImDrawList* dl, TextPos a, TextPos b, ImU32 col) {
+    auto& V = lay_[0];
+    for (int l = std::max(0, a.line); l <= b.line && l < (int)V.size(); l++) {
+        const Line& L = V[l];
+        float ly = origin_y_ + L.dy + L.pad + yoff_[l];
+        if (ly > P_.max.y || ly + L.dh < P_.min.y) continue;
+        Metrics m = metrics(L.size);
+        int la = l == a.line ? a.col : 0;
+        int lb = l == b.line ? b.col : (int)lines_[l].size();
+        for (int r = 0; r < (int)L.rows.size(); r++) {
+            int ra = L.rows[r];
+            int rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)lines_[l].size();
+            int sa = std::max(la, ra), sb = std::min(lb, rb);
+            bool eol = l != b.line && r + 1 == (int)L.rows.size();
+            if (sa > sb || (sa == sb && !eol)) continue;
+            float x1 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sa, m);
+            float x2 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sb, m);
+            if (eol) x2 += m.sans->GetCharAdvance(' ');
+            float ry = ly + r * L.row_h;
+            dl->AddRectFilled(ImVec2(std::round(x1), ry), ImVec2(std::round(x2), ry + L.row_h), col);
+        }
+    }
+}
+
 bool Editor::draw_morph(ImDrawList* dl, float s) {
     const EditorParams& p = P_;
     // Every part is its own exponential (Unreal's FInterpTo shape: fast out
@@ -1876,7 +2243,7 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
             ImVec2 sz = p.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
             float ty = ye + (L0.row_h - L0.size) * 0.5f + (L0.size - ns) * 0.78f;
             dl->AddText(p.mono, ns, ImVec2(std::round(x0 - p.size * 1.3f - sz.x), std::round(ty)),
-                        col_alpha(i == cur_.line ? T.dim : T.faint, base * syntax_a), buf);
+                        col_alpha(i == cur_.line ? T.accent : T.faint, base * syntax_a), buf);
         }
     }
     P_.alpha = base;
@@ -1943,7 +2310,7 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         snprintf(buf, sizeof buf, "%d", i + 1);
         ImVec2 sz = P_.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
         float ty = y + (L.row_h - L.size) * 0.5f + (L.size - ns) * 0.78f;
-        ImU32 col = i == cur_.line ? T.dim : T.faint;
+        ImU32 col = i == cur_.line ? T.accent : T.faint;  // where you are
         dl->AddText(P_.mono, ns, ImVec2(std::round(x0 - P_.size * 1.3f - sz.x), std::round(ty)), fade(col), buf);
     }
 
@@ -1956,22 +2323,47 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
     }
     P_.alpha = base * row_alpha(0);
 
-    // A problem on this line: a mark in the margin and the message after
-    // the text, where the eye already is.
+    // A problem on this line: the part it's about underlined, and the message after the text, where the eye already is.
+    // It crossfades with the line's hint.
     if (mode == 0 && i >= 0) {
-        auto d = diag_.find(i);
-        if (d != diag_.end()) {
-            float bw = std::max(2.0f, std::round(2 * P_.dpi));
-            float mx = std::round(x0 - P_.size * 0.7f);
-            dl->AddRectFilled(ImVec2(mx, y + L.row_h * 0.2f), ImVec2(mx + bw, y + block_h - L.row_h * 0.2f), fade(T.text));
-            int last = L.rows.back();
-            float ex = x0 + row_x(L, (int)L.rows.size() - 1) + measure(s, st, last, (int)s.size(), m) + P_.size * 1.2f;
-            float ms = std::round(P_.size * 0.86f);
-            float ry = y + (L.rows.size() - 1) * L.row_h;
-            float ty = std::round(ry + (L.row_h - ms) * 0.5f + (m.size - ms) * 0.3f);
+        const Mark* mk = nullptr;
+        for (auto& k : marks_)
+            if (k.d.line == i && (!mk || k.a > mk->a)) mk = &k;
+        float pa = mk ? mk->a : 0.0f;
+        auto hint = hints_.find(i);
+
+        int last = L.rows.back();
+        float ex = x0 + row_x(L, (int)L.rows.size() - 1) + measure(s, st, last, (int)s.size(), m) + P_.size * 1.2f;
+        float ms = std::round(P_.size * 0.86f);
+        float ry = y + (L.rows.size() - 1) * L.row_h;
+        float ty = std::round(ry + (L.row_h - ms) * 0.5f + (m.size - ms) * 0.3f);
+        auto note = [&](const std::string& text, ImU32 col) {
             dl->PushClipRect(ImVec2(ex, ry), ImVec2(P_.max.x - P_.size, ry + L.row_h), true);
-            dl->AddText(P_.sans, ms, ImVec2(std::round(ex), ty), fade(col_mix(T.dim, T.text, 0.45f)), d->second.c_str());
+            dl->AddText(P_.mono, ms, ImVec2(std::round(ex), ty), col, text.c_str());
             dl->PopClipRect();
+        };
+
+        if (hint != hints_.end() && pa < 1.0f)
+            note(hint->second, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), 1.0f - pa));
+        if (pa > 0.0f) {
+            ImU32 err = col_alpha(fade(T.error), pa);
+            // The underline, row by row if the range wraps. No range: the
+            // whole line.
+            int c0 = mk->d.col0 >= 0 ? std::clamp(mk->d.col0, 0, (int)s.size()) : 0;
+            int c1 = mk->d.col0 >= 0 ? std::clamp(mk->d.col1, 0, (int)s.size()) : (int)s.size();
+            if (c1 > c0) {
+                float uh = std::max(1.0f, std::round(P_.dpi));
+                for (int r = 0; r < (int)L.rows.size(); r++) {
+                    int ra = L.rows[r], rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)s.size();
+                    int a = std::max(c0, ra), b = std::min(c1, rb);
+                    if (a >= b) continue;
+                    float ux = x0 + row_x(L, r) + measure(s, st, ra, a, m);
+                    float uw = measure(s, st, a, b, m);
+                    float uy = std::round(y + r * L.row_h + L.row_h * 0.5f + m.size * 0.62f);
+                    dl->AddRectFilled(ImVec2(std::round(ux), uy), ImVec2(std::round(ux + uw), uy + uh), err);
+                }
+            }
+            note(mk->d.msg, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), pa));
         }
     }
 }

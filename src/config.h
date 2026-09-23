@@ -1,6 +1,6 @@
 #pragma once
 // delta.ini: the single place all settings live. Unknown keys are ignored,
-// bad values fall back to defaults and are reported in the status bar.
+// bad values fall back to defaults and are reported on their lines.
 #include <map>
 #include <string>
 #include <utility>
@@ -42,31 +42,82 @@ struct Config {
     // [keys] command id -> chord list ("ctrl+z ctrl+shift+z"), empty = unbound
     std::map<std::string, std::string> keys;
 
-    // "section.key" -> 0-based line it was set on, so later checks (colours,
-    // key chords) can point at the right line.
-    std::map<std::string, int> key_lines;
+    // Where each "section.key" was set (0-based line, byte columns of the key
+    // and the value), so later checks (key chords, folders) can point at it.
+    struct Where { int line = -1, key0 = 0, key1 = 0, val0 = 0, val1 = 0; };
+    std::map<std::string, Where> where;
     int line_of(const std::string& section_key) const {
-        auto it = key_lines.find(section_key);
-        return it == key_lines.end() ? -1 : it->second;
+        auto it = where.find(section_key);
+        return it == where.end() ? -1 : it->second.line;
     }
 };
 
-// A problem in the file. line is 0-based, or -1 when it isn't tied to a line.
+// A problem in the file. line is 0-based, or -1 when it isn't tied to a
+// line; col0..col1 is the part of the line it's about (-1: the whole line).
 struct ConfigIssue {
     int line = -1;
     std::string msg;
+    int col0 = -1, col1 = -1;
 };
+// A problem with a setting's key or value, placed where it was set.
+ConfigIssue issue_at(const Config& c, const std::string& section_key, bool value, std::string msg);
+
+// Every setting delta knows: the one table the parser, the problems, the
+// inline hints and "add a setting" all work from. ([keys] comes from the
+// command list instead; see BindingDoc.)
+struct Setting {
+    enum class Kind { Bool, Float, Int, Choice, Colour, Text, Path };
+    const char* section;
+    const char* key;
+    Kind kind;
+    const char* def;        // default, as written in the file
+    const char* def_light;  // colours: the light theme's default (else null)
+    float lo, hi;           // Float and Int: allowed range
+    const char* choices;    // Choice: "bar|thick|block"
+    const char* desc;       // one short line, lowercase
+    std::string default_for(const std::string& theme) const {
+        return theme == "light" && def_light ? def_light : def;
+    }
+};
+const std::vector<Setting>& all_settings();
+const Setting* find_setting(const std::string& section, const std::string& key);
+extern const char* const kSections[5];  // general, editor, appearance, colors, keys
+
+// The closest known name to a mistyped one, or "" if nothing is close.
+std::string suggest(const std::string& typo, const std::vector<std::string>& names);
+
+// Does `value` say the same as `def` for this kind of setting (1 == 1.0,
+// yes == true, BLOCK == block)?
+bool same_value(const Setting& s, const std::string& value, const std::string& def);
 
 // Returns false only if the file couldn't be read. Value problems land in
 // `issues` but still produce a usable config.
 bool load_config(const fs::path& path, Config& cfg, std::vector<ConfigIssue>& issues);
+// The same, from text (the config as it's being edited).
+void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>& issues);
 
-// The file written on first launch. Every setting is present but commented
-// out, so the file documents all options while built-in defaults can still
-// change; only lines the user uncomments override them. `bindings` is every
-// command id with its title and default chords.
+// A command's id, title and default chords, for [keys].
 struct BindingDoc { std::string id, title, keys; };
-std::string default_config_text(const std::vector<BindingDoc>& bindings);
+
+// The active `key = value` lines of a config being edited, with the section
+// each sits in (lowercased names, value as written).
+struct ConfigEntry { int line; std::string section, key, value; };
+std::vector<ConfigEntry> scan_config(const std::vector<std::string>& lines);
+
+// What delta shows beside each setting line: what it does and its default.
+// Keyed by 0-based line.
+std::map<int, std::string> config_hints(const std::vector<std::string>& lines, const std::string& theme,
+                                        const std::vector<BindingDoc>& bindings);
+
+// Where a new setting for `section` goes: just after the section's last
+// setting (or its header). `header` is set when the section doesn't exist
+// yet and "[section]" must be written first (at the returned line, the end).
+int config_insert_line(const std::vector<std::string>& lines, const std::string& section, bool& header);
+
+// The file written on first launch: just the sections. Defaults and
+// descriptions are shown beside each setting by delta itself, and "add a
+// setting" inserts them, so nothing needs to live in the file.
+std::string default_config_text();
 
 // Tiny key=value store for app state (last note, window size...). Kept apart
 // from delta.ini so the user's config never gets rewritten under them.

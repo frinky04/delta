@@ -47,7 +47,12 @@ Default keys (all rebindable):
 | `ctrl+shift+p`, `f1` | commands |
 | `ctrl+shift+s` | switch space |
 | `ctrl+shift+o` / `ctrl+g` | jump to heading / line |
-| `ctrl+f` | search this space |
+| `ctrl+f` / `ctrl+h` | find / find and replace in this note |
+| `ctrl+shift+f` | search every note in this space |
+| `ctrl+↑` / `ctrl+↓` | previous / next paragraph (add shift to select) |
+| `ctrl+alt+↑` / `ctrl+alt+↓` | previous / next heading |
+| `alt+shift+→` / `alt+shift+←` | expand / shrink selection |
+| `alt+enter` | follow the link at the caret |
 | `ctrl+n` / `alt+d` / `f2` | new note / today's daily note / rename |
 | `alt+left` / `alt+right` | back / forward through opened notes |
 | `ctrl+e` | reader mode |
@@ -61,15 +66,17 @@ Default keys (all rebindable):
 | `f11` | full screen |
 | `ctrl+,` | edit the config |
 
-Typing `*`, `_`, `` ` ``, `~`, `=`, `(`, `[` or `"` with text selected wraps the selection. `ctrl+c` or `ctrl+x` with nothing selected copies or cuts the whole line.
+Typing `*`, `_`, `` ` ``, `~`, `=`, `(`, `[` or `"` with text selected wraps the selection. `ctrl+c` or `ctrl+x` with nothing selected copies or cuts the whole line. Pasting a URL over selected text makes it a link. Numbered lists renumber themselves as items are added, removed or moved. Each note reopens with the caret and scroll where you left them.
+
+Find lives in the status line, so the note stays in view: matches are lit as you type (case-sensitive only if you type a capital), `enter` / `shift+enter` step through them, `tab` switches between find and replace, `enter` in replace replaces the current match, `ctrl+alt+enter` replaces them all (one undo), and `esc` closes with the match selected. Expand selection grows word, sentence, line, paragraph, section (under its heading), then the whole note.
 
 ## Config
 
-Everything lives in one ini file: `%APPDATA%\delta\delta.ini` on Windows, `~/.config/delta/delta.ini` elsewhere. It's created on first run with every setting listed, commented out at its default. Remove the `;` to change one.
+Everything lives in one ini file: `%APPDATA%\delta\delta.ini` on Windows, `~/.config/delta/delta.ini` elsewhere. It starts out as just the section headers: it holds only what you've changed, and anything left out uses its default.
 
-`ctrl+,` opens it in delta itself, as ini text in mono. It autosaves like a note, and every save applies straight away. Problems are shown at the end of their line (an unknown setting, a value that isn't a number, an unreadable key chord), and the status bar counts them. `@` in the palette jumps between `[sections]`, and `alt+left` takes you back to your note. To use another editor, run "Open config in another app" from the `/` palette. Changes made there are picked up within a second.
+`ctrl+,` opens it in delta itself, as ini text in mono. It autosaves like a note, and every save applies straight away. Beside each setting, delta shows what it does and its default (or that it already is the default), so the file itself never needs to carry them. "Add a setting" in the `/` palette lists everything the file doesn't set yet, settings and key bindings alike; pick one and it's written into its section at its default, with the value selected. Problems are shown at the end of their line instead, with a suggestion where there is one: a misspelt name ("did you mean line_height?"), a setting in the wrong section, a value out of range, an unreadable key chord. Each says what delta uses instead, and the part it's about is underlined. They're checked as you type; a problem on the line you're typing on waits for a pause. The status bar counts them: click the count or press `F8` / `shift+F8` to go to the next or previous one, with the bad part selected. Problem marks use `error` in `[colors]`. `@` in the palette jumps between `[sections]`, and `alt+left` takes you back to your note. To use another editor, run "Open config in another app" from the `/` palette. Changes made there are picked up within a second.
 
-The `[keys]` section lists every command id, so any palette command can be bound:
+Any palette command can be bound in `[keys]` by its id ("Add a setting" lists them):
 
 ```ini
 [keys]

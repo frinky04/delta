@@ -40,6 +40,7 @@ static void frame(Editor& ed, bool reader_keys = true) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(1000, 800);
     io.DeltaTime = g_dt_override > 0 ? g_dt_override : 1.0f / 60;
+    anim::tick(io.DeltaTime, false, 0.0f);  // as the main loop does (no display rate here)
     g_time += io.DeltaTime;
     ImGui::NewFrame();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -377,13 +378,123 @@ static void test_ini() {
             if (i.line == line) return i.msg;
         return std::string();
     };
-    CHECK_EQ(at(2), std::string("expected a number"));
-    CHECK_EQ(at(3), std::string("expected true or false"));
+    CHECK_EQ(at(2), std::string("expected a number, 8 to 48, using 14"));
+    CHECK_EQ(at(3), std::string("expected true or false, using false"));
     CHECK_EQ(at(4), std::string("unknown setting"));
     CHECK(at(5).rfind("out of range", 0) == 0);
     CHECK(at(8).rfind("unknown section", 0) == 0);
     CHECK_EQ(cfg.tab_size, 8);
     CHECK_EQ(cfg.line_of("colors.accent"), 7);
+}
+
+static void test_config_schema() {
+    // Every table entry has a default that passes its own check.
+    for (auto& s : all_settings()) {
+        CHECK(find_setting(s.section, s.key) == &s);
+        CHECK(same_value(s, s.def, s.def));
+    }
+
+    CHECK_EQ(suggest("line_hieght", {"line_height", "line_numbers"}), std::string("line_height"));
+    CHECK_EQ(suggest("zzzzzz", {"line_height", "theme"}), std::string());
+    const Setting* fs_ = find_setting("editor", "font_size");
+    CHECK(same_value(*fs_, "14.0", "14"));
+    CHECK(!same_value(*fs_, "15", "14"));
+    CHECK(same_value(*find_setting("editor", "line_numbers"), "no", "false"));
+    CHECK(same_value(*find_setting("editor", "caret_style"), "THICK", "thick"));
+    CHECK_EQ(find_setting("colors", "accent")->default_for("light"), std::string("#c96f0e"));
+    CHECK_EQ(find_setting("colors", "accent")->default_for("dark"), std::string("#e0851e"));
+
+    fs::path p = fs::temp_directory_path() / "delta_test_schema.ini";
+    atomic_write(p,
+                 "[editr]\n"
+                 "[editor]\n"
+                 "line_hieght = 2\n"
+                 "theme = light\n"
+                 "caret_style = round\n"
+                 "[colors]\n"
+                 "accent = orange\n",
+                 nullptr);
+    Config cfg;
+    std::vector<ConfigIssue> issues;
+    CHECK(load_config(p, cfg, issues));
+    fs::remove(p);
+    auto at = [&](int line) {
+        for (auto& i : issues)
+            if (i.line == line) return i.msg;
+        return std::string();
+    };
+    CHECK_EQ(at(0), std::string("unknown section; did you mean [editor]?"));
+    CHECK_EQ(at(2), std::string("unknown setting; did you mean line_height?"));
+    CHECK_EQ(at(3), std::string("belongs in [appearance]"));
+    CHECK_EQ(at(4), std::string("use bar, thick or block, using thick"));
+    CHECK_EQ(at(6), std::string("expected a colour like #e0851e, using the default"));
+    CHECK_EQ(cfg.caret_style, std::string("thick"));
+    CHECK(cfg.colors.empty());
+
+    // Each problem points at the part it's about: the section name, the key
+    // for names, the value for values (inline comments and blanks left out).
+    Config live;
+    std::vector<ConfigIssue> li;
+    parse_config("  [editr]\n[editor]\nline_hieght = 2\ncaret_style =  round   ; comment\nfont_size =\n", live, li);
+    auto span = [&](int line) {
+        for (auto& i : li)
+            if (i.line == line) return std::make_pair(i.col0, i.col1);
+        return std::make_pair(-2, -2);
+    };
+    CHECK(span(0) == std::make_pair(3, 8));    // editr
+    CHECK(span(2) == std::make_pair(0, 11));   // line_hieght
+    CHECK(span(3) == std::make_pair(15, 20));  // round
+    CHECK(span(4) == std::make_pair(0, 9));    // empty value: the key
+    CHECK_EQ(live.where["editor.caret_style"].val0, 15);
+    ConfigIssue ia = issue_at(live, "editor.caret_style", true, "x");
+    CHECK(ia.line == 3 && ia.col0 == 15 && ia.col1 == 20);
+    CHECK_EQ(issue_at(live, "nope.nope", true, "x").line, -1);
+
+    // A fresh config is just the sections.
+    std::string tpl = default_config_text();
+    for (const char* s : kSections) CHECK(tpl.find(std::string("[") + s + "]") != std::string::npos);
+    CHECK(tpl.find('=') == std::string::npos);
+
+    // Hints: what each setting does and its default, for this theme.
+    std::vector<std::string> lines = {
+        "; hi",
+        "[editor]",
+        "font_size = 14",
+        "font_size = 16",
+        "[colors]",
+        "accent = #c96f0e",
+        "[keys]",
+        "edit.undo = ctrl+z",
+        "edit.redo = ctrl+shift+z ctrl+y",
+        "note.move = ctrl+m",
+        "edit.cut = ctrl+k",
+    };
+    std::vector<BindingDoc> docs = {{"edit.undo", "Undo", "ctrl+z"}, {"edit.redo", "Redo", "ctrl+y ctrl+shift+z"},
+                                    {"note.move", "Move note", ""}, {"edit.cut", "Cut", "ctrl+x"}};
+    auto hints = config_hints(lines, "light", docs);
+    CHECK(hints.count(0) == 0 && hints.count(1) == 0);
+    CHECK_EQ(hints[2], std::string("px (default)"));
+    CHECK_EQ(hints[3], std::string("px, default 14"));
+    CHECK(hints[5].find("(default)") != std::string::npos);  // light theme's accent
+    CHECK_EQ(hints[7], std::string("(default)"));
+    CHECK_EQ(hints[8], std::string("(default)"));    // same chords, any order
+    CHECK_EQ(hints[9], std::string("unbound by default"));
+    CHECK_EQ(hints[10], std::string("default ctrl+x"));
+    CHECK(config_hints(lines, "dark", docs)[5].find("default #e0851e") != std::string::npos);
+    // Self-explanatory settings show only their default.
+    CHECK_EQ(config_hints({"[editor]", "line_numbers = true"}, "dark", {})[1], std::string("default false"));
+
+    // New settings go after the last one in their section, or in a new
+    // section at the end.
+    bool header = false;
+    std::vector<std::string> doc = {"[general]", "", "[editor]", "font_size = 15", "; tabs", "", "[keys]", ""};
+    CHECK_EQ(config_insert_line(doc, "general", header), 1);
+    CHECK(!header);
+    CHECK_EQ(config_insert_line(doc, "editor", header), 4);
+    CHECK(!header);
+    CHECK_EQ(config_insert_line(doc, "keys", header), 7);
+    CHECK_EQ(config_insert_line(doc, "colors", header), 8);
+    CHECK(header);
 }
 
 static void test_smear() {
@@ -738,6 +849,161 @@ static void test_morph_still_text() {
     T = saved;
 }
 
+static void test_find_replace() {
+    Editor e = fresh("foo bar Foo\nfoo end");
+    e.find_begin();
+    e.find_set("foo");  // smart case: lowercase matches any case
+    CHECK_EQ(e.find_count(), 3);
+    CHECK_EQ(e.selected_text(), std::string("foo"));
+    CHECK(e.anchor().line == 0 && e.anchor().col == 0);
+    e.find_step(1);
+    CHECK(e.anchor().col == 8);          // "Foo"
+    e.find_step(1);
+    CHECK(e.anchor().line == 1);
+    e.find_step(1);
+    CHECK(e.anchor().line == 0 && e.anchor().col == 0);  // wraps
+    e.find_step(-1);
+    CHECK(e.anchor().line == 1);         // and back
+    e.find_set("Foo");                   // a capital: case-sensitive
+    CHECK_EQ(e.find_count(), 1);
+    e.find_set("zzz");
+    CHECK_EQ(e.find_count(), 0);
+    CHECK(!e.has_selection());
+
+    // Replace one: moves on to the next match.
+    Editor r = fresh("a cat, a cat, a cat");
+    r.find_begin();
+    r.find_set("cat");
+    r.replace_current("dog");
+    frame(r);
+    CHECK_EQ(r.text(), std::string("a dog, a cat, a cat"));
+    CHECK_EQ(r.find_count(), 2);
+    CHECK(r.anchor().col == 9);
+    // Replace all: one undo step, each replacement pulses.
+    CHECK_EQ(r.replace_all("bird"), 2);
+    frame(r);
+    CHECK_EQ(r.text(), std::string("a dog, a bird, a bird"));
+    CHECK_EQ(r.pulse_spans(), 2);
+    r.undo();
+    frame(r);
+    CHECK_EQ(r.text(), std::string("a dog, a cat, a cat"));
+    // A replacement containing the query isn't matched again.
+    Editor g = fresh("x x");
+    g.find_begin();
+    g.find_set("x");
+    CHECK_EQ(g.replace_all("xx"), 2);
+    CHECK_EQ(g.text(), std::string("xx xx"));
+    g.find_end();
+}
+
+static void test_navigation_pass() {
+    // Headings.
+    Editor h = fresh("# One\ntext\n## Two\nmore\n# Three");
+    h.goto_heading(1);
+    CHECK(h.cursor().line == 2 && h.cursor().col == 3);
+    h.goto_heading(1);
+    CHECK(h.cursor().line == 4);
+    h.goto_heading(-1);
+    CHECK(h.cursor().line == 2);
+
+    // Paragraphs: ctrl+down to the next one's start, ctrl+up back.
+    Editor p = fresh("a1\na2\n\nb1\nb2\n\n\nc1");
+    key(p, ImGuiKey_DownArrow, ImGuiMod_Ctrl);
+    CHECK(p.cursor().line == 3 && p.cursor().col == 0);
+    key(p, ImGuiKey_DownArrow, ImGuiMod_Ctrl);
+    CHECK(p.cursor().line == 7);
+    key(p, ImGuiKey_UpArrow, ImGuiMod_Ctrl);
+    CHECK(p.cursor().line == 3);
+    key(p, ImGuiKey_RightArrow);
+    key(p, ImGuiKey_UpArrow, ImGuiMod_Ctrl);
+    CHECK(p.cursor().line == 3 && p.cursor().col == 0);  // mid-line: start of this paragraph
+
+    // Expand: word, sentence, line text, whole line, paragraph, section, note.
+    Editor x = fresh("# Head\n- First one. Second part here.\nnext line\n\n# Other");
+    x.select_range({1, 21}, {1, 21});  // in "part"
+    frame(x);
+    x.expand_selection();
+    CHECK_EQ(x.selected_text(), std::string("part"));
+    x.expand_selection();
+    CHECK_EQ(x.selected_text(), std::string("Second part here."));
+    x.expand_selection();
+    CHECK_EQ(x.selected_text(), std::string("First one. Second part here."));
+    x.expand_selection();
+    CHECK_EQ(x.selected_text(), std::string("- First one. Second part here."));
+    x.expand_selection();
+    CHECK_EQ(x.selected_text(), std::string("# Head\n- First one. Second part here.\nnext line"));
+    x.expand_selection();  // section is the same span here, so the whole note is next
+    CHECK_EQ(x.selected_text(), x.text());
+    x.shrink_selection();
+    x.shrink_selection();
+    CHECK_EQ(x.selected_text(), std::string("- First one. Second part here."));
+
+    // Link at the caret.
+    Editor l = fresh("see [[My Note]] and [site](https://a.b)");
+    LinkSpan link;
+    l.select_range({0, 7}, {0, 7});
+    CHECK(l.link_at_caret(link) && link.wiki && link.target == "My Note");
+    l.select_range({0, 22}, {0, 22});
+    CHECK(l.link_at_caret(link) && !link.wiki && link.target == "https://a.b");
+    l.select_range({0, 1}, {0, 1});
+    CHECK(!l.link_at_caret(link));
+}
+
+static void test_writing_pass() {
+    // A URL pasted over selected text becomes a link.
+    Editor u = fresh("read the docs today");
+    ImGui::SetClipboardText("https://example.com/docs");
+    u.select_range({0, 9}, {0, 13});
+    frame(u);
+    u.paste();
+    CHECK_EQ(u.text(), std::string("read the [docs](https://example.com/docs) today"));
+    // Not over a selection: pasted as it is.
+    u.select_range({0, 0}, {0, 0});
+    frame(u);
+    u.paste();
+    CHECK(u.text().rfind("https://example.com/docs", 0) == 0);
+
+    // Ordered lists renumber.
+    Editor d = fresh("1. a\n2. b\n3. c\n4. d");
+    d.select_range({1, 0}, {1, 0});
+    frame(d);
+    d.delete_lines();
+    CHECK_EQ(d.text(), std::string("1. a\n2. c\n3. d"));
+    d.undo();
+    frame(d);
+    CHECK_EQ(d.text(), std::string("1. a\n2. b\n3. c\n4. d"));
+
+    Editor n = fresh("1. a\n2. b");
+    n.select_range({0, 4}, {0, 4});
+    frame(n);
+    key(n, ImGuiKey_Enter);
+    type(n, "new");
+    CHECK_EQ(n.text(), std::string("1. a\n2. new\n3. b"));
+
+    Editor m = fresh("1. a\n2. b\n3. c");
+    m.select_range({2, 0}, {2, 0});
+    frame(m);
+    m.move_lines(-1);
+    CHECK_EQ(m.text(), std::string("1. a\n2. c\n3. b"));
+
+    // Nested lists count on their own; start number is kept.
+    Editor s = fresh("5. a\n    1. x\n    2. y\n6. b\n7. c");
+    s.select_range({3, 0}, {3, 0});
+    frame(s);
+    s.delete_lines();
+    CHECK_EQ(s.text(), std::string("5. a\n    1. x\n    2. y\n6. c"));
+
+    // Numbers growing a digit keep the caret in place.
+    std::string many;
+    for (int i = 1; i <= 9; i++) many += std::to_string(i) + ". i\n";
+    Editor w = fresh(many + "9. last");
+    w.select_range({9, 7}, {9, 7});
+    frame(w);
+    CHECK_EQ(w.lines()[9], std::string("9. last"));
+    w.duplicate_lines(-1);  // renumbers the list: the last item becomes 11
+    CHECK_EQ(w.lines()[10], std::string("11. last"));
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -761,12 +1027,16 @@ int main() {
     test_reader();
     test_fuzzy_and_keys();
     test_ini();
+    test_config_schema();
     test_smear();
     test_layout_motion();
     test_code_block_space();
     test_change_pulse();
     test_morph();
     test_morph_still_text();
+    test_find_replace();
+    test_navigation_pass();
+    test_writing_pass();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

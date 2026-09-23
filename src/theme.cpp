@@ -39,8 +39,12 @@ unsigned col_rgb(ImU32 c) {
 
 void build_theme(const Config& cfg, std::vector<ConfigIssue>& issues) {
     Theme t;
-    // Monochrome: neutral greys only. The "accent" is simply the brightest
-    // grey, used for the caret, markers and links.
+    // Neutral greys carry everything you've written; hierarchy comes from
+    // brightness and weight. The one colour, `accent`, marks only where you
+    // are acting: the caret, the selection, the palette's pick, the current
+    // line number, the unsaved dot and the echo of an edit. Never content,
+    // never text (except dark text on a solid accent bar). `error` is the
+    // same kind of signal for problems: marks only, never the message.
     if (cfg.theme == "light") {
         t.dark = false;
         t.bg = hex(0xf4f4f4);
@@ -50,11 +54,11 @@ void build_theme(const Config& cfg, std::vector<ConfigIssue>& issues) {
         t.dim = hex(0x8c8c8c);
         t.text = hex(0x2e2e2e);
         t.bright = hex(0x0a0a0a);
-        t.accent = hex(0x111111);
+        t.accent = hex(0xc96f0e);  // deeper, so it holds up on light grey
         t.code = hex(0x4a4a4a);
         t.code_bg = hex(0xe9e9e9);
+        t.error = hex(0xb8412f);
     } else {
-        if (cfg.theme != "dark") issues.push_back({cfg.line_of("appearance.theme"), "unknown theme; use dark or light"});
         t.bg = hex(0x0c0c0c);
         t.surface = hex(0x151515);
         t.border = hex(0x242424);
@@ -62,27 +66,24 @@ void build_theme(const Config& cfg, std::vector<ConfigIssue>& issues) {
         t.dim = hex(0x6b6b6b);
         t.text = hex(0xbdbdbd);
         t.bright = hex(0xf0f0f0);
-        t.accent = hex(0xe6e6e6);
+        t.accent = hex(0xe0851e);  // warm orange, after Krita's dark theme
         t.code = hex(0x9e9e9e);
         t.code_bg = hex(0x161616);
+        t.error = hex(0xd0564a);  // muted brick red
     }
 
     struct { const char* name; ImU32* dst; } slots[] = {
         {"background", &t.bg}, {"surface", &t.surface}, {"border", &t.border}, {"faint", &t.faint},
         {"dim", &t.dim}, {"text", &t.text}, {"bright", &t.bright}, {"accent", &t.accent},
-        {"code", &t.code}, {"code_background", &t.code_bg},
+        {"code", &t.code}, {"code_background", &t.code_bg}, {"error", &t.error},
     };
-    for (auto& [name, value] : cfg.colors) {
-        bool known = false;
-        for (auto& s : slots) {
-            if (name != s.name) continue;
-            known = true;
-            if (!parse_hex(value, *s.dst)) issues.push_back({cfg.line_of("colors." + name), "expected a colour like #1a2b3c"});
-        }
-        if (!known) issues.push_back({cfg.line_of("colors." + name), "unknown colour name"});
-    }
-    t.selection = col_alpha(t.accent, t.dark ? 0.17f : 0.14f);
-    t.highlight = col_alpha(t.accent, t.dark ? 0.13f : 0.12f);
+    // Names and values were checked when the config was read.
+    (void)issues;
+    for (auto& [name, value] : cfg.colors)
+        for (auto& s : slots)
+            if (name == s.name) parse_hex(value, *s.dst);
+    t.selection = col_alpha(t.accent, t.dark ? 0.26f : 0.22f);  // translucent: it covers text
+    t.highlight = col_alpha(t.bright, t.dark ? 0.13f : 0.12f);  // ==marked== text is content: neutral
     T = t;
 }
 
