@@ -23,13 +23,65 @@ static int g_wake = 3;
 static App* g_app = nullptr;
 
 static void wake() { g_wake = 3; }
+
+// Seconds per refresh of the monitor the window is mostly on (0 if unknown).
+static float refresh_interval(GLFWwindow* w);
+
+// One frame: input to ImGui, the app, and drawing into the back buffer (the
+// caller swaps). Also run from the resize callbacks: while you drag a window
+// edge, Windows holds the thread in its own loop inside glfwPollEvents, so
+// without this nothing would be drawn until you let go.
+static GLFWwindow* g_window = nullptr;
+static FILE* g_frame_log = nullptr;
+static bool g_in_frame = false;
+static bool g_ready = false;
+
+static bool render_frame(bool slept) {
+    if (g_in_frame || !g_app || !g_ready) return false;
+    g_in_frame = true;
+    ImGuiIO& io = ImGui::GetIO();
+    anim::active = false;
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    // Animations advance one display refresh per frame (see anim::tick).
+    static float interval = 0;
+    static int since_check = 1000;
+    if (++since_check > 60) { interval = refresh_interval(g_window); since_check = 0; }
+    anim::tick(io.DeltaTime, slept, interval);
+    g_app->frame();
+    ImGui::Render();
+
+    int w, h;
+    glfwGetFramebufferSize(g_window, &w, &h);
+    glViewport(0, 0, w, h);
+    ImVec4 bg = ImGui::ColorConvertU32ToFloat4(g_app->background());
+    glClearColor(bg.x, bg.y, bg.z, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (g_frame_log) std::fprintf(g_frame_log, "%.4f dt=%.4f step=%.4f slept=%d active=%d\n", glfwGetTime(), io.DeltaTime, anim::frame_step, slept, anim::active);
+    g_in_frame = false;
+    return true;
+}
+
+// The window is being resized (or needs repainting): draw at the new size
+// straight away.
+static void on_refresh(GLFWwindow* w) {
+    int fw, fh;
+    glfwGetFramebufferSize(w, &fw, &fh);
+    if (fw <= 0 || fh <= 0) return;
+    if (render_frame(false)) glfwSwapBuffers(w);
+}
 static void on_key(GLFWwindow*, int, int, int, int) { wake(); }
 static void on_char(GLFWwindow*, unsigned) { wake(); }
 static void on_mouse(GLFWwindow*, int, int, int) { wake(); }
 static void on_move(GLFWwindow*, double, double) { wake(); }
 static void on_scroll(GLFWwindow*, double, double) { wake(); }
 static void on_enter(GLFWwindow*, int) { wake(); }
-static void on_size(GLFWwindow*, int, int) { wake(); }
+static void on_size(GLFWwindow* w, int, int) {
+    wake();
+    on_refresh(w);
+}
 static void on_focus(GLFWwindow*, int focused) {
     wake();
     if (g_app) g_app->on_focus(focused != 0);
@@ -39,7 +91,6 @@ static void on_scale(GLFWwindow*, float x, float) {
     if (g_app) g_app->set_dpi(x);
 }
 
-// Seconds per refresh of the monitor the window is mostly on (0 if unknown).
 // Animations step by this much per frame; see anim::tick.
 static float refresh_interval(GLFWwindow* w) {
     int wx, wy, ww, wh;
@@ -110,6 +161,7 @@ int main(int argc, char** argv) {
     glfwSetCursorEnterCallback(window, on_enter);
     glfwSetWindowFocusCallback(window, on_focus);
     glfwSetWindowSizeCallback(window, on_size);
+    glfwSetWindowRefreshCallback(window, on_refresh);
     glfwSetWindowContentScaleCallback(window, on_scale);
 
     IMGUI_CHECKVERSION();
@@ -124,10 +176,13 @@ int main(int argc, char** argv) {
 
     App app;
     g_app = &app;
+    g_window = window;
+    g_frame_log = frame_log;
     float sx = 1, sy = 1;
     glfwGetWindowContentScale(window, &sx, &sy);
     app.set_dpi(sx);
     if (!app.init(window, opts)) return 1;
+    g_ready = true;  // resize callbacks may draw from here on
 
     bool shown = false;
     int frames = 0;
@@ -144,26 +199,9 @@ int main(int argc, char** argv) {
         if (g_wake > 0) g_wake--;
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) { glfwWaitEvents(); continue; }
 
-        anim::active = false;
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-        // Animations advance one display refresh per frame (see anim::tick).
-        static float interval = 0;
-        static int since_check = 1000;
-        if (++since_check > 60) { interval = refresh_interval(window); since_check = 0; }
-        anim::tick(io.DeltaTime, slept, interval);
-        app.frame();
-        ImGui::Render();
-
+        render_frame(slept);
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
-        glViewport(0, 0, w, h);
-        ImVec4 bg = ImGui::ColorConvertU32ToFloat4(app.background());
-        glClearColor(bg.x, bg.y, bg.z, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        if (frame_log) std::fprintf(frame_log, "%.4f dt=%.4f step=%.4f slept=%d active=%d\n", glfwGetTime(), io.DeltaTime, anim::frame_step, slept, anim::active);
 
         // Capture once animations have had real time to settle.
         static double first_frame = glfwGetTime();
@@ -183,7 +221,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    g_ready = false;
     if (frame_log) std::fclose(frame_log);
+    g_frame_log = nullptr;
     app.shutdown();
     g_app = nullptr;
     ImGui_ImplOpenGL3_Shutdown();
