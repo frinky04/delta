@@ -1039,9 +1039,10 @@ void App::dispatch_keys(bool& fired) {
     }
 }
 
-void App::draw_empty(ImVec2 min, ImVec2 max, float page) {
+// With no note open, the page shows the ways out, like vim's intro screen.
+void App::draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float top_pad, float page) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float s = base_size(), em = s / kEm;
+    float s = base_size();
     float a = anim::ease_out(anim::progress(fade_start_, anim::clock, 0.14f)) * page;
     struct Row { std::string key, text; };
     std::vector<Row> rows;
@@ -1049,34 +1050,43 @@ void App::draw_empty(ImVec2 min, ImVec2 max, float page) {
         std::string k = chord_for(id);
         if (!k.empty()) rows.push_back({k, std::move(text)});
     };
-    add("note.new", "New note in " + space_);
-    add("note.daily", "Open today's daily note");
-    add("palette.notes", "Find a note");
-    add("palette.spaces", "Switch space");
-    add("palette.commands", "All commands");
+    add("note.new", "new note in " + space_);
+    add("note.daily", "today's daily note");
+    add("palette.notes", "find a note");
+    add("palette.spaces", "switch space");
+    add("palette.commands", "all commands");
 
-    float ks = std::round(s * 0.8f);
-    float row_h = std::round(em * 1.9f);
-    float key_w = 0;
-    for (auto& r : rows) key_w = std::max(key_w, mono_->CalcTextSizeA(ks, FLT_MAX, 0, r.key.c_str()).x);
-    float text_w = 0;
-    for (auto& r : rows) text_w = std::max(text_w, sans_->CalcTextSizeA(s, FLT_MAX, 0, r.text.c_str()).x);
-    float gap = em * 1.5f;
-    float total_w = key_w + gap + text_w;
-    float title_h = std::round(em * 2.6f);
-    float total_h = title_h + rows.size() * row_h;
-    float x = std::round((min.x + max.x - total_w) * 0.5f);
-    float y = std::round((min.y + max.y - total_h) * 0.45f);
+    // Set on the page's lines, spaced like the editor's.
+    float row_h = std::round(s * cfg_.line_height);
+    float top = min.y + top_pad;
+    int lines = std::max(1, (int)((max.y - top) / row_h));
 
-    std::string title = "No notes in " + space_ + " yet";
-    if (store_.note_count(space_) > 0) title = "No note open";
-    dl->AddText(sans_bold_, s, ImVec2(x, y), col_alpha(T.bright, a), title.c_str());
-    y += title_h;
+    float ms = std::round(s * 0.9f);
+    auto W = [&](ImFont* f, const std::string& t) { return f->CalcTextSizeA(ms, FLT_MAX, 0, t.c_str()).x; };
+    int n = store_.note_count(space_);
+    std::string sub = space_ + "/ is empty";
+    if (n > 0) sub = space_ + "/ has " + std::to_string(n) + (n == 1 ? " note" : " notes") + ", none open";
+
+    // title, blank, subtitle, blank, then the keys, centred on the page
+    int block = 4 + (int)rows.size();
+    int first = std::max(0, (int)std::round((lines - block) * 0.42f));
+    auto line_y = [&](int i) { return std::round(top + (first + i) * row_h + (row_h - ms) * 0.5f); };
+    auto centred = [&](ImFont* f, const std::string& t) { return std::round(col_x + (column - W(f, t)) * 0.5f); };
+
+    dl->AddText(mono_bold_, ms, ImVec2(centred(mono_bold_, "delta"), line_y(0)), col_alpha(T.bright, a), "delta");
+    dl->AddText(mono_, ms, ImVec2(centred(mono_, sub), line_y(2)), col_alpha(T.dim, a), sub.c_str());
+
+    float key_w = 0, text_w = 0;
     for (auto& r : rows) {
-        float kw = mono_->CalcTextSizeA(ks, FLT_MAX, 0, r.key.c_str()).x;
-        dl->AddText(mono_, ks, ImVec2(std::round(x + key_w - kw), std::round(y + (s - ks) * 0.7f)), col_alpha(T.text, a), r.key.c_str());
-        dl->AddText(sans_, s, ImVec2(x + key_w + gap, y), col_alpha(T.dim, a), r.text.c_str());
-        y += row_h;
+        key_w = std::max(key_w, W(mono_, r.key));
+        text_w = std::max(text_w, W(mono_, r.text));
+    }
+    float gap = W(mono_, "    ");
+    float x = std::round(col_x + (column - key_w - gap - text_w) * 0.5f);
+    for (size_t i = 0; i < rows.size(); i++) {
+        float y = line_y(4 + (int)i);
+        dl->AddText(mono_, ms, ImVec2(x, y), col_alpha(T.text, a), rows[i].key.c_str());
+        dl->AddText(mono_, ms, ImVec2(x + key_w + gap, y), col_alpha(T.dim, a), rows[i].text.c_str());
     }
 }
 
@@ -1604,7 +1614,7 @@ void App::frame() {
             (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || (editor_.reader() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))
             open_viewer(img_line, img_tile);
     } else {
-        draw_empty(min, max, page);
+        draw_empty(min, max, col_x, column, top_pad, page);
     }
     draw_status(ImVec2(min.x, max.y), ImVec2(max.x, max.y + bar_h));
     // Clicking into the note ends the bar's tool, keeping where it left you

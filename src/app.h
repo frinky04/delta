@@ -98,7 +98,7 @@ private:
     void build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total);
     void open_palette(const std::string& prefix);
     void draw_status(ImVec2 min, ImVec2 max);
-    void draw_empty(ImVec2 min, ImVec2 max, float page);
+    void draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float top_pad, float page);
     // The status line as a minibuffer: tools that act on the note in view
     // happen down there, so the note stays in sight. (Choosing from a list,
     // headings included, stays in the palette.)
