@@ -81,10 +81,22 @@ private:
     void open_palette(const std::string& prefix);
     void draw_status(ImVec2 min, ImVec2 max);
     void draw_empty(ImVec2 min, ImVec2 max, float page);
+    // The status line as a minibuffer: tools that act on the note in view
+    // happen down there, so the note stays in sight. (Choosing from a list,
+    // headings included, stays in the palette.)
+    enum class Bar { None, Find, Line, Rename };
+    void open_bar(Bar kind);
+    void close_bar();                   // keeps where the tool left you
+    void cancel_bar();                  // escape: jumps go back to where you were
+    void draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+    bool bar_input(const char* id, char* buf, size_t size, int which, float x, float y, float w);
+    static int bar_input_callback(ImGuiInputTextCallbackData* d);
     void open_find(bool replace);
-    void close_find();
+    void close_find() { if (bar_ == Bar::Find) close_bar(); }
     void draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
-    static int find_input_callback(ImGuiInputTextCallbackData* d);
+    void open_line(const std::string& text = "");
+    void draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+    void draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void status(const std::string& msg, bool error = false);
     void poll_files(double now);
     float base_size() const;
@@ -142,13 +154,19 @@ private:
     int win_x_ = 0, win_y_ = 0, win_w_ = 0, win_h_ = 0;
     bool quit_ = false;
 
-    // Find bar (in the status line).
-    bool find_open_ = false;
+    // Status-line bar.
+    Bar bar_ = Bar::None;
+    int bar_field_ = 1;               // which field has focus (find: 1 find, 2 replace)
+    bool bar_focus_ = false;          // focus bar_field_ this frame
+    bool bar_select_all_ = false;     // ...with its text selected
+    int bar_select_pending_ = 0;      // 1 select all, 2 cursor to end
+    char bar_buf_[256] = {};          // line and rename text
+    std::string bar_last_;            // bar_buf_ as last acted on
+    std::string bar_error_;           // why the last Enter didn't go through
+    TextPos bar_cur_, bar_anchor_;    // where you were, for escape
+    float bar_scroll_ = 0;
+
     bool find_replace_ = false;       // replace field shown
-    int find_field_ = 1;              // 1 find, 2 replace: which has focus
-    bool find_focus_ = false;
-    bool find_select_all_ = false;
-    int find_select_pending_ = 0;     // 1 select all, 2 cursor to end
     char find_buf_[256] = {};
     char repl_buf_[256] = {};
     std::string find_last_;

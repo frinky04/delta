@@ -28,8 +28,8 @@ Daily notes (`alt+d`) go in the `daily` space, named `YYYY-MM-DD` by default.
 | *(none)* | notes in the current space; type a new name to create one |
 | `*` | notes in every space (`space/name` creates in that space) |
 | `#` | spaces; type a new name to create one |
-| `@` | headings in this note |
-| `:` | go to line |
+| `@` | headings in this note, starting on the section you're in |
+| `:` | go to line (hands over to the status line) |
 | `?` | full-text search in this space |
 | `/` | every command, with its shortcut |
 
@@ -68,13 +68,22 @@ Default keys (all rebindable):
 
 Typing `*`, `_`, `` ` ``, `~`, `=`, `(`, `[` or `"` with text selected wraps the selection. `ctrl+c` or `ctrl+x` with nothing selected copies or cuts the whole line. Pasting a URL over selected text makes it a link. Numbered lists renumber themselves as items are added, removed or moved. Each note reopens with the caret and scroll where you left them.
 
-Find lives in the status line, so the note stays in view: matches are lit as you type (case-sensitive only if you type a capital), `enter` / `shift+enter` step through them, `tab` switches between find and replace, `enter` in replace replaces the current match, `ctrl+alt+enter` replaces them all (one undo), and `esc` closes with the match selected. Expand selection grows word, sentence, line, paragraph, section (under its heading), then the whole note.
+Tools that act on the note in view live in the status line, so the note stays in sight; `esc` leaves any of them.
+
+
+- **Find** (`ctrl+f`, `ctrl+h`): matches are lit as you type (case-sensitive only if you type a capital), `enter` / `shift+enter` step through them, `tab` switches between find and replace, `enter` in replace replaces the current match, `ctrl+alt+enter` replaces them all (one undo). `esc` closes with the match selected.
+- **Go to line** (`ctrl+g`): `42`, `42:10` for a column, or `+5` / `-5` from where you are. The page follows as you type; `enter` stays there, `esc` goes back.
+- **Rename** (`f2`): the note's name in the status line becomes editable where it sits, checked as you type.
+
+Choosing from a list stays in the palette, headings included (`ctrl+shift+o`, or `[sections]` in the config).
+
+Expand selection grows word, sentence, line, paragraph, section (under its heading), then the whole note.
 
 ## Config
 
 Everything lives in one ini file: `%APPDATA%\delta\delta.ini` on Windows, `~/.config/delta/delta.ini` elsewhere. It starts out as just the section headers: it holds only what you've changed, and anything left out uses its default.
 
-`ctrl+,` opens it in delta itself, as ini text in mono. It autosaves like a note, and every save applies straight away. Beside each setting, delta shows what it does and its default (or that it already is the default), so the file itself never needs to carry them. "Add a setting" in the `/` palette lists everything the file doesn't set yet, settings and key bindings alike; pick one and it's written into its section at its default, with the value selected. Problems are shown at the end of their line instead, with a suggestion where there is one: a misspelt name ("did you mean line_height?"), a setting in the wrong section, a value out of range, an unreadable key chord. Each says what delta uses instead, and the part it's about is underlined. They're checked as you type; a problem on the line you're typing on waits for a pause. The status bar counts them: click the count or press `F8` / `shift+F8` to go to the next or previous one, with the bad part selected. Problem marks use `error` in `[colors]`. `@` in the palette jumps between `[sections]`, and `alt+left` takes you back to your note. To use another editor, run "Open config in another app" from the `/` palette. Changes made there are picked up within a second.
+`ctrl+,` opens it in delta itself, as ini text in mono. It autosaves like a note, and every save applies straight away. Beside each setting, delta shows what it does and its default (or that it already is the default), so the file itself never needs to carry them. "Add a setting" in the `/` palette lists everything the file doesn't set yet, settings and key bindings alike; pick one and it's written into its section at its default, with the value selected. Problems are shown at the end of their line instead, with a suggestion where there is one: a misspelt name ("did you mean line_height?"), a setting in the wrong section, a value out of range, an unreadable key chord. Each says what delta uses instead, and the part it's about is underlined. They're checked as you type; a problem on the line you're typing on waits for a pause. The status bar counts them: click the count or press `F8` / `shift+F8` to go to the next or previous one, with the bad part selected. Problem marks use `error` in `[colors]`. `ctrl+shift+o` jumps between `[sections]`, and `alt+left` takes you back to your note. To use another editor, run "Open config in another app" from the `/` palette. Changes made there are picked up within a second.
 
 Any palette command can be bound in `[keys]` by its id ("Add a setting" lists them):
 

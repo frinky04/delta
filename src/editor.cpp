@@ -863,6 +863,26 @@ void Editor::select_range(TextPos a, TextPos b) {
     activity_ = ImGui::GetTime();
 }
 
+void Editor::jump_to(TextPos p) {
+    clamp(p);
+    cur_ = anchor_ = p;
+    reveal_ = true;
+    reveal_mode_ = 3;
+    want_x_ = -1;
+    activity_ = ImGui::GetTime();
+}
+
+void Editor::return_to(TextPos cur, TextPos anchor, float scroll) {
+    clamp(cur);
+    clamp(anchor);
+    cur_ = cur;
+    anchor_ = anchor;
+    scroll_target_ = scroll;
+    reveal_ = false;
+    want_x_ = -1;
+    activity_ = ImGui::GetTime();
+}
+
 void Editor::restore_view(TextPos cur, float scroll) {
     clamp(cur);
     cur_ = anchor_ = cur;

@@ -355,7 +355,7 @@ void App::register_commands() {
     add("palette.all", "Find a note in any space", "ctrl+alt+p", [this] { open_palette("*"); }, false, true);
     add("palette.spaces", "Switch space", "ctrl+shift+s", [this] { open_palette("#"); }, false, true);
     add("palette.headings", "Jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
-    add("palette.line", "Go to line", "ctrl+g", [this] { open_palette(":"); }, false, true);
+    add("palette.line", "Go to line", "ctrl+g", [this] { open_line(); }, false, true);
     add("find.open", "Find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
     add("find.replace", "Find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
     add("nav.heading_next", "Go to the next heading", "ctrl+alt+down", [this] { if (editing()) editor_.goto_heading(1); }, true);
@@ -471,7 +471,7 @@ bool App::save() {
 }
 
 void App::open_note(const NoteRef& n, bool push_history) {
-    close_find();
+    close_bar();
     save();
     remember_view();
     std::string text;
@@ -620,19 +620,9 @@ void App::open_by_name(std::string target) {
 void App::rename_note() {
     if (!note_) return;
     if (is_config()) { status("The config file stays where it is. Open a note to do that."); return; }
-    palette_.prompt("rename: ", note_->name, "rename to", [this](const std::string& v) {
-        save();
-        std::string old = path_u8(note_->path);
-        NoteRef n = *note_;
-        if (auto e = store_.rename_note(n, v); !e.empty()) { status(e, true); return; }
-        views_.erase(old);
-        for (auto& h : history_)
-            if (path_u8(h.path) == old) h = n;
-        note_ = n;
-        disk_mtime_ = mtime_of(n.path);
-        set_title();
-        status("Renamed to " + n.name);
-    });
+    open_bar(Bar::Rename);  // see draw_rename_bar
+    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", note_->name.c_str());
+    bar_last_ = bar_buf_;
 }
 
 void App::move_note() {
@@ -750,7 +740,7 @@ void App::history_step(int dir) {
 // Palette
 
 void App::open_palette(const std::string& prefix) {
-    close_find();
+    close_bar();
     cache_notes_ = store_.notes(space_);
     cache_all_.clear();
     cache_spaces_ = store_.spaces();
@@ -833,16 +823,23 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         return;
     }
 
+    // The note's outline. With nothing typed, the section you're in starts
+    // selected, so up and down step from where you are.
     if (c == '@') {
         if (!note_) return;
         auto heads = editor_.headings();
         total = (int)heads.size();
-        for (auto& h : heads) {
+        int here = -1;
+        for (int k = 0; k < (int)heads.size(); k++)
+            if (heads[k].line <= editor_.cursor().line) here = k;
+        for (int k = 0; k < (int)heads.size(); k++) {
+            const Heading& h = heads[k];
             PaletteItem it;
             it.label = h.text.empty() ? "(untitled)" : h.text;
             if (!fuzzy_match(q, it.label, it.score, &it.hl)) continue;
             it.indent = q.empty() ? h.level - 1 : 0;
             it.meta = std::to_string(h.line + 1);
+            it.current = q.empty() && k == here;
             int line = h.line;
             it.action = [this, line] { editor_.goto_line(line); };
             out.push_back(std::move(it));
@@ -851,22 +848,10 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         return;
     }
 
+    // Line numbers are found in the status line, with the note in view;
+    // typing : here hands over to it (see frame).
     if (c == ':') {
-        if (!note_) return;
-        total = -2;  // no count for a line number
-        int lines = (int)editor_.lines().size();
-        PaletteItem it;
-        char* end = nullptr;
-        long n = std::strtol(q.c_str(), &end, 10);
-        if (!q.empty() && *end == 0 && n >= 1) {
-            int line = (int)std::min<long>(n, lines);
-            it.label = "go to line " + std::to_string(line);
-            it.meta = "of " + std::to_string(lines);
-            it.action = [this, line] { editor_.goto_line(line - 1); };
-        } else {
-            it.label = "a line number, 1 to " + std::to_string(lines);
-        }
-        out.push_back(std::move(it));
+        total = -2;
         return;
     }
 
@@ -1023,7 +1008,7 @@ void App::toggle_fullscreen() {
 
 void App::dispatch_keys(bool& fired) {
     fired = false;
-    bool pal = palette_.is_open() || find_open_;  // modal: only global commands
+    bool pal = palette_.is_open() || bar_ != Bar::None;  // modal: only global commands
     for (auto& c : cmds_) {
         if (pal && !c.global) continue;
         for (auto& ch : c.chords) {
@@ -1078,43 +1063,110 @@ void App::draw_empty(ImVec2 min, ImVec2 max, float page) {
 }
 
 // ---------------------------------------------------------------------------
-// Find in this note: the status line becomes a minibuffer (like vim's / or
-// Emacs's C-s), so the note stays in full view while you search.
+// The status line as a minibuffer (like vim's / or Emacs's C-s): tools that
+// act on the note in view (find, go to line, rename) happen down there, so
+// the note stays in full view.
 
-void App::open_find(bool replace) {
-    if (!note_) return;
+void App::open_bar(Bar kind) {
     if (palette_.is_open()) palette_.close();
-    if (editor_.reader()) editor_.set_reader(false);
-    if (!find_open_) {
-        // A selection on one line becomes the query.
-        if (editor_.has_selection() && editor_.cursor().line == editor_.anchor().line)
-            std::snprintf(find_buf_, sizeof find_buf_, "%s", editor_.selected_text().c_str());
-        editor_.find_begin();
-        find_last_ = "\x01";  // match again on the next frame
-    }
-    find_open_ = true;
-    find_replace_ = replace;  // ctrl+f: find alone; ctrl+h: find and replace
-    // Always start in the find field, last query selected so typing replaces
-    // it. The texts are kept from last time; the focus isn't.
-    find_field_ = 1;
-    find_focus_ = true;
-    find_select_all_ = true;
+    if (bar_ != kind) close_bar();
+    bar_ = kind;
+    // Always start in the first field, its text selected so typing replaces
+    // it. Texts can be kept from last time; the focus isn't.
+    bar_field_ = 1;
+    bar_focus_ = true;
+    bar_select_all_ = true;
+    bar_error_.clear();
 }
 
-void App::close_find() {
-    if (!find_open_) return;
-    find_open_ = false;
-    editor_.find_end();  // the current match stays selected
+void App::close_bar() {
+    if (bar_ == Bar::None) return;
+    if (bar_ == Bar::Find) editor_.find_end();  // the current match stays selected
+    bar_ = Bar::None;
+    bar_error_.clear();
+}
+
+void App::cancel_bar() {
+    if (bar_ == Bar::Line) editor_.return_to(bar_cur_, bar_anchor_, bar_scroll_);
+    close_bar();
 }
 
 // Keeps a field's text selected (on opening) or the cursor at the end (on
-// refocus after Enter), whichever was asked for.
-int App::find_input_callback(ImGuiInputTextCallbackData* d) {
+// refocus after Enter), whichever was asked for. The line field takes only
+// what a line target can hold.
+int App::bar_input_callback(ImGuiInputTextCallbackData* d) {
     auto* app = static_cast<App*>(d->UserData);
-    if (app->find_select_pending_ == 1) { d->SelectionStart = 0; d->SelectionEnd = d->CursorPos = d->BufTextLen; }
-    if (app->find_select_pending_ == 2) { d->SelectionStart = d->SelectionEnd = d->CursorPos = d->BufTextLen; }
-    app->find_select_pending_ = 0;
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackCharFilter) {
+        ImWchar c = d->EventChar;
+        return (c >= '0' && c <= '9') || c == '+' || c == '-' || c == ':' ? 0 : 1;
+    }
+    if (app->bar_select_pending_ == 1) { d->SelectionStart = 0; d->SelectionEnd = d->CursorPos = d->BufTextLen; }
+    if (app->bar_select_pending_ == 2) { d->SelectionStart = d->SelectionEnd = d->CursorPos = d->BufTextLen; }
+    app->bar_select_pending_ = 0;
     return 0;
+}
+
+// One text field of the bar. Returns whether it's the one being typed in.
+bool App::bar_input(const char* id, char* buf, size_t size, int which, float x, float y, float w) {
+    ImGui::SetCursorScreenPos(ImVec2(x, y));
+    ImGui::SetNextItemWidth(w);
+    if (bar_focus_ && bar_field_ == which) {
+        ImGui::SetKeyboardFocusHere();
+        if (bar_select_all_) bar_select_pending_ = 1;
+    }
+    ImGuiInputTextFlags flags = ImGuiInputTextFlags_CallbackAlways;
+    if (bar_ == Bar::Line) flags |= ImGuiInputTextFlags_CallbackCharFilter;
+    // Tab is ours (switching fields), not ImGui's focus cycling.
+    ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+    ImGui::InputText(id, buf, size, flags, &App::bar_input_callback, this);
+    ImGui::PopItemFlag();
+    // Track the field you clicked into, but not while a switch we asked for
+    // is still landing (the old field is active until next frame).
+    bool active = ImGui::IsItemActive();
+    if (active && !bar_focus_) bar_field_ = which;
+    return active;
+}
+
+void App::draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cancel_bar(); return; }
+    // Fields in the status line's mono type.
+    ImGui::PushFont(mono_, s);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(T.bright));
+    ImGui::GetStyle().InputTextCursorSize = std::max(1.0f, std::round(2 * dpi_));
+    switch (bar_) {
+        case Bar::Find: draw_find_bar(min, max, s, pad, ty); break;
+        case Bar::Line: draw_line_bar(min, max, s, pad, ty); break;
+        case Bar::Rename: draw_rename_bar(min, max, s, pad, ty); break;
+        case Bar::None: break;
+    }
+    bar_focus_ = false;
+    bar_select_all_ = false;
+    // Keep typing going to the bar: refocus if nothing's active (Enter ends
+    // a field's editing in ImGui).
+    if (bar_ != Bar::None && !ImGui::IsAnyItemActive()) {
+        bar_focus_ = true;
+        if (!bar_select_pending_) bar_select_pending_ = 2;
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
+// Find in this note.
+
+void App::open_find(bool replace) {
+    if (!note_) return;
+    if (editor_.reader()) editor_.set_reader(false);
+    if (bar_ != Bar::Find) {
+        // A selection on one line becomes the query.
+        if (editor_.has_selection() && editor_.cursor().line == editor_.anchor().line)
+            std::snprintf(find_buf_, sizeof find_buf_, "%s", editor_.selected_text().c_str());
+        open_bar(Bar::Find);
+        editor_.find_begin();
+        find_last_ = "\x01";  // match again on the next frame
+    } else {
+        open_bar(Bar::Find);
+    }
+    find_replace_ = replace;  // ctrl+f: find alone; ctrl+h: find and replace
 }
 
 void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
@@ -1124,57 +1176,33 @@ void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
 
     // Keys first, against the field that was active last frame.
     bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { close_find(); return; }
     if (enter && io.KeyCtrl && io.KeyAlt && find_replace_) {
         int n = editor_.replace_all(repl_buf_);
         status(n ? "Replaced " + std::to_string(n) : "Nothing to replace");
         find_last_ = find_buf_;
-    } else if (enter && find_field_ == 2) {
+    } else if (enter && bar_field_ == 2) {
         editor_.replace_current(repl_buf_);
         find_last_ = find_buf_;
     } else if (enter) {
         editor_.find_step(io.KeyShift ? -1 : 1);
     }
-    if (enter) { find_focus_ = true; find_select_pending_ = 2; }
+    if (enter) { bar_focus_ = true; bar_select_pending_ = 2; }
     if (find_replace_ && ImGui::IsKeyPressed(ImGuiKey_Tab)) {
-        find_field_ = find_field_ == 1 ? 2 : 1;
-        find_focus_ = true;
-        find_select_pending_ = 1;
+        bar_field_ = bar_field_ == 1 ? 2 : 1;
+        bar_focus_ = true;
+        bar_select_pending_ = 1;
     }
 
-    // Prompt and fields, in the status line's mono type.
-    ImGui::PushFont(mono_, s);
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(T.bright));
-    ImGui::GetStyle().InputTextCursorSize = std::max(1.0f, std::round(2 * dpi_));
     float x = min.x + pad;
     float field_w = std::min(24 * s, (max.x - min.x) * 0.3f);
     auto field = [&](const char* label, const char* id, char* buf, size_t size, int which) {
         dl->AddText(mono_, s, ImVec2(x, ty), T.dim, label);
         x += W(label) + s * 0.5f;
-        ImGui::SetCursorScreenPos(ImVec2(x, ty));
-        ImGui::SetNextItemWidth(field_w);
-        if (find_focus_ && find_field_ == which) {
-            ImGui::SetKeyboardFocusHere();
-            if (find_select_all_) find_select_pending_ = 1;
-        }
-        // Tab is ours (switching fields), not ImGui's focus cycling.
-        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
-        ImGui::InputText(id, buf, size, ImGuiInputTextFlags_CallbackAlways, &App::find_input_callback, this);
-        ImGui::PopItemFlag();
-        // Track the field you clicked into, but not while a switch we asked
-        // for is still landing (the old field is active until next frame).
-        if (ImGui::IsItemActive() && !find_focus_) find_field_ = which;
+        bar_input(id, buf, size, which, x, ty, field_w);
         x += field_w + s * 1.6f;
     };
     field("find", "##find", find_buf_, sizeof find_buf_, 1);
     if (find_replace_) field("replace", "##replace", repl_buf_, sizeof repl_buf_, 2);
-    find_focus_ = false;
-    find_select_all_ = false;
-    // Keep typing going to the bar: refocus if nothing's active (Enter ends
-    // a field's editing in ImGui).
-    if (!ImGui::IsAnyItemActive()) { find_focus_ = true; if (!find_select_pending_) find_select_pending_ = 2; }
-    ImGui::PopStyleColor();
-    ImGui::PopFont();
 
     // Match as you type.
     if (find_last_ != find_buf_) {
@@ -1194,12 +1222,144 @@ void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     }
 }
 
+// Go to line: "42", "42:10" (line and column) or "+5" / "-5" from where you
+// were. The page follows as you type; escape goes back.
+
+static bool parse_line_target(const std::string& q, int origin, const std::vector<std::string>& lines, TextPos& to) {
+    if (q.empty()) return false;
+    size_t i = 0;
+    int sign = 0;
+    if (q[0] == '+' || q[0] == '-') { sign = q[0] == '+' ? 1 : -1; i = 1; }
+    auto number = [&](long& n) {
+        size_t start = i;
+        n = 0;
+        while (i < q.size() && q[i] >= '0' && q[i] <= '9' && n < 10000000) n = n * 10 + (q[i++] - '0');
+        return i > start;
+    };
+    long line = 0, col = 1;
+    if (!number(line)) return false;
+    if (i < q.size() && q[i] == ':') {
+        i++;
+        if (i < q.size() && !number(col)) return false;
+    }
+    if (i != q.size()) return false;
+    long target = sign ? origin + sign * line : line - 1;
+    if (!sign && line < 1) return false;
+    to.line = (int)std::clamp<long>(target, 0, (long)lines.size() - 1);
+    // Columns count characters, like the status bar's.
+    const std::string& s = lines[to.line];
+    int b = 0;
+    for (long c = 1; c < col && b < (int)s.size(); c++) b = utf8::next(s, b);
+    to.col = b;
+    return true;
+}
+
+void App::open_line(const std::string& text) {
+    if (!note_) return;
+    if (bar_ != Bar::Line) {
+        bar_cur_ = editor_.cursor();
+        bar_anchor_ = editor_.anchor();
+        bar_scroll_ = editor_.scroll();
+    }
+    open_bar(Bar::Line);
+    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", text.c_str());
+    bar_last_.clear();
+    if (!text.empty()) { bar_select_all_ = false; bar_select_pending_ = 2; }
+}
+
+void App::draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
+    const auto& lines = editor_.lines();
+    std::string q = trim(bar_buf_);
+    TextPos to;
+    bool ok = parse_line_target(q, bar_cur_.line, lines, to);
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    if (enter && (ok || q.empty())) { close_bar(); return; }
+
+    float x = min.x + pad;
+    dl->AddText(mono_, s, ImVec2(x, ty), T.dim, "line");
+    x += W("line") + s * 0.5f;
+    bar_input("##line", bar_buf_, sizeof bar_buf_, 1, x, ty, std::min(12 * s, (max.x - min.x) * 0.3f));
+
+    // The page follows as you type.
+    q = trim(bar_buf_);
+    ok = parse_line_target(q, bar_cur_.line, lines, to);
+    if (q != bar_last_) {
+        bar_last_ = q;
+        if (ok) editor_.jump_to(to);
+        else if (q.empty()) editor_.return_to(bar_cur_, bar_anchor_, bar_scroll_);
+    }
+    std::string n = std::to_string(lines.size());
+    std::string right = q.empty() ? "1 to " + n + ", or +/- lines" : ok ? "of " + n : "a line, 1 to " + n;
+    dl->AddText(mono_, s, ImVec2(max.x - pad - W(right), ty), q.empty() || ok ? T.dim : T.text, right.c_str());
+}
+
+// Rename: the note's name in the status line becomes editable where it sits.
+
+void App::draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
+    if (!note_) { close_bar(); return; }
+    std::string v = trim(bar_buf_);
+    auto problem = [&]() -> std::string {
+        if (v == note_->name) return {};
+        if (auto e = Store::check_name(v, "note"); !e.empty()) return e;
+        if (store_.exists(note_->space, v) && !iequals(v, note_->name)) return "there's already a note called " + v;
+        return {};
+    };
+
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    if (enter) {
+        if (v == note_->name) { close_bar(); return; }
+        std::string e = problem();
+        if (e.empty()) {
+            save();
+            std::string old = path_u8(note_->path);
+            NoteRef n = *note_;
+            e = store_.rename_note(n, v);
+            if (e.empty()) {
+                views_.erase(old);
+                for (auto& h : history_)
+                    if (path_u8(h.path) == old) h = n;
+                note_ = n;
+                disk_mtime_ = mtime_of(n.path);
+                set_title();
+                close_bar();
+                status("Renamed to " + n.name);
+                return;
+            }
+        }
+        bar_error_ = e;
+        bar_focus_ = true;
+        bar_select_pending_ = 2;
+    }
+
+    // Where the name sits: after the space, as in the normal status line.
+    float x = min.x + pad;
+    dl->AddText(mono_, s, ImVec2(x, ty), T.dim, note_->space.c_str());
+    x += W(note_->space);
+    dl->AddText(mono_, s, ImVec2(x, ty), T.faint, " / ");
+    x += W(" / ");
+    float w = std::clamp(W(bar_buf_) + s * 2, s * 12, (max.x - min.x) * 0.45f);
+    bar_input("##rename", bar_buf_, sizeof bar_buf_, 1, x, ty, w);
+
+    if (bar_last_ != bar_buf_) { bar_last_ = bar_buf_; bar_error_.clear(); }
+    v = trim(bar_buf_);
+    std::string msg = bar_error_.empty() ? problem() : bar_error_;
+    std::string right = msg.empty() ? "enter to rename" : msg;
+    float rx = std::max(x + w + s * 1.6f, max.x - pad - W(right));
+    dl->PushClipRect(ImVec2(x + w, min.y), ImVec2(max.x - pad, max.y), true);
+    dl->AddText(mono_, s, ImVec2(rx, ty), msg.empty() ? T.dim : T.text, right.c_str());
+    dl->PopClipRect();
+}
+
 void App::draw_status(ImVec2 min, ImVec2 max) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float s = std::round(base_size() * 0.86f);
     float pad = std::round(16 * dpi_);
     float ty = std::round(min.y + (max.y - min.y - s) * 0.5f);
-    if (find_open_) { draw_find_bar(min, max, s, pad, ty); return; }
+    if (bar_ != Bar::None) { draw_bar(min, max, s, pad, ty); return; }
     auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
 
     // Left: where you are.
@@ -1381,7 +1541,7 @@ void App::frame() {
         p.fade_syntax = cfg_.fade_syntax;
         p.blank_line = cfg_.blank_line_height;
         p.scroll_past_end = cfg_.scroll_past_end;
-        p.keyboard = !palette_.is_open() && !find_open_ && !fired;
+        p.keyboard = !palette_.is_open() && bar_ == Bar::None && !fired;
         p.mouse = !palette_.visible();
         p.alpha = fade * page;
         if (fired) io.InputQueueCharacters.resize(0);
@@ -1406,8 +1566,9 @@ void App::frame() {
         draw_empty(min, max, page);
     }
     draw_status(ImVec2(min.x, max.y), ImVec2(max.x, max.y + bar_h));
-    // Clicking into the note ends a find (the click places the caret there).
-    if (find_open_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && io.MousePos.y < max.y) close_find();
+    // Clicking into the note ends the bar's tool, keeping where it left you
+    // (the click places the caret anyway). A question is left unanswered.
+    if (bar_ != Bar::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && io.MousePos.y < max.y) close_bar();
     ImGui::End();
 
     // Palette, set in the same column where the page's first line sits.
@@ -1432,6 +1593,13 @@ void App::frame() {
     auto chosen = palette_.draw(
         pf, [this](const std::string& t, std::vector<PaletteItem>& out, int& total) { build_palette(t, out, total); }, prompt_for);
     if (chosen) chosen();
+    if (palette_.is_open() && note_) {
+        std::string t = palette_.text();
+        if (!t.empty() && t[0] == ':') {
+            palette_.close();
+            open_line(t.substr(1));
+        }
+    }
 
     // Autosave after a short idle.
     if (note_) {

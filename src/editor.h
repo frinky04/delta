@@ -129,6 +129,10 @@ public:
     TextPos cursor() const { return cur_; }
     TextPos anchor() const { return anchor_; }
     void restore_view(TextPos cur, float scroll);
+    // Previews for the status-line jumps: move the caret there (scrolling
+    // only if it's out of view), and glide back to where you were.
+    void jump_to(TextPos p);
+    void return_to(TextPos cur, TextPos anchor, float scroll);
     float scroll() const { return scroll_target_; }
     bool has_selection() const { return cur_ != anchor_; }
     std::string selected_text() const;

@@ -20,6 +20,7 @@ struct PaletteItem {
     int score = 0;
     int indent = 0;             // heading depth etc.
     bool emphasis = false;      // "+ new ..." rows
+    bool current = false;       // where you are: selected when the list is built
 };
 
 class Palette {
@@ -85,6 +86,7 @@ private:
     std::function<void(const std::string&)> submit_;
     std::string built_for_;
     int sel_ = 0;
+    bool reveal_sel_ = false;          // scroll the selection into view once
     float sel_y_ = 0, scroll_ = 0, scroll_target_ = 0;
     bool snap_ = true;
     float page_a_ = 1;
@@ -95,10 +97,8 @@ private:
     std::string last_buf_;
     double caret_activity_ = 0;        // restarts the blink
     bool committed_ = false;
+    bool handoff_ = false;             // opened straight from a closing palette
     int committed_row_ = -1;
-    float mode_a_ = 1;                 // fade-in after a mode switch
-    char last_mode_ = 0;
-    Kind last_kind_ = Kind::Query;
     ImVec2 last_mouse_{-1, -1};
 };
 

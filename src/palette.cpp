@@ -52,6 +52,9 @@ void Palette::set_text(const std::string& t) {
 
 void Palette::open(const std::string& text) {
     if (!open_) {
+        // Reopened while still fading out (a pick that asks something
+        // next): the page never came back, so it mustn't flash in now.
+        handoff_ = close_t_ < 1.0f;
         open_time_ = anim::clock;
         snap_ = true;
         // Only a real mouse move should pick a row, not wherever it rests.
@@ -168,8 +171,14 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     float vis, vis_pick;
     if (open_) {
         float t = anim::ease_out(anim::progress(open_time_, anim::clock, 0.13f));
-        page_a_ = t >= 0.5f ? 0.0f : 1.0f - t * 2.0f;
-        vis = vis_pick = std::clamp((t - 0.4f) / 0.6f, 0.0f, 1.0f);
+        if (handoff_) {
+            // From one list straight to the next: no fade, like a mode switch.
+            page_a_ = 0.0f;
+            vis = vis_pick = 1.0f;
+        } else {
+            page_a_ = t >= 0.5f ? 0.0f : 1.0f - t * 2.0f;
+            vis = vis_pick = std::clamp((t - 0.4f) / 0.6f, 0.0f, 1.0f);
+        }
     } else if (committed_) {
         vis = 1.0f - phase(close_t_, 0.0f, 0.3f);
         vis_pick = 1.0f - phase(close_t_, 0.3f, 0.55f);
@@ -178,14 +187,6 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         vis = vis_pick = 1.0f - phase(close_t_, 0.0f, 0.45f);
         page_a_ = phase(close_t_, 0.45f, 1.0f);
     }
-
-    // A mode switch fades the prompt and list in rather than flicking over.
-    if (mode_ != last_mode_ || kind_ != last_kind_) {
-        if (!snap_) mode_a_ = 0.0f;
-        last_mode_ = mode_;
-        last_kind_ = kind_;
-    }
-    mode_a_ = anim::approach(mode_a_, 1.0f, 32.0f, f.dt, 0.01f);
 
     // Backspace on an empty query leaves the mode, like a minibuffer.
     if (open_ && kind_ == Kind::Query && mode_ && buf_[0] == 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
@@ -223,6 +224,8 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         }
         sel_ = 0;
         scroll_target_ = 0;
+        for (int k = 0; k < (int)items_.size(); k++)
+            if (items_[k].current) { sel_ = k; reveal_sel_ = true; break; }
     }
 
     // Set in the page's column like a terminal picker: all mono, a prompt
@@ -258,7 +261,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     const float text_y = std::round(y0 + (in_h - ms) * 0.5f);
     std::string prompt = kind_ == Kind::Query ? prompt_for(mode_) : title_;
     float prompt_w = W(mono, prompt);
-    dl->AddText(mono, ms, ImVec2(x0, text_y), col_alpha(T.dim, vis * mode_a_), prompt.c_str());
+    dl->AddText(mono, ms, ImVec2(x0, text_y), col_alpha(T.dim, vis), prompt.c_str());
     // Matches over candidates. "+ new ..." rows aren't matches; line and
     // search modes (total -2) don't get a count.
     std::string count;
@@ -267,7 +270,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         count = total_ >= 0 ? std::to_string(matches) + "/" + std::to_string(total_) : std::to_string(matches);
     float count_w = count.empty() ? 0 : W(mono, count);
     if (!count.empty())
-        dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - count_w), text_y), col_alpha(T.faint, vis * mode_a_), count.c_str());
+        dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - count_w), text_y), col_alpha(T.faint, vis), count.c_str());
 
     char before[sizeof buf_];
     std::memcpy(before, buf_, sizeof buf_);
@@ -337,9 +340,10 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     // stays smooth. Hover and the mouse wheel don't drag the list around.
     const int off = std::min(2, (max_rows - 1) / 2);
     const float max_scroll = (float)std::max(0, n - max_rows);
-    if (keyed) {
+    if (keyed || reveal_sel_) {
         if (sel_ < scroll_target_ + off) scroll_target_ = (float)(sel_ - off);
         if (sel_ > scroll_target_ + max_rows - 1 - off) scroll_target_ = (float)(sel_ - max_rows + 1 + off);
+        reveal_sel_ = false;
     }
     if (hovered && ImGui::GetIO().MouseWheel != 0) scroll_target_ -= ImGui::GetIO().MouseWheel * 3;
     scroll_target_ = std::clamp(scroll_target_, 0.0f, max_scroll);
@@ -353,9 +357,9 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     dl->PushClipRect(ImVec2(x0 - margin, list_y), ImVec2(x0 + cw + margin, list_bottom), true);
     if (n == 0) {
         const char* msg = trim(buf_).size() > 1 ? "no matches" : "nothing here yet";
-        dl->AddText(mono, ms, ImVec2(x0, list_y + row_text_y), col_alpha(T.dim, vis * mode_a_), msg);
+        dl->AddText(mono, ms, ImVec2(x0, list_y + row_text_y), col_alpha(T.dim, vis), msg);
     } else {
-        float pick_a = vis_pick * mode_a_;
+        float pick_a = vis_pick;
         if (!invert) {
             float hy = list_y + (sel_y_ - scroll_) * row_h;
             dl->AddText(mono_b, ms, ImVec2(std::round(x0 - margin * 0.75f), std::round(hy + row_text_y)), col_alpha(T.accent, pick_a), ">");
@@ -366,7 +370,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         last_mouse_ = mouse;
         int first = std::max(0, (int)std::floor(scroll_));
         int last = std::min(n - 1, first + max_rows);
-        auto row_alpha = [&](int k) { return (committed_ && k == committed_row_ ? vis_pick : vis) * mode_a_; };
+        auto row_alpha = [&](int k) { return committed_ && k == committed_row_ ? vis_pick : vis; };
         auto label_x = [&](const PaletteItem& it) { return x0 + it.indent * W(mono, "  "); };
         auto label_end = [&](const PaletteItem& it) { return x0 + cw - (it.meta.empty() ? 0.0f : W(mono, it.meta)) - em; };
 
