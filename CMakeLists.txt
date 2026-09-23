@@ -1,0 +1,86 @@
+cmake_minimum_required(VERSION 3.20)
+project(delta C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+# --- glfw (vendored) ---------------------------------------------------------
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/glfw EXCLUDE_FROM_ALL)
+find_package(OpenGL REQUIRED)
+
+# --- dear imgui (vendored) ---------------------------------------------------
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+add_library(imgui STATIC
+  ${IMGUI_DIR}/imgui.cpp
+  ${IMGUI_DIR}/imgui_draw.cpp
+  ${IMGUI_DIR}/imgui_tables.cpp
+  ${IMGUI_DIR}/imgui_widgets.cpp
+  ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+  ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
+target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USE_WCHAR32)
+target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+
+# --- embedded fonts ----------------------------------------------------------
+function(embed_file src name out_var)
+  set(out ${CMAKE_BINARY_DIR}/generated/${name}.cpp)
+  add_custom_command(
+    OUTPUT ${out}
+    COMMAND ${CMAKE_COMMAND} -DIN=${src} -DOUT=${out} -DNAME=${name} -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+    DEPENDS ${src} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+    COMMENT "Embedding ${name}")
+  set(${out_var} ${out} PARENT_SCOPE)
+endfunction()
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-Regular.ttf g_font_sans FONT_SANS_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-Medium.ttf g_font_mono FONT_MONO_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-SemiBold.ttf g_font_sans_bold FONT_SANS_BOLD_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-SemiBold.ttf g_font_mono_bold FONT_MONO_BOLD_CPP)
+
+# --- app ---------------------------------------------------------------------
+add_library(delta_core STATIC
+  src/editor.cpp
+  src/markdown.cpp
+  src/ini_syntax.cpp
+  src/palette.cpp
+  src/store.cpp
+  src/config.cpp
+  src/keys.cpp
+  src/theme.cpp
+  src/platform.cpp
+  ${FONT_SANS_CPP}
+  ${FONT_MONO_CPP}
+  ${FONT_SANS_BOLD_CPP}
+  ${FONT_MONO_BOLD_CPP})
+target_include_directories(delta_core PUBLIC src)
+target_link_libraries(delta_core PUBLIC imgui)
+if(WIN32)
+  target_link_libraries(delta_core PUBLIC dwmapi shell32)
+endif()
+if(MSVC)
+  target_compile_options(delta_core PUBLIC /utf-8)
+endif()
+
+add_executable(delta WIN32 src/main.cpp src/app.cpp)
+target_include_directories(delta PRIVATE third_party/glfw/deps)
+target_link_libraries(delta PRIVATE delta_core)
+if(MINGW)
+  # Self-contained exe: no libstdc++/winpthread DLLs needed next to it.
+  target_link_options(delta PRIVATE -static)
+endif()
+if(MSVC)
+  target_link_options(delta PRIVATE /ENTRY:mainCRTStartup)
+endif()
+
+# Headless tests (no window): build/delta_tests.exe
+add_executable(delta_tests tests/test_main.cpp)
+target_link_libraries(delta_tests PRIVATE delta_core)
+if(MINGW)
+  target_link_options(delta_tests PRIVATE -static)
+endif()

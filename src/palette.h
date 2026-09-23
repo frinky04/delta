@@ -1,0 +1,106 @@
+#pragma once
+// The command palette. One text box, three kinds of use:
+//   query  - the app fills the list from the text (a prefix picks the mode)
+//   pick   - a fixed list the text filters
+//   prompt - the text itself is the answer (new note name, rename...)
+// It's typeset like a terminal picker: mono, a prompt naming the mode, a
+// match count, and a > marker (or an inverted row) for the selection.
+#include <functional>
+#include <string>
+#include <vector>
+
+#include "imgui.h"
+#include "smear.h"
+
+struct PaletteItem {
+    std::string label;
+    std::string meta;           // right-aligned, dim
+    std::vector<int> hl;        // byte offsets in label to highlight
+    std::function<void()> action;
+    int score = 0;
+    int indent = 0;             // heading depth etc.
+    bool emphasis = false;      // "+ new ..." rows
+};
+
+class Palette {
+public:
+    // Fills `out` for the full query text (mode prefix included) and sets
+    // `total` to how many candidates there were before filtering (-1: none).
+    using Builder = std::function<void(const std::string& text, std::vector<PaletteItem>& out, int& total)>;
+    // The prompt shown for a mode prefix (0 = no prefix).
+    using PromptFor = std::function<std::string(char mode)>;
+
+    // Characters that switch mode when typed first.
+    static constexpr const char* kModes = "*#@:?/";
+
+    void open(const std::string& text);
+    void pick(const std::string& prompt, std::vector<PaletteItem> items);
+    void prompt(const std::string& prompt, const std::string& initial, const std::string& action_label,
+                std::function<void(const std::string&)> submit);
+    void close();
+    bool is_open() const { return open_; }
+    bool visible() const { return open_ || close_t_ < 1.0f; }
+    std::string text() const { return mode_ ? std::string(1, mode_) + buf_ : std::string(buf_); }
+
+    enum class Selection { Marker, Invert };
+
+    struct Frame {
+        ImFont* mono;
+        ImFont* mono_bold;   // matched characters
+        float size;          // body font, ImGui units
+        float dpi;
+        float col_x, col_w;  // the text column it's set in
+        float top, bottom;   // first text line of the page / lowest usable y
+        double now;
+        float dt;
+        Selection selection;
+        float caret_w;       // matches the editor's caret
+        bool blink;
+    };
+    // How visible the page behind should be. The page and palette take
+    // turns (one fades out before the other fades in), so they never overlap.
+    float page_alpha() const { return page_a_; }
+
+    // Returns the chosen action (run it after the frame's UI is done).
+    std::function<void()> draw(const Frame& f, const Builder& build, const PromptFor& prompt_for);
+
+private:
+    enum class Kind { Query, Pick, Prompt };
+    void set_text(const std::string& t);
+    void commit(int row);  // close after a pick: the chosen row lingers a beat
+    static int input_callback(ImGuiInputTextCallbackData* d);
+
+    Kind kind_ = Kind::Query;
+    bool open_ = false;
+    double open_time_ = -10;
+    float close_t_ = 1.0f;       // 0..1 progress of the close fade
+    char mode_ = 0;              // query mode prefix, kept out of the text box
+    char buf_[512] = {};
+    std::string pending_text_;
+    bool apply_text_ = false;
+    bool focus_ = false;
+    std::string title_, action_label_;
+    std::vector<PaletteItem> fixed_, items_;
+    int total_ = -1;
+    std::function<void(const std::string&)> submit_;
+    std::string built_for_;
+    int sel_ = 0;
+    float sel_y_ = 0, scroll_ = 0, scroll_target_ = 0;
+    bool snap_ = true;
+    float page_a_ = 1;
+    SmearRect bar_;                    // invert bar, moving like the caret
+    SmearRect caret_;                  // our own caret (ImGui's is hidden)
+    int cursor_ = 0;                   // caret byte offset, from the input callback
+    int last_cursor_ = -1;
+    std::string last_buf_;
+    double caret_activity_ = 0;        // restarts the blink
+    bool committed_ = false;
+    int committed_row_ = -1;
+    float mode_a_ = 1;                 // fade-in after a mode switch
+    char last_mode_ = 0;
+    Kind last_kind_ = Kind::Query;
+    ImVec2 last_mouse_{-1, -1};
+};
+
+// Case-insensitive subsequence match with bonuses for word starts and runs.
+bool fuzzy_match(const std::string& pattern, const std::string& text, int& score, std::vector<int>* positions);
