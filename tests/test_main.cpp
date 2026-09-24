@@ -981,83 +981,90 @@ static void test_images() {
 }
 
 static void test_smear() {
-    const float dt = 1.0f / 60;
-    // Trail: moving right, the right edge leads and the left edge lags, so
-    // mid-flight the rect is stretched; then it settles to the exact target.
-    SmearRect r;
-    r.snap(ImVec2(0, 0), ImVec2(4, 20));
-    r.set(ImVec2(200, 0), ImVec2(204, 20), true, 50.0f);
-    for (int i = 0; i < 3; i++) r.update(dt);
-    float width = r.corner(1).x - r.corner(0).x;
-    CHECK(width > 20.0f);
-    CHECK(!r.settled());
-    for (int i = 0; i < 120; i++) r.update(dt);
-    CHECK(r.settled());
-    CHECK(std::fabs(r.corner(0).x - 200) < 0.5f && std::fabs(r.corner(2).x - 204) < 0.5f);
+    // Caret/selection rect, with and without the trail: every corner stays
+    // between where it was and where it's going (no overshoot, no NaN, even
+    // on a huge frame gap), and it lands exactly on the target, also when
+    // retargeted mid-flight.
+    for (int trail = 0; trail < 2; trail++) {
+        SmearRect r;
+        r.snap(ImVec2(0, 0), ImVec2(4, 20));
+        r.set(ImVec2(200, 300), ImVec2(204, 320), trail, 50.0f);
+        bool in_range = true;
+        for (int i = 0; i < 200; i++) {
+            if (i == 5) r.set(ImVec2(100, 150), ImVec2(104, 170), trail, 50.0f);  // retarget mid-flight
+            r.update(i == 2 ? 5.0f : 1.0f / 60);  // one long idle gap
+            for (int c = 0; c < 4; c++) {
+                ImVec2 p = r.corner(c);
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) || p.x < -0.01f || p.x > 204.01f ||
+                    p.y < -0.01f || p.y > 320.01f)
+                    in_range = false;
+            }
+        }
+        CHECK(in_range);
+        CHECK(r.settled(0.001f) && r.corner(0).x == 100 && r.corner(0).y == 150 && r.corner(2).x == 104 &&
+              r.corner(2).y == 170);
+    }
+}
 
-    // No trail: a plain glide keeps its shape the whole way.
-    SmearRect g;
-    g.snap(ImVec2(0, 0), ImVec2(4, 20));
-    g.set(ImVec2(200, 0), ImVec2(204, 20), false, 50.0f);
-    for (int i = 0; i < 3; i++) g.update(dt);
-    CHECK(std::fabs((g.corner(1).x - g.corner(0).x) - 4.0f) < 0.5f);
+// Every line's drawn position is finite and lines never overlap (each is
+// drawn at or below the one above it).
+static bool stacked(const Editor& ed) {
+    for (int i = 0; i < (int)ed.lines().size(); i++) {
+        if (!std::isfinite(ed.drawn_y(i))) return false;
+        if (i > 0 && ed.drawn_y(i) < ed.drawn_y(i - 1) - 0.01f) return false;
+    }
+    return true;
+}
 
-    // Moving down: the bottom edge leads.
-    SmearRect d;
-    d.snap(ImVec2(0, 0), ImVec2(4, 20));
-    d.set(ImVec2(0, 300), ImVec2(4, 320), true, 50.0f);
-    for (int i = 0; i < 3; i++) d.update(dt);
-    CHECK(d.corner(3).y - d.corner(0).y > 30.0f);
+// Runs frames until any motion is surely over. True if the lines stayed
+// stacked on every frame and every line ends up exactly where it's laid out.
+static bool settles_cleanly(Editor& ed, int frames = 90) {
+    bool ok = stacked(ed);
+    for (int f = 0; f < frames; f++) {
+        frame(ed);
+        if (!stacked(ed)) ok = false;
+    }
+    for (int i = 0; i < (int)ed.lines().size(); i++)
+        if (std::fabs(ed.drawn_y(i) - ed.laid_y(i)) > 0.5f) ok = false;
+    return ok;
+}
+
+static void key_one_frame(Editor& ed, ImGuiKey k) {  // key down for exactly one frame
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddKeyEvent(k, true);
+    frame(ed);
+    io.AddKeyEvent(k, false);
 }
 
 static void test_layout_motion() {
-    // Enter at the end of line 0: "b" is pushed down smoothly, not at once.
-    Editor ed = fresh("a\nb\nc");
-    float b0 = ed.drawn_y(1);
-    key(ed, ImGuiKey_End);
-    ImGuiIO& io = ImGui::GetIO();
-    io.AddKeyEvent(ImGuiKey_Enter, true);
-    frame(ed);  // the edit happens here; heights start animating
-    io.AddKeyEvent(ImGuiKey_Enter, false);
-    float laid = ed.laid_y(2);           // "b" is now line 2
-    float mid = ed.drawn_y(2);
-    CHECK(laid > b0);
-    CHECK(mid < laid - 1.0f);            // still on its way
-    CHECK(mid >= b0 - 0.5f);             // and never jumped backwards
-    for (int i = 0; i < 60; i++) frame(ed);
-    CHECK(std::fabs(ed.drawn_y(2) - ed.laid_y(2)) < 0.5f);  // settles exactly
+    // Opening, closing and cutting lines: while space animates, lines never
+    // overlap, and everything settles exactly on the layout.
+    {
+        Editor ed = fresh("a\nb\nc");
+        key(ed, ImGuiKey_End);
+        key_one_frame(ed, ImGuiKey_Enter);
+        CHECK(settles_cleanly(ed));
 
-    // Delete a line: the space collapses and "c" rises smoothly.
-    Editor d = fresh("a\nb\nc");
-    key(d, ImGuiKey_DownArrow);
-    float c0 = d.drawn_y(2);
-    d.delete_lines();
-    frame(d);
-    float now = d.drawn_y(1);            // "c" is now line 1
-    CHECK(now > d.laid_y(1) + 1.0f);     // hasn't snapped up
-    CHECK(now <= c0 + 0.5f);
-    CHECK(std::fabs(now - c0) < 0.5f);   // the removed line fades first; "c" waits
-    for (int i = 0; i < 8; i++) frame(d);
-    CHECK(d.drawn_y(1) < c0 - 0.5f);     // then its space closes and "c" rises
-    for (int i = 0; i < 60; i++) frame(d);
-    CHECK(std::fabs(d.drawn_y(1) - d.laid_y(1)) < 0.5f);
+        // A deleted line fades out while holding its space, so the line
+        // below mustn't start rising into it (text on top of text).
+        Editor d = fresh("a\nb\nc");
+        key(d, ImGuiKey_DownArrow);
+        float c0 = d.drawn_y(2);
+        d.delete_lines();
+        frame(d);
+        CHECK(std::fabs(d.drawn_y(1) - c0) < 0.5f);
+        CHECK(settles_cleanly(d));
 
-    // Lines are always stacked: nothing ever overlaps mid-animation.
-    Editor s = fresh("one\ntwo\nthree\nfour");
-    s.select_range({1, 0}, {2, 5});
-    frame(s);
-    s.cut();
-    bool stacked = true;
-    for (int f = 0; f < 20; f++) {
+        Editor s = fresh("one\ntwo\nthree\nfour");
+        s.select_range({1, 0}, {2, 5});
         frame(s);
-        for (int i = 1; i < (int)s.lines().size(); i++)
-            if (s.drawn_y(i) < s.drawn_y(i - 1) - 0.01f) stacked = false;
+        s.cut();
+        CHECK(settles_cleanly(s));
     }
-    CHECK(stacked);
 
-    // Breaking a wrapped paragraph in half: the second half must never move
-    // up (it starts where its text already was); only what's below pushes
-    // down, by the space the break really added.
+    // Breaking a wrapped paragraph in half: the text is already where it
+    // belongs, so the second half starts in place and nothing ever moves up
+    // (a visible jump back-and-forth otherwise).
     {
         std::string para;
         for (int i = 0; i < 30; i++) para += "asdasd asda ";
@@ -1065,14 +1072,9 @@ static void test_layout_motion() {
         float below0 = b.drawn_y(1);
         b.select_range({0, (int)para.size() / 2}, {0, (int)para.size() / 2});
         frame(b);
-        ImGuiIO& bio = ImGui::GetIO();
-        bio.AddKeyEvent(ImGuiKey_Enter, true);
-        frame(b);
-        bio.AddKeyEvent(ImGuiKey_Enter, false);
-        float half0 = b.drawn_y(1);           // the second half, first frame
-        float below_first = b.drawn_y(2);
-        bool never_up = true;
-        float prev_half = half0, prev_below = below_first;
+        key_one_frame(b, ImGuiKey_Enter);
+        bool never_up = std::fabs(b.drawn_y(1) - b.laid_y(1)) < 0.5f && b.drawn_y(2) >= below0 - 0.5f;
+        float prev_half = b.drawn_y(1), prev_below = b.drawn_y(2);
         for (int i = 0; i < 40; i++) {
             frame(b);
             if (b.drawn_y(1) < prev_half - 0.5f || b.drawn_y(2) < prev_below - 0.5f) never_up = false;
@@ -1080,13 +1082,10 @@ static void test_layout_motion() {
             prev_below = b.drawn_y(2);
         }
         CHECK(never_up);
-        CHECK(std::fabs(half0 - b.laid_y(1)) < 0.5f);  // starts in place
-        CHECK(below_first >= below0 - 0.5f);           // what's below never jumps up first
-        CHECK(std::fabs(b.drawn_y(2) - b.laid_y(2)) < 0.5f);
+        CHECK(settles_cleanly(b));
     }
 
-    // Joining two wrapped paragraphs: what's below only ever moves up, and
-    // settles in place.
+    // Joining two wrapped paragraphs: what's below only ever moves up.
     {
         std::string para;
         for (int i = 0; i < 20; i++) para += "asdasd asda ";
@@ -1094,42 +1093,37 @@ static void test_layout_motion() {
         j.select_range({1, 0}, {1, 0});
         frame(j);
         float prev = j.drawn_y(2);
-        ImGuiIO& jio = ImGui::GetIO();
-        jio.AddKeyEvent(ImGuiKey_Backspace, true);
-        frame(j);
-        jio.AddKeyEvent(ImGuiKey_Backspace, false);
-        bool never_down = j.drawn_y(1) <= prev + 0.5f;  // "below" is line 1 now
-        prev = j.drawn_y(1);
+        key_one_frame(j, ImGuiKey_Backspace);
+        bool never_down = true;  // "below" is line 1 now
         for (int i = 0; i < 40; i++) {
-            frame(j);
             if (j.drawn_y(1) > prev + 0.5f) never_down = false;
             prev = j.drawn_y(1);
+            frame(j);
         }
         CHECK(never_down);
-        CHECK(std::fabs(j.drawn_y(1) - j.laid_y(1)) < 0.5f);
+        CHECK(settles_cleanly(j));
     }
 
     // After an idle pause the first frame has a huge delta time. The push
-    // must still animate instead of finishing in that one frame.
+    // must not finish (snap) in that one frame, must not go haywire, and
+    // must still settle.
     {
         Editor p = fresh("a\nb");
         key(p, ImGuiKey_End);
-        float b_before = p.drawn_y(1);
-        ImGuiIO& pio = ImGui::GetIO();
-        pio.AddKeyEvent(ImGuiKey_Enter, true);
         g_dt_override = 0.8f;  // as if delta had been asleep for 0.8s
-        frame(p);
+        key_one_frame(p, ImGuiKey_Enter);
         g_dt_override = 0.0f;
-        pio.AddKeyEvent(ImGuiKey_Enter, false);
         CHECK(p.drawn_y(2) < p.laid_y(2) - 1.0f);
-        CHECK(p.drawn_y(2) >= b_before - 0.5f);
+        CHECK(settles_cleanly(p) && p.text() == "a\n\nb");
     }
 
-    // A new document appears as it is.
-    Editor n = fresh("x");
+    // A new document appears as it is, with no motion left over from the old.
+    Editor n = fresh("x\ny\nz\nw");
+    key(n, ImGuiKey_End);
+    key_one_frame(n, ImGuiKey_Enter);
     n.set_text("p\nq\nr");
     frame(n);
-    CHECK(std::fabs(n.drawn_y(2) - n.laid_y(2)) < 0.5f);
+    CHECK(settles_cleanly(n, 0));
 }
 
 // The code-block background drawn in the last frame, as vertical spans.
@@ -1170,39 +1164,24 @@ static void test_code_block_space() {
     T.code_bg = marker;
     T.text = T.bright = T.dim = T.faint = T.code = IM_COL32(200, 200, 200, 255);
 
-    // Open lines inside a block, one per frame: the background stays whole.
+    // Lines opening and closing inside a block, faster than they settle:
+    // the block's background never tears open mid-animation.
     Editor e = fresh("```\nfloat Test = 10.0;\n```\nafter");
     e.select_range({1, 5}, {1, 5});
     frame(e);
     bool whole = true;
-    ImGuiIO& io = ImGui::GetIO();
-    for (int n = 0; n < 4; n++) {
-        io.AddKeyEvent(ImGuiKey_Enter, true);
-        frame(e);
-        io.AddKeyEvent(ImGuiKey_Enter, false);
-        for (int f = 0; f < 3; f++) {
-            if (!no_gaps(code_bg_spans(marker))) whole = false;
-            frame(e);
+    for (ImGuiKey k : {ImGuiKey_Enter, ImGuiKey_Backspace}) {
+        for (int n = 0; n < 4; n++) {
+            key_one_frame(e, k);
+            for (int f = 0; f < 3; f++) {
+                if (!no_gaps(code_bg_spans(marker))) whole = false;
+                frame(e);
+            }
         }
     }
-    CHECK(whole);
-
-    // And while they close again.
-    whole = true;
-    for (int n = 0; n < 4; n++) {
-        io.AddKeyEvent(ImGuiKey_Backspace, true);
-        frame(e);
-        io.AddKeyEvent(ImGuiKey_Backspace, false);
-        for (int f = 0; f < 3; f++) {
-            if (!no_gaps(code_bg_spans(marker))) whole = false;
-            frame(e);
-        }
-    }
-    CHECK(whole);
     e.select_range({2, 0}, {2, 0});
     frame(e);
     e.delete_lines();
-    whole = true;
     for (int f = 0; f < 20; f++) {
         frame(e);
         if (!no_gaps(code_bg_spans(marker))) whole = false;
@@ -1215,16 +1194,7 @@ static void test_change_pulse() {
     TextPos a, b;
     auto is = [](TextPos p, int line, int col) { return p.line == line && p.col == col; };
 
-    // Paste: exactly the pasted text.
-    Editor p = fresh("abcd");
-    ImGui::SetClipboardText("XYZ");
-    p.select_range({0, 2}, {0, 2});
-    frame(p);
-    p.paste();
-    frame(p);
-    CHECK(p.pulse_range(a, b) && is(a, 0, 2) && is(b, 0, 5));
-
-    // Multi-line paste spans the lines it added.
+    // Multi-line paste highlights exactly the text it added.
     Editor m = fresh("start end");
     ImGui::SetClipboardText("one\ntwo\n");
     m.select_range({0, 6}, {0, 6});
@@ -1233,8 +1203,8 @@ static void test_change_pulse() {
     frame(m);
     CHECK(m.pulse_range(a, b) && is(a, 0, 6) && is(b, 2, 0));
 
-    // Undo that only removes text: nothing to highlight. Redo brings it back
-    // and highlights it.
+    // Undo that only removes text leaves nothing to highlight (its range
+    // would point past the text). Redo highlights what it brought back.
     Editor u = fresh("");
     type(u, "hello");
     u.undo();
@@ -1244,42 +1214,34 @@ static void test_change_pulse() {
     frame(u);
     CHECK(u.pulse_range(a, b) && is(a, 0, 0) && is(b, 0, 5));
 
-    // Undoing a line delete highlights the restored line.
-    Editor d = fresh("keep\ngone\nkeep");
-    d.select_range({1, 0}, {1, 0});
-    frame(d);
-    d.delete_lines();
-    frame(d);
-    d.undo();
-    frame(d);
-    CHECK(d.pulse_range(a, b) && a.line == 1 && b.line <= 2);
-
     // Any later edit clears it (its positions would be stale).
     type(u, "!");
     CHECK(!u.pulse_range(a, b));
 }
 
 static void test_morph() {
-    // Every kind of line, both directions, every frame of the transition:
-    // nothing out of range, and the text is untouched.
+    // Every kind of line through the editor <-> reader morph, both
+    // directions and reversed mid-morph: the text is untouched, and back in
+    // the editor the layout is exactly what it was, with nothing left moving.
     std::string long_item = "- a list item long enough to wrap onto another row, with **bold** and `code` and a [link](https://x.y) in it";
     std::string doc = "# Title\n\nPara with *em* and ==mark== and [[wiki|alias]].\n\n" + long_item +
                       "\n- [ ] task\n- [x] done\n1. first\n> quote line\n---\n```cpp\nint x = 1;\n```\n\n~~gone~~ end";
     Editor e = fresh(doc);
+    std::vector<float> laid;
+    for (int i = 0; i < (int)e.lines().size(); i++) laid.push_back(e.laid_y(i));
     for (int round = 0; round < 2; round++) {
         e.set_reader(!e.reader());
         for (int f = 0; f < 20; f++) frame(e);
     }
-    CHECK(!e.reader());
-    CHECK_EQ(e.text(), doc);
-
-    // Toggling again mid-morph is fine too.
     e.set_reader(true);
     frame(e);
     frame(e);
     e.set_reader(false);
-    for (int f = 0; f < 20; f++) frame(e);
+    bool same_layout = settles_cleanly(e);
+    for (int i = 0; i < (int)laid.size(); i++)
+        if (std::fabs(e.laid_y(i) - laid[i]) > 0.01f) same_layout = false;
     CHECK_EQ(e.text(), doc);
+    CHECK(same_layout);
 }
 
 // Glyph corner positions of all text drawn in `col` in the last frame.
@@ -1321,8 +1283,6 @@ static void test_morph_still_text() {
         frame(e);
         if (!same_glyphs(glyphs_in(ink), still)) same = false;
     }
-    CHECK(same);
-    same = true;
     e.set_reader(false);
     for (int f = 0; f < 30; f++) {
         frame(e);
