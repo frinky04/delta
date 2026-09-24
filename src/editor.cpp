@@ -34,7 +34,7 @@ std::vector<std::string> split_lines(const std::string& text) {
     return out;
 }
 
-bool is_mono(Style f) { return f & (S_Code | S_CodeBlock); }
+bool is_mono(Style f) { return f & (S_Code | S_CodeBlock | S_Tag); }
 
 }  // namespace
 
@@ -1179,7 +1179,7 @@ Editor::Metrics Editor::metrics(float size) const {
 // measuring and drawing always agree. Syntax characters stay regular.
 bool Editor::bold_of(Style f) const {
     if (syntax_ == Syntax::Ini) return f & I_Section;
-    return (f & (S_Bold | S_Heading | S_Tag)) && !(f & (S_Marker | S_Code | S_CodeBlock));
+    return (f & (S_Bold | S_Heading)) && !(f & (S_Marker | S_Code | S_CodeBlock | S_Tag));
 }
 
 float Editor::advance(const Metrics& m, unsigned cp, Style f) const {
@@ -4245,9 +4245,10 @@ Look resolve(Style f, const LineInfo& info, bool reader) {
     // Structural markers (bullets, >, [ ]) sit one step above other syntax.
     ImU32 structural = col_mix(T.dim, T.text, 0.45f);
     if (f & (S_Link | S_WikiLink)) { k.col = T.bright; k.underline = true; }
-    // A tag is one token, # and all: bold, a step quieter than the text
-    // around it (it says what the note is, not what it says).
-    if (f & S_Tag) { k.col = col_mix(T.text, T.dim, 0.4f); k.bold = true; }
+    // A tag is one token, # and all: set in mono (see is_mono), a step
+    // quieter than the text around it (it says what the note is, not what
+    // it says).
+    if (f & S_Tag) { k.col = col_mix(T.text, T.dim, 0.4f); k.bold = k.italic = false; }
     if (f & (S_Code | S_CodeBlock)) { k.col = T.code; k.bold = k.italic = false; }
     if (f & S_TaskDone) { k.col = T.dim; k.strike = !(f & S_Marker); }
     if (f & S_ListMark) k.col = structural;
