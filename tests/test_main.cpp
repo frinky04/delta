@@ -2,7 +2,9 @@
 // input. No window or GPU; font textures are requested but never uploaded.
 #include <cstdio>
 #include <fstream>
+#include <climits>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -21,6 +23,7 @@
 #include "markdown.h"
 #include "palette.h"
 #include "keys.h"
+#include "commands.h"
 
 extern const unsigned char g_font_sans[];
 extern const std::size_t g_font_sans_size;
@@ -2332,9 +2335,59 @@ static void test_palette_modes() {
     for (int i = 0; i < 30; i++) palette_frame(p);
 }
 
-// "open the manual" shows the README as the build embedded it.
+// "open manual" shows the README as the build embedded it.
 extern const unsigned char g_manual[];
 extern const std::size_t g_manual_size;
+
+// Searching the commands the way people do: words in any order, the group
+// in the id, their own word for it. The titles are read from App's source,
+// so this follows the real table.
+static void test_command_search() {
+    std::vector<std::pair<std::string, std::string>> cmds;  // id, title
+    std::set<std::string> seen;
+    const std::regex add(R"re(\badd\("([a-z_.]+)", "([^"]*)", ")re");
+    std::string src = read_src("app.cpp");
+    for (std::sregex_iterator it(src.begin(), src.end(), add), end; it != end; ++it)
+        if (seen.insert((*it)[1]).second) cmds.push_back({(*it)[1], (*it)[2]});
+    CHECK(cmds.size() > 50);
+
+    auto top = [&](const std::string& q, std::string* via = nullptr) {
+        std::string best;
+        int best_score = INT_MIN;
+        for (auto& [id, title] : cmds) {
+            int score;
+            std::string v;
+            if (match_command(q, title, id, command_keywords(id), score, nullptr, &v) && score > best_score) {
+                best = id, best_score = score;
+                if (via) *via = v;
+            }
+        }
+        return best;
+    };
+    struct Case { const char* q; const char* want; };
+    for (Case c : {Case{"delete note", "note.delete"}, {"note delete", "note.delete"}, {"space rename", "space.rename"},
+                   {"rename", "note.rename"}, {"zoom reset", "view.zoom_reset"}, {"heading next", "nav.heading_next"},
+                   {"backlinks", "palette.backlinks"}, {"settings", "config.open"}, {"trash", "note.restore"},
+                   {"outline", "palette.headings"}, {"goto line", "palette.line"}, {"spell", "view.spelling"},
+                   {"help", "app.manual"}, {"new", "note.new"}, {"find replace", "find.replace"},
+                   {"fullscreen", "view.fullscreen"}, {"tgrm", "view.reader"}}) {
+        std::string got = top(c.q);
+        if (got != c.want) { CHECK(!"command search"); std::printf("   \"%s\": got %s, want %s\n", c.q, got.c_str(), c.want); }
+    }
+
+    // The keyword shows when it's what matched; a title word doesn't.
+    std::string via;
+    top("backlinks", &via);
+    CHECK_EQ(via, std::string("backlinks"));
+    top("rename note", &via);
+    CHECK(via.empty());
+
+    int score;
+    std::vector<int> hl;
+    CHECK(match_command("note ren", "rename note", "note.rename", "", score, &hl, nullptr));
+    CHECK(hl.size() == 7);  // "note" and "ren", where they are in the title
+    CHECK(!match_command("note zzz", "rename note", "note.rename", "", score, nullptr, nullptr));
+}
 
 // The note list's name order: case aside, numbers by value.
 static void test_natural_sort() {
@@ -2484,7 +2537,7 @@ static void test_font_loader() {
 }
 
 // What the font picker writes: the value replaced where it's set, or the
-// setting added where "add a setting" would put it.
+// setting added where "add setting" would put it.
 static void test_config_set() {
     auto set = [](const std::string& text, const std::string& key, const std::string& value) {
         std::vector<std::string> lines;
@@ -2564,6 +2617,7 @@ int main() {
     test_ui_voice();
     test_manual();
     test_natural_sort();
+    test_command_search();
     test_palette_modes();
     test_sandbox();
     test_config_set();

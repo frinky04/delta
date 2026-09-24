@@ -458,6 +458,10 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             dl->PushClipRect(ImVec2(lx, ry), ImVec2(label_end(it), ry + row_h), true);
             draw_label(dl, mono, mono_b, ms, ImVec2(lx, ry + row_text_y), it.label, it.hl, col_alpha(col, a), col_alpha(hl, a),
                        it.dim, col_alpha(meta, a));
+            if (!it.aside.empty()) {
+                float ax = lx + label_width(mono, mono_b, ms, it.label, it.hl) + W(mono, "  ");
+                dl->AddText(mono, ms, ImVec2(std::round(ax), std::round(ry + row_text_y)), col_alpha(T.faint, a), it.aside.c_str());
+            }
             dl->PopClipRect();
         }
 

@@ -21,6 +21,7 @@ struct PaletteItem {
     int score = 0;
     int indent = 0;             // heading depth etc.
     int dim = 0;                // leading bytes of label drawn dim (a note's "space/")
+    std::string aside;          // faint, after the label (the keyword a command matched by)
     bool emphasis = false;      // "+ new ..." rows
     bool current = false;       // where you are: selected when the list is built
 };

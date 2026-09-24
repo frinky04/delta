@@ -25,7 +25,7 @@ Text delta puts on screen is lowercase fragments, like editor chrome: `open a no
 
 ## README
 
-`README.md` is embedded at build time as the in-app manual ("open the manual"), so it's for users only, and in markdown delta renders: no tables, no `#anchor` links.
+`README.md` is embedded at build time as the in-app manual ("open manual"), so it's for users only, and in markdown delta renders: no tables, no `#anchor` links.
 
 ## Build and check
 

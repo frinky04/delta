@@ -10,6 +10,7 @@
 #include <set>
 #include <sstream>
 
+#include "commands.h"
 #include "problems.h"
 #include "spell_fix.h"
 #include "theme.h"
@@ -894,8 +895,8 @@ void App::register_commands() {
     auto ed = [this](void (Editor::*fn)()) { return [this, fn] { if (editing()) (editor_.*fn)(); }; };
 
     // Navigation
-    add("palette.notes", "find a note in this space", "ctrl+o", [this] { open_palette("."); }, false, true);
-    add("palette.all", "find a note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, true);
+    add("palette.notes", "find note in this space", "ctrl+o", [this] { open_palette("."); }, false, true);
+    add("palette.all", "find note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, true);
     add("palette.sort", "sort notes by name or recent", "ctrl+r", [this] {
         sort_recent_ = !sort_recent_;
         if (palette_.in_mode('.')) palette_.rebuild();
@@ -903,23 +904,23 @@ void App::register_commands() {
     }, false, true);
     add("palette.commands", "show all commands", "ctrl+p", [this] { open_palette(""); }, false, true);
     add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, true);
-    add("palette.headings", "jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
+    add("palette.headings", "jump to heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
     add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, true);
     add("find.open", "find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
     add("find.replace", "find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
-    add("nav.heading_next", "go to the next heading", "ctrl+alt+down", [this] {
+    add("nav.heading_next", "next heading", "ctrl+alt+down", [this] {
         if (!editing()) return;
         Jump j(*this, History::Heading);
         editor_.goto_heading(1);
     }, true);
-    add("nav.heading_prev", "go to the previous heading", "ctrl+alt+up", [this] {
+    add("nav.heading_prev", "previous heading", "ctrl+alt+up", [this] {
         if (!editing()) return;
         Jump j(*this, History::Heading);
         editor_.goto_heading(-1);
     }, true);
     add("edit.expand_selection", "expand selection", "alt+shift+right", [this] { if (editing()) editor_.expand_selection(); }, true);
     add("edit.shrink_selection", "shrink selection", "alt+shift+left", [this] { if (editing()) editor_.shrink_selection(); }, true);
-    add("edit.follow_link", "follow the link at the caret", "alt+enter", [this] {
+    add("edit.follow_link", "follow link at caret", "alt+enter", [this] {
         LinkSpan link;
         if (!editing()) return;
         if (editor_.link_at_caret(link)) open_link(link);
@@ -932,8 +933,8 @@ void App::register_commands() {
     add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, true);
     add("nav.back", "go back", "alt+left", [this] { history_step(-1); });
     add("nav.forward", "go forward", "alt+right", [this] { history_step(1); });
-    add("nav.switch", "switch to a recent note", "ctrl+tab", [this] { switch_note(1); }, true);
-    add("nav.switch_back", "switch to a recent note, oldest first", "ctrl+shift+tab", [this] { switch_note(-1); }, true);
+    add("nav.switch", "switch to recent note", "ctrl+tab", [this] { switch_note(1); }, true);
+    add("nav.switch_back", "switch to recent note, oldest first", "ctrl+shift+tab", [this] { switch_note(-1); }, true);
 
     // Notes and spaces
     add("note.new", "new note", "ctrl+n", [this] {
@@ -943,7 +944,7 @@ void App::register_commands() {
     add("note.rename", "rename note", "f2", [this] { rename_note(); });
     add("note.move", "move note to another space", "", [this] { move_note(); });
     add("note.delete", "delete note", "", [this] { delete_note(); });
-    add("note.restore", "restore a deleted note", "", [this] { restore_note(); });
+    add("note.restore", "restore deleted note", "", [this] { restore_note(); });
     add("note.save", "save note now", "ctrl+s", [this] { if (save()) status("saved"); });
     add("space.new", "new space", "", [this] { new_space(); });
     add("space.rename", "rename this space", "", [this] { rename_space(); });
@@ -963,17 +964,17 @@ void App::register_commands() {
 
     // App
     add("config.open", "edit config", "ctrl+,", [this] { open_config(); });
-    add("config.add_setting", "add a setting", "", [this] { add_setting(); });
+    add("config.add_setting", "add setting", "", [this] { add_setting(); });
     add("font.choose", "choose font", "", [this] { choose_font(false); });
     add("font.choose_mono", "choose mono font", "", [this] { choose_font(true); });
     add("config.open_external", "open config in another app", "", [this] {
         if (!open_with_default_app(cfg_path_)) status("couldn't open " + path_u8(cfg_path_), true);
     });
-    add("nav.next_problem", "go to the next problem", "f8", [this] { goto_problem(1); }, true);
-    add("nav.prev_problem", "go to the previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
-    add("nav.next_misspelling", "go to the next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
-    add("nav.prev_misspelling", "go to the previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
-    add("edit.quick_fix", "fix the misspelt word with its best guess", "alt+.", [this] { quick_fix(); });
+    add("nav.next_problem", "next problem", "f8", [this] { goto_problem(1); }, true);
+    add("nav.prev_problem", "previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
+    add("nav.next_misspelling", "next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
+    add("nav.prev_misspelling", "previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
+    add("edit.quick_fix", "quick fix misspelt word", "alt+.", [this] { quick_fix(); });
     add("edit.fix_spelling", "fix spelling, word by word", "ctrl+.", [this] { fix_spelling(); });
     add("view.spelling", "toggle spellcheck", "", [this] {
         cfg_.spell = !cfg_.spell;
@@ -982,7 +983,7 @@ void App::register_commands() {
     });
     add("config.reload", "reload config", "", [this] { load_settings(); status("config reloaded"); });
     add("app.open_folder", "show this space's folder", "", [this] { open_with_default_app(store_.root() / u8path(space_)); });
-    add("app.manual", "open the manual", "f1", [this] { open_manual(); });
+    add("app.manual", "open manual", "f1", [this] { open_manual(); });
     add("app.quit", "quit", "ctrl+q", [this] { quit_ = true; }, false, true);
 
     // Editing
@@ -1669,13 +1670,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             if (!cmd.in_palette) continue;
             PaletteItem it;
             it.label = cmd.title;
-            // Terminal vocabulary: lowercase, like the rest of the palette.
-            if (!it.label.empty()) it.label[0] = (char)std::tolower((unsigned char)it.label[0]);
-            if (!fuzzy_match(q, it.label, it.score, &it.hl)) {
-                std::vector<int> dummy;
-                if (!fuzzy_match(q, cmd.id, it.score, &dummy)) continue;
-                it.score -= 500;
-            }
+            if (!match_command(q, cmd.title, cmd.id, command_keywords(cmd.id), it.score, &it.hl, &it.aside)) continue;
             // Prefixes sit in a column of their own: the palette is mono, so
             // padding the keys to the widest a prefixed command has lines them up.
             std::string keys = cmd.chords.empty() ? "" : chord_str(cmd.chords.front());

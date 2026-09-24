@@ -70,7 +70,7 @@ struct ConfigIssue {
 ConfigIssue issue_at(const Config& c, const std::string& section_key, bool value, std::string msg);
 
 // Every setting delta knows: the one table the parser, the problems, the
-// inline hints and "add a setting" all work from. ([keys] comes from the
+// inline hints and "add setting" all work from. ([keys] comes from the
 // command list instead; see BindingDoc.)
 struct Setting {
     enum class Kind { Bool, Float, Int, Choice, Colour, Text, Path };

@@ -9,7 +9,7 @@ Notes live in `~/Documents/delta`. Each folder there is a **space**, and each `.
 - `ctrl+n` new note
 - `alt+d` today's daily note
 
-Notes save as you type. Deleted notes go to the trash; "restore a deleted note" brings one back.
+Notes save as you type. Deleted notes go to the trash; "restore deleted note" brings one back.
 
 ## Palette
 
@@ -53,7 +53,7 @@ Images are stored in the notes folder, once each, and linked with standard markd
 
 ## Config
 
-`ctrl+,` opens the config. It holds only your changes. Each line shows what its setting does and its default, and mistakes are marked as you type. "add a setting" lists every setting and key binding.
+`ctrl+,` opens the config. It holds only your changes. Each line shows what its setting does and its default, and mistakes are marked as you type. "add setting" lists every setting and key binding.
 
 ```ini
 [editor]

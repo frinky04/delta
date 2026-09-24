@@ -65,7 +65,7 @@ embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.aff g_dict_en_us_aff DICT_EN_US
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.dic g_dict_en_us_dic DICT_EN_US_DIC_CPP)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.aff g_dict_en_gb_aff DICT_EN_GB_AFF_CPP)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.dic g_dict_en_gb_dic DICT_EN_GB_DIC_CPP)
-# The README, shown in the app by "open the manual" (rebuilt when it changes).
+# The README, shown in the app by "open manual" (rebuilt when it changes).
 embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual MANUAL_CPP)
 
 # --- app ---------------------------------------------------------------------
@@ -86,6 +86,7 @@ add_library(delta_core STATIC
   src/images.cpp
   src/nav.cpp
   src/fonts.cpp
+  src/commands.cpp
   ${FONT_SANS_CPP}
   ${FONT_MONO_CPP}
   ${FONT_SANS_BOLD_CPP}
