@@ -465,7 +465,9 @@ private:
     TextPos find_origin_;
     std::vector<std::pair<TextPos, TextPos>> matches_;
     int match_ = -1;
+    uint64_t matches_version_ = 0;               // text the matches were found in
     void find_recompute(TextPos from);           // matches for find_q_; current = first at/after `from`
+    void find_refresh();                         // redo the matches if the text changed under them
     void select_match();
 
     // Expand-selection history, so shrink can walk back.

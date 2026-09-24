@@ -137,7 +137,7 @@ static std::string check(const Setting& s, const std::string& v, std::string& us
             char* end = nullptr;
             double n = s.kind == K::Int ? (double)std::strtol(v.c_str(), &end, 10) : std::strtod(v.c_str(), &end);
             std::string range = fmt_num(s.lo) + " to " + fmt_num(s.hi);
-            if (v.empty() || end == v.c_str() || *end) {
+            if (v.empty() || end == v.c_str() || *end || std::isnan(n)) {  // clamp passes NaN through
                 use = s.def;
                 return std::string(s.kind == K::Int ? "expected a whole number, " : "expected a number, ") + range + ", using " + s.def;
             }

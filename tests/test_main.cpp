@@ -612,7 +612,7 @@ static void test_config_schema() {
 
     // Garbage never crashes and never leaves a number outside its range.
     std::string junk = "[editor]\n=\n= 5\nfont_size\nfont_size =\nline_height = 1e999\ncolumn_width = 99999999999999999999\n"
-                       "tab_size = -3\n[\n]\n[editor\nautosave_delay = inf\n";
+                       "tab_size = -3\nblank_line_height = nan\n[\n]\n[editor\nautosave_delay = inf\n";
     junk += std::string("font_size = \0\x01\xff", 15) + "\n" + std::string(100000, 'x') + " = 1\n";
     Config g;
     std::vector<ConfigIssue> gi;
@@ -1636,6 +1636,21 @@ static void test_find_replace() {
         a.redo();
         CHECK_EQ(a.text(), std::string(k.want));
     }
+
+    // The text changing under an open find (a reload from disk, an undo)
+    // must not leave replace working on matches that are gone.
+    Editor s = fresh("cat cat long line here");
+    s.find_begin();
+    s.find_set("cat");
+    s.reload_text("x");
+    CHECK_EQ(s.replace_all("dog"), 0);
+    CHECK_EQ(s.text(), std::string("x"));
+    s.reload_text("a cat");
+    s.replace_current("dog");
+    CHECK_EQ(s.text(), std::string("a dog"));
+    s.undo();
+    CHECK_EQ(s.replace_all("cow"), 1);
+    CHECK_EQ(s.text(), std::string("a cow"));
 }
 
 static void test_navigation_pass() {

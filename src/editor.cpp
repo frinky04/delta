@@ -567,6 +567,7 @@ void Editor::find_begin() {
 void Editor::find_recompute(TextPos from) {
     matches_.clear();
     match_ = -1;
+    matches_version_ = version_;
     if (find_q_.empty()) return;
     // Smart case: a capital in the query makes it case-sensitive.
     bool exact = std::any_of(find_q_.begin(), find_q_.end(), [](char c) { return std::isupper((unsigned char)c); });
@@ -581,6 +582,14 @@ void Editor::find_recompute(TextPos from) {
     match_ = 0;
     for (int k = 0; k < (int)matches_.size(); k++)
         if (!(matches_[k].first < from)) { match_ = k; break; }
+}
+
+// An undo, a reload from disk or an edit while find is open leaves the
+// matches pointing at text that is gone; find them again near the current one.
+void Editor::find_refresh() {
+    if (!find_active_ || matches_version_ == version_) return;
+    bool have = match_ >= 0 && match_ < (int)matches_.size();
+    find_recompute(have ? matches_[match_].first : find_origin_);
 }
 
 void Editor::select_match() {
@@ -602,6 +611,7 @@ void Editor::find_set(const std::string& query) {
 }
 
 void Editor::find_step(int dir) {
+    find_refresh();
     if (matches_.empty()) return;
     int n = (int)matches_.size();
     match_ = ((match_ < 0 ? 0 : match_) + dir + n) % n;
@@ -616,6 +626,7 @@ void Editor::find_end() {
 }
 
 void Editor::replace_current(const std::string& with) {
+    find_refresh();
     if (match_ < 0 || match_ >= (int)matches_.size()) return;
     auto [a, b] = matches_[match_];
     begin_edit(Edit::Other);
@@ -634,6 +645,7 @@ void Editor::replace_current(const std::string& with) {
 }
 
 int Editor::replace_all(const std::string& with) {
+    find_refresh();
     if (matches_.empty()) return 0;
     int count = (int)matches_.size();
     // Where each replacement will land: matches are single-line, so only
@@ -3236,6 +3248,7 @@ void Editor::draw(const EditorParams& p) {
     }
 
     // Find: every match softly lit; the current one is the selection.
+    find_refresh();
     if (find_active_ && !reader_ && !matches_.empty()) {
         ImU32 col = fade(col_alpha(T.bright, 0.10f));  // other matches: neutral; the current one is the (accent) selection
         int first = std::max(0, line_at_y(0, std::max(0.0f, scroll_ - p.top_pad)) - 1);
