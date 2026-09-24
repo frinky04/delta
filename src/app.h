@@ -63,6 +63,11 @@ private:
     const Diagnostic* misspelt_at_caret() const;
     void goto_misspelling(int dir);
     void fix_spelling();
+    void quick_fix();
+    void quick_apply();
+    void fix_load(const Diagnostic& d);
+    void fix_field(const std::string& text);
+    void fix_next(TextPos from);
     void add_to_dictionary(const std::string& word);
     void goto_problem(int dir);
     void open_config();
@@ -112,7 +117,7 @@ private:
     // The status line as a minibuffer: tools that act on the note in view
     // happen down there, so the note stays in sight. (Choosing from a list,
     // headings included, stays in the palette.)
-    enum class Bar { None, Find, Line, Rename };
+    enum class Bar { None, Find, Line, Rename, Fix };
     void open_bar(Bar kind);
     void close_bar();                   // keeps where the tool left you
     void cancel_bar();                  // escape: jumps go back to where you were
@@ -125,6 +130,7 @@ private:
     void open_line(const std::string& text = "");
     void draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+    void draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void status(const std::string& msg, bool error = false);
     void poll_files(double now);
     float base_size() const;
@@ -143,7 +149,6 @@ private:
     Speller speller_;
     fs::path dict_dir_, words_path_;          // <config dir>/dictionaries, <config dir>/words.txt
     fs::file_time_type words_mtime_{};
-    std::vector<std::string> session_words_;  // ignored until delta closes
     std::string spell_key_ = "-";             // the dictionaries asked for ("" none)
     bool spell_report_ = false;               // say what didn't load, once it's loaded
     std::vector<Diagnostic> spelling_;        // the open note's misspelt words
@@ -246,10 +251,35 @@ private:
     bool bar_focus_ = false;          // focus bar_field_ this frame
     bool bar_select_all_ = false;     // ...with its text selected
     int bar_select_pending_ = 0;      // 1 select all, 2 cursor to end
-    char bar_buf_[256] = {};          // line and rename text
+    char bar_buf_[256] = {};          // line, rename and fix text
+    std::string bar_set_;             // text for the field being edited, set on its next callback
+    bool bar_set_pending_ = false;
     std::string bar_last_;            // bar_buf_ as last acted on
     std::string bar_error_;           // why the last Enter didn't go through
     TextPos bar_cur_, bar_anchor_;    // where you were, for escape
+    // Fix: the misspelt word being fixed (as written, where), its suggestions
+    // and which one is in the field; where the pass began and whether it has
+    // wrapped past the end; and, after a fix, where to look for the next.
+    struct Fix {
+        int line = -1, col0 = 0, col1 = 0;
+        std::string word;
+        std::vector<std::string> sugg;
+        int pick = 0;
+    } fix_;
+    TextPos fix_origin_, fix_from_;
+    // The quick fix (alt+.): the word it changed (where, as written), the
+    // guesses it goes through and which is in, where the caret was, and the
+    // caret and editor version it left (pressed again with those unchanged,
+    // it goes on to the next guess).
+    struct Quick {
+        int line = -1, col0 = 0;
+        std::string word;
+        std::vector<std::string> options;
+        int pick = 0;
+        TextPos from, caret;
+        uint64_t version = 0;
+    } quick_;
+    bool fix_wrapped_ = false, fix_advance_ = false;
     float bar_scroll_ = 0;
 
     bool find_replace_ = false;       // replace field shown

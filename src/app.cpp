@@ -286,7 +286,6 @@ void App::apply_spelling(bool force) {
     words_mtime_ = mtime_of(words_path_);
     if (!cfg_.spell) { speller_.unload(); return; }
     std::vector<std::string> words = read_words(words_path_);
-    words.insert(words.end(), session_words_.begin(), session_words_.end());
     speller_.load(split_list(langs), dict_dir_, words);
     spell_report_ = true;
 }
@@ -369,7 +368,11 @@ void App::update_echo() {
             echo_.push_back({sug[0], Tone::Strong});
             echo_.push_back({"?", Tone::Plain});
         }
-        if (std::string k = chord_for("edit.fix_spelling"); !k.empty()) echo_.push_back({"   " + k, Tone::Quiet});
+        // The keys: "alt+. fix · ctrl+. more" (either may be unbound).
+        std::string keys;
+        if (std::string k = chord_for("edit.quick_fix"); !k.empty() && !sug.empty()) keys = k + " fix";
+        if (std::string k = chord_for("edit.fix_spelling"); !k.empty()) keys += (keys.empty() ? "" : " \xC2\xB7 ") + k + (keys.empty() ? "" : " more");
+        if (!keys.empty()) echo_.push_back({"   " + keys, Tone::Quiet});
     } else if (!is_config() && c.line != shown_hold_) {
         // The config's problems say it at the ends of their lines, which are
         // short and right beside them.
@@ -401,39 +404,104 @@ void App::goto_misspelling(int dir) {
     editor_.select_range({to->line, to->col0}, {to->line, to->col1});
 }
 
-// Offers the misspelt word at the caret's suggestions, and keeping it.
-void App::fix_spelling() {
-    const Diagnostic* d = misspelt_at_caret();
-    if (!d) { status("No misspelt word at the caret"); return; }
-    int line = d->line, c0 = d->col0, c1 = d->col1;
-    std::string word = editor_.lines()[line].substr(c0, c1 - c0);
-    std::string form = spell_form(editor_.lines()[line], {c0, c1});
-    // The word must still be there when a row is picked.
-    auto still = [this, line, c0, c1, word] {
-        return line < (int)editor_.lines().size() && editor_.lines()[line].compare(c0, c1 - c0, word) == 0;
-    };
-    std::vector<PaletteItem> items;
-    for (auto& s : speller_.suggest(form)) {
-        PaletteItem it;
-        it.label = s;
-        it.action = [this, still, line, c0, c1, s] {
-            if (still()) editor_.replace_range({line, c0}, {line, c1}, s);
-        };
-        items.push_back(std::move(it));
+// The quick fix: the misspelt word at the caret, or the nearest one before
+// it in the same paragraph, takes its best guess, and the caret stays where
+// it was. Pressed again straight away, the next guess goes in instead (and
+// at the end of them, the word as it was); one undo puts the word back,
+// whichever it's on.
+void App::quick_fix() {
+    if (!note_ || is_config() || editor_.reader()) return;
+    if (quick_.line >= 0 && editor_.version() == quick_.version && editor_.cursor() == quick_.caret) {
+        quick_.pick = (quick_.pick + 1) % (int)quick_.options.size();
+        editor_.undo();  // back to the word as written, then the next guess
+        quick_apply();
+        return;
     }
-    PaletteItem add;
-    add.label = "add \"" + form + "\" to your dictionary";
-    add.meta = "words.txt";
-    add.action = [this, form] { add_to_dictionary(form); };
-    items.push_back(std::move(add));
-    PaletteItem ignore;
-    ignore.label = "ignore \"" + form + "\" until delta closes";
-    ignore.action = [this, form] {
-        session_words_.push_back(form);
-        speller_.add_word(form);
-    };
-    items.push_back(std::move(ignore));
-    palette_.pick("fix: " + word + " ", std::move(items));
+    quick_.line = -1;
+    TextPos c = editor_.cursor();
+    const auto& lines = editor_.lines();
+    const Diagnostic* d = misspelt_at_caret();
+    if (!d) {
+        int top = c.line;
+        while (top > 0 && !trim(lines[top - 1]).empty()) top--;
+        for (auto it = spelling_.rbegin(); it != spelling_.rend() && !d; ++it)
+            if (it->line >= top && TextPos{it->line, it->col0} < c) d = &*it;
+    }
+    if (!d || d->col1 > (int)lines[d->line].size()) { status(cfg_.spell ? "No misspelt word here" : "Spellcheck is off"); return; }
+    std::string word = lines[d->line].substr(d->col0, d->col1 - d->col0);
+    const auto& sugg = speller_.suggest(spell_form(lines[d->line], {d->col0, d->col1}));
+    if (sugg.empty()) { status("No suggestions for " + word); return; }
+    quick_.line = d->line;
+    quick_.col0 = d->col0;
+    quick_.word = word;
+    quick_.options = sugg;
+    quick_.options.push_back(word);  // the cycle ends on the word as it was
+    quick_.pick = 0;
+    quick_.from = c;
+    quick_apply();
+}
+
+// Puts the picked guess in place of the word, the caret back where it was
+// (moved along if the word before it changed length).
+void App::quick_apply() {
+    const std::string& to = quick_.options[quick_.pick];
+    int end = quick_.col0 + (int)quick_.word.size();
+    editor_.replace_range({quick_.line, quick_.col0}, {quick_.line, end}, to);
+    TextPos back = quick_.from;
+    if (back.line == quick_.line && back.col >= end) back.col += (int)to.size() - (int)quick_.word.size();
+    else if (back.line == quick_.line && back.col > quick_.col0) back.col = quick_.col0 + (int)to.size();  // was in the word
+    editor_.jump_to(back);
+    quick_.caret = back;
+    quick_.version = editor_.version();
+    status(to == quick_.word ? "Back to " + to : quick_.word + " \xE2\x86\x92 " + to);  // "recieve → receive"
+}
+
+// Fixing spelling happens in the status line, a word at a time. The field
+// holds the fix: the best guess to start with, tab for the others, or type
+// your own. Enter fixes the word and goes on to the next, shift+enter skips
+// it, ctrl+enter adds it to your dictionary; the pass ends where it began,
+// or at escape. From a word that isn't misspelt, it starts at the next one.
+void App::fix_spelling() {
+    if (!note_ || is_config()) return;
+    if (editor_.reader()) editor_.set_reader(false);
+    const Diagnostic* d = misspelt_at_caret();
+    if (!d) {
+        goto_misspelling(1);  // says why not, if there's nowhere to go
+        if (!(d = misspelt_at_caret())) return;
+    }
+    fix_origin_ = {d->line, d->col0};
+    fix_wrapped_ = fix_advance_ = false;
+    open_bar(Bar::Fix);
+    fix_load(*d);
+}
+
+// Takes up a misspelt word: selected in the note, its best guess in the field.
+void App::fix_load(const Diagnostic& d) {
+    const std::string& s = editor_.lines()[d.line];
+    fix_.line = d.line;
+    fix_.col0 = d.col0;
+    fix_.col1 = d.col1;
+    fix_.word = s.substr(d.col0, d.col1 - d.col0);
+    fix_.sugg = speller_.suggest(spell_form(s, {d.col0, d.col1}));
+    fix_.pick = 0;
+    fix_field(fix_.sugg.empty() ? fix_.word : fix_.sugg[0]);
+    editor_.select_range({d.line, d.col0}, {d.line, d.col1});
+}
+
+// Puts text in the fix field, selected, so typing replaces it.
+void App::fix_field(const std::string& text) {
+    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", text.c_str());
+    bar_set_ = text;  // for when the field is active (see bar_input_callback)
+    bar_set_pending_ = true;
+    bar_focus_ = true;
+    bar_select_pending_ = 1;
+}
+
+// On to the next misspelt word from `from`, once the spelling has caught up
+// with the edit just made (see draw_fix_bar).
+void App::fix_next(TextPos from) {
+    fix_from_ = from;
+    fix_advance_ = true;
 }
 
 void App::add_to_dictionary(const std::string& word) {
@@ -637,7 +705,8 @@ void App::register_commands() {
     add("nav.prev_problem", "Go to the previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
     add("nav.next_misspelling", "Go to the next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
     add("nav.prev_misspelling", "Go to the previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
-    add("edit.fix_spelling", "Fix the misspelt word at the caret", "ctrl+.", [this] { fix_spelling(); });
+    add("edit.quick_fix", "Fix the misspelt word with its best guess", "alt+.", [this] { quick_fix(); });
+    add("edit.fix_spelling", "Fix spelling, word by word", "ctrl+.", [this] { fix_spelling(); });
     add("view.spelling", "Toggle spellcheck", "", [this] {
         cfg_.spell = !cfg_.spell;
         apply_spelling();
@@ -1214,7 +1283,7 @@ double App::next_wake(double now) {
     double status_end = status_time_ + 3.4;
     if (status_end > now) t = std::min(t, status_end);
     if (note_ && next_problem_check_ > now) t = std::min(t, next_problem_check_);
-    if (spell_pending_) t = now;                                     // more lines to check
+    if (spell_pending_ || (bar_ == Bar::Fix && fix_advance_)) t = now;  // more lines to check, or a fix to move on from
     else if (speller_.loading()) t = std::min(t, now + 0.05);        // marks as soon as it's loaded
     return t;
 }
@@ -1382,6 +1451,12 @@ int App::bar_input_callback(ImGuiInputTextCallbackData* d) {
         ImWchar c = d->EventChar;
         return (c >= '0' && c <= '9') || c == '+' || c == '-' || c == ':' ? 0 : 1;
     }
+    // Text set while the field is being edited (ImGui keeps its own copy).
+    if (app->bar_set_pending_) {
+        d->DeleteChars(0, d->BufTextLen);
+        d->InsertChars(0, app->bar_set_.c_str());
+        app->bar_set_pending_ = false;
+    }
     if (app->bar_select_pending_ == 1) { d->SelectionStart = 0; d->SelectionEnd = d->CursorPos = d->BufTextLen; }
     if (app->bar_select_pending_ == 2) { d->SelectionStart = d->SelectionEnd = d->CursorPos = d->BufTextLen; }
     app->bar_select_pending_ = 0;
@@ -1419,6 +1494,7 @@ void App::draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
         case Bar::Find: draw_find_bar(min, max, s, pad, ty); break;
         case Bar::Line: draw_line_bar(min, max, s, pad, ty); break;
         case Bar::Rename: draw_rename_bar(min, max, s, pad, ty); break;
+        case Bar::Fix: draw_fix_bar(min, max, s, pad, ty); break;
         case Bar::None: break;
     }
     bar_focus_ = false;
@@ -1502,6 +1578,108 @@ void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
         float w = W(count.c_str());
         dl->AddText(mono_, s, ImVec2(max.x - pad - w, ty), editor_.find_count() ? T.dim : T.text, count.c_str());
     }
+}
+
+// Fix spelling (see fix_spelling).
+
+void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
+    ImGuiIO& io = ImGui::GetIO();
+    const auto& lines = editor_.lines();
+    float x = min.x + pad;
+    dl->AddText(mono_, s, ImVec2(x, ty), T.dim, "fix");
+    x += W("fix") + s * 0.5f;
+
+    // After a fix, a skip or an add: the next word, once the spelling marks
+    // are current. Forward to the end, then from the top back to where the
+    // pass began.
+    if (fix_advance_) {
+        if (!speller_.ready() || spell_version_ != editor_.version() || spell_gen_ != speller_.generation() || spell_pending_) return;
+        fix_advance_ = false;
+        auto pos = [](const Diagnostic& d) { return TextPos{d.line, d.col0}; };
+        const Diagnostic* next = nullptr;
+        for (auto& d : spelling_)
+            if (!(pos(d) < fix_from_) && (!fix_wrapped_ || pos(d) < fix_origin_)) { next = &d; break; }
+        if (!next && !fix_wrapped_) {
+            fix_wrapped_ = true;
+            for (auto& d : spelling_)
+                if (pos(d) < fix_origin_) { next = &d; break; }
+        }
+        if (!next) {
+            close_bar();
+            status(spelling_.empty() ? "No misspelt words left" : "Back where you started");
+            return;
+        }
+        fix_load(*next);
+    }
+
+    // The word must still be where it was (an undo, a reload...).
+    if (fix_.line >= (int)lines.size() || fix_.col1 > (int)lines[fix_.line].size() ||
+        lines[fix_.line].compare(fix_.col0, fix_.col1 - fix_.col0, fix_.word) != 0) {
+        close_bar();
+        return;
+    }
+
+    // No key repeat: holding enter mustn't race through fixes.
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+    if (enter) {
+        TextPos after{fix_.line, fix_.col1};
+        if (io.KeyCtrl) {
+            add_to_dictionary(spell_form(lines[fix_.line], {fix_.col0, fix_.col1}));
+        } else if (!io.KeyShift) {
+            std::string v = trim(bar_buf_);
+            if (!v.empty() && v != fix_.word) {
+                editor_.replace_range({fix_.line, fix_.col0}, {fix_.line, fix_.col1}, v);
+                // Where the pass began moves with the text before it.
+                int delta = (int)v.size() - (int)fix_.word.size();
+                if (fix_.line == fix_origin_.line && fix_.col0 < fix_origin_.col) fix_origin_.col += delta;
+                after.col = fix_.col0 + (int)v.size();
+            }
+        }
+        fix_next(after);
+        return;
+    }
+    int n = (int)fix_.sugg.size();
+    if (n && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
+        fix_.pick = (fix_.pick + (io.KeyShift ? n - 1 : 1)) % n;
+        fix_field(fix_.sugg[fix_.pick]);
+    }
+
+    // Left: the field, wide enough for the longest suggestion.
+    float widest = W(fix_.word);
+    for (auto& g : fix_.sugg) widest = std::max(widest, W(g));
+    float field_w = std::clamp(widest + s * 2, 10 * s, (max.x - min.x) * 0.3f);
+    bar_input("##fix", bar_buf_, sizeof bar_buf_, 1, x, ty, field_w);
+    x += field_w + s * 1.6f;
+
+    // Right: which suggestion is in the field, and the keys (while there's room).
+    float rx = max.x - pad;
+    std::string v = trim(bar_buf_);
+    std::string count = !n ? "no suggestions" : v == fix_.sugg[fix_.pick] ? std::to_string(fix_.pick + 1) + "/" + std::to_string(n) : "your own";
+    std::string keys = "tab next \xC2\xB7 shift+enter skip \xC2\xB7 ctrl+enter add";
+    if (!n) keys = "shift+enter skip \xC2\xB7 ctrl+enter add";
+    if (rx - W(keys) - s * 1.6f - W(count) > x + s * 8) {
+        rx -= W(keys);
+        dl->AddText(mono_, s, ImVec2(rx, ty), col_mix(T.faint, T.dim, 0.6f), keys.c_str());
+        rx -= s * 1.6f;
+    }
+    rx -= W(count);
+    dl->AddText(mono_, s, ImVec2(rx, ty), T.dim, count.c_str());
+    rx -= s * 1.6f;
+
+    // Middle: all the suggestions, the one in the field brighter.
+    dl->PushClipRect(ImVec2(x, min.y), ImVec2(std::max(x, rx), max.y), true);
+    for (int i = 0; i < n; i++) {
+        if (i) {
+            dl->AddText(mono_, s, ImVec2(x, ty), T.faint, " \xC2\xB7 ");
+            x += W(" \xC2\xB7 ");
+        }
+        bool in_field = i == fix_.pick && v == fix_.sugg[i];
+        dl->AddText(mono_, s, ImVec2(x, ty), in_field ? T.text : T.dim, fix_.sugg[i].c_str());
+        x += W(fix_.sugg[i]);
+    }
+    dl->PopClipRect();
 }
 
 // Go to line: "42", "42:10" (line and column) or "+5" / "-5" from where you

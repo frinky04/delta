@@ -55,7 +55,8 @@ Default keys (all rebindable):
 | `alt+enter` | follow the link at the caret |
 | `f8` / `shift+f8` | next / previous problem |
 | `alt+f8` / `alt+shift+f8` | next / previous misspelt word |
-| `ctrl+.` | fix the misspelt word at the caret |
+| `alt+.` | fix the nearest misspelt word with its best guess (again: the next guess) |
+| `ctrl+.` | fix spelling, word by word |
 | `ctrl+n` / `alt+d` / `f2` | new note / today's daily note / rename |
 | `alt+left` / `alt+right` | back / forward through opened notes |
 | `ctrl+e` | reader mode |
@@ -77,6 +78,7 @@ Tools that act on the note in view live in the status line, so the note stays in
 - **Find** (`ctrl+f`, `ctrl+h`): matches are lit as you type (case-sensitive only if you type a capital), `enter` / `shift+enter` step through them, `tab` switches between find and replace, `enter` in replace replaces the current match, `ctrl+alt+enter` replaces them all (one undo). `esc` closes with the match selected.
 - **Go to line** (`ctrl+g`): `42`, `42:10` for a column, or `+5` / `-5` from where you are. The page follows as you type; `enter` stays there, `esc` goes back.
 - **Rename** (`f2`): the note's name in the status line becomes editable where it sits, checked as you type.
+- **Fix spelling** (`ctrl+.`): the misspelt word at the caret (or the next one) is selected and its best guess fills the field; `tab` / `shift+tab` goes through the other suggestions, or type your own. `enter` fixes it and moves to the next, `shift+enter` skips it, `ctrl+enter` adds it to your dictionary. The pass ends back where it started.
 
 Choosing from a list stays in the palette, headings included (`ctrl+shift+o`, or `[sections]` in the config).
 
@@ -84,7 +86,7 @@ Expand selection grows word, sentence, line, paragraph, section (under its headi
 
 ## Spelling
 
-Misspelt words get a dotted underline as you write (`spelling` in `[colors]`). The word you're typing isn't marked until you've moved on from it. Only prose is checked: code, links' targets, URLs, paths, emails, `#tags`, `snake_case` and `camelCase` names, ALL CAPS, words with digits and front matter are left alone. The status bar counts the misspelt words apart from problems: click the count or press `alt+F8` / `alt+shift+F8` to go through them. With the caret on one, its likeliest fix shows in the middle of the status line ("Disempower?"); `ctrl+.` lists them all, along with adding the word to your dictionary or ignoring it until delta closes.
+Misspelt words get a dotted underline as you write (`spelling` in `[colors]`). The word you're typing isn't marked until you've moved on from it. Only prose is checked: code, links' targets, URLs, paths, emails, `#tags`, `snake_case` and `camelCase` names, ALL CAPS, words with digits and front matter are left alone. The status bar counts the misspelt words apart from problems: click the count or press `alt+F8` / `alt+shift+F8` to go through them. With the caret on one, its likeliest fix shows in the middle of the status line ("Disempower?"). `alt+.` puts it in without opening anything: it fixes the misspelt word at the caret, or the nearest one before it in the paragraph, and leaves the caret where it was, so you can fix a typo a few words back and keep typing. Press it again for the next guess (the last one is the word as you wrote it); one `ctrl+z` undoes it whichever guess it is on. `ctrl+.` opens the fix tool in the status line, then the rest of the note one word at a time (see the status-line tools under Editing).
 
 English (`en_US`, and `en_GB` with -ise spellings) is built in. `[spell]` in the config picks the dictionaries, and a space can have its own:
 
