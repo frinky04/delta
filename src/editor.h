@@ -376,15 +376,33 @@ private:
     ImVec2 grab_off_;                 // grab point from the image's top-left, at full size
     ImVec2 ghost_at_;                 // eased pointer (doc)
     float ghost_k_ = 1;               // size, 1 = full
-    // The drop marker: glides between places of one kind (upright beside an
-    // image, 1; across between lines, 2); switching kind, the old one fades
-    // out where it is while the new one fades in, never an in-between shape.
-    struct DropMark { ImVec2 a, b; float alpha = 0; int kind = 0; };
-    DropMark mark_, mark_old_;
+    // Where it would land is shown by making room there: the lines it would
+    // change are laid out as if it had been dropped (drag_preview), its
+    // place kept by a faint copy (the slot); a line of its own opens as a
+    // spacer between lines. What it was at pickup (the preview moves it).
+    Line::Tile drag_tile_;
+    std::string drag_token_;          // its ![...](...)
+    Line::Tile drag_own_tile_;        // laid out on a line of its own
+    float drag_own_h_ = 0;
+    struct Spacer { int before; float h, target, dy = 0; };
+    std::vector<Spacer> spacers_;
+    bool drag_preview(int line, std::string& out, int* slot) const;
+    bool drag_hides_source() const;
+    void drag_slot(int& line, int& tile) const;
+    int drag_sig_ = 0;                // the preview last laid out, to morph on change
+    int drag_signature() const;
+    // The target is found in the lines as they are, not the preview: room
+    // opening under the pointer would otherwise move the target on (and a
+    // row that shrinks as it joins would drop the pointer out of it, and
+    // back, every frame). Real tiles of previewed lines, and every line's
+    // real top (one more at the end), while one is carried.
+    std::map<int, std::vector<Line::Tile>> drag_real_;
+    std::vector<float> drag_real_y_;
     float caret_shown_ = 1;           // the caret steps back while an image is carried (0..1)
     int hover_tile_ = -1;             // the image under the pointer (with hover_img_line_)
     float hover_glow_ = 0;            // its faint lift, eased
     bool nudge_image(int dir);        // ctrl+alt+left/right: swap with its neighbour in the row
+    bool move_picked(int line, int tile, int dir);  // alt+up/down on a picked image
     // Landing: after a drop (or a cancel), the image flies from where it was
     // let go to its place, drawn over the page until it arrives.
     int land_line_ = -1, land_tile_ = -1;

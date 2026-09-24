@@ -1515,6 +1515,17 @@ void App::frame() {
                 pending_run_.assign(run.begin() + k + 1, run.end());
                 break;
             }
+            // "mouse:<x>:<y>" moves the pointer (window pixels); "down" and
+            // "up" press and let go of the left button.
+            if (id.rfind("mouse:", 0) == 0 || id == "down" || id == "up") {
+                ImGuiIO& mio = ImGui::GetIO();
+                float mx = 0, my = 0;
+                if (id[0] == 'm' && std::sscanf(id.c_str() + 6, "%f:%f", &mx, &my) == 2) mio.AddMousePosEvent(mx, my);
+                else if (id[0] != 'm') mio.AddMouseButtonEvent(ImGuiMouseButton_Left, id == "down");
+                run_after_ = now + 0.05;
+                pending_run_.assign(run.begin() + k + 1, run.end());
+                break;
+            }
             if (id.rfind("type:", 0) == 0) {
                 ImGui::GetIO().AddInputCharactersUTF8(id.c_str() + 5);
                 run_after_ = now + 0.1;

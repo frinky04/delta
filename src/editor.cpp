@@ -876,6 +876,8 @@ void Editor::select_line() {
 }
 
 void Editor::move_lines(int dir) {
+    int tile = 0;
+    if (int line = picked(&tile); line >= 0 && move_picked(line, tile, dir)) return;
     auto [a, b] = selected_lines();
     int n = (int)lines_.size();
     if ((dir < 0 && a == 0) || (dir > 0 && b + 1 >= n)) return;
@@ -884,6 +886,10 @@ void Editor::move_lines(int dir) {
     bool have = (int)V.size() == n && (int)yoff_.size() == n;
     float block_h = 0, other_h = 0;
     if (have) {
+        // Images are noted where they're drawn before the offsets below are
+        // rotated (sync_edits would note them after, against the wrong
+        // lines): they slide with their lines and need no morph of their own.
+        shoot_tiles();
         for (int l = a; l <= b; l++) block_h += V[l].h;
         other_h = V[dir < 0 ? a - 1 : b + 1].h;
     }
@@ -1167,7 +1173,11 @@ void Editor::layout(int mode) {
     laid_version_[mode] = version_;
     V.resize(lines_.size());
     bool in_code = false;
-    float y = 0;
+    float y = 0, real_y = 0;
+    if (mode == 0) {
+        drag_real_.clear();
+        drag_real_y_.clear();
+    }
     for (int i = 0; i < (int)lines_.size(); i++) {
         Line& L = V[i];
         const std::string& s = lines_[i];
@@ -1246,7 +1256,17 @@ void Editor::layout(int mode) {
         }
         // Images are sized every time: they can arrive (or go) on disk, and
         // they're capped by the view's height.
-        if (L.info.kind == LineKind::Image) layout_image(L, s, i);
+        // While one is carried, the lines it would change are laid out as
+        // they'd read once it's dropped (their real tiles kept aside).
+        std::string preview;
+        bool pv = mode == 0 && L.info.kind == LineKind::Image && drag_preview(i, preview, nullptr);
+        float real_h = -1;
+        if (pv) {
+            layout_image(L, s, i);
+            drag_real_[i] = L.tiles;
+            real_h = L.rows.size() * L.row_h;
+        }
+        if (L.info.kind == LineKind::Image) layout_image(L, pv ? preview : s, i);
         else L.img = false;
         L.pad = 0;
         if (L.info.kind == LineKind::Heading && i > 0)
@@ -1254,9 +1274,14 @@ void Editor::layout(int mode) {
         L.y = y;
         L.h = L.pad + L.rows.size() * L.row_h;
         if (mode == 1) { L.dy = L.y; L.dh = L.h; }  // the reader doesn't animate layout
+        if (mode == 0 && img_drag_) {
+            drag_real_y_.push_back(real_y);
+            real_y += real_h >= 0 ? L.pad + real_h : L.h;
+        }
         y += L.h;
         if (L.info.kind == LineKind::Fence) in_code = !in_code;
     }
+    if (mode == 0 && img_drag_) drag_real_y_.push_back(real_y);
     total_h_[mode] = y;
 }
 
@@ -1698,21 +1723,38 @@ void Editor::animate_layout(float dt) {
         tile_shots_new_ = false;
         tile_morphs_.clear();
         tile_gone_.clear();
+        spacers_.clear();
         snap_heights_ = false;
         if (prev_lines_.size() != lines_.size() || diff_version_ != version_) {
             prev_lines_ = lines_;
             diff_version_ = version_;
         }
     }
-    // Where every line (and ghost) sits, from the heights as they are now.
+    // A carried image headed for a line of its own: room opens where that
+    // line would go; wherever it was headed before closes again.
+    int want = img_drag_ && drop_changes() && drop_own_ >= 0 ? drop_own_ : -1;
+    bool have = false;
+    for (auto& s : spacers_) {
+        s.target = s.before == want ? drag_own_h_ : 0.0f;
+        have = have || s.before == want;
+    }
+    if (want >= 0 && !have) spacers_.push_back({want, 0.0f, drag_own_h_});
+    std::sort(spacers_.begin(), spacers_.end(), [](const Spacer& a, const Spacer& b) { return a.before < b.before; });
+    // Where every line (and ghost, and spacer) sits, from the heights as
+    // they are now.
     auto place = [&] {
         float y = 0;
-        size_t gi = 0;
+        size_t gi = 0, si = 0;
         for (size_t i = 0; i <= V.size(); i++) {
             while (gi < ghosts_.size() && ghosts_[gi].before <= (int)i) {
                 ghosts_[gi].dy = y;
                 y += ghosts_[gi].h;
                 gi++;
+            }
+            while (si < spacers_.size() && spacers_[si].before <= (int)i) {
+                spacers_[si].dy = y;
+                y += spacers_[si].h;
+                si++;
             }
             if (i == V.size()) break;
             V[i].dy = y;
@@ -1732,6 +1774,9 @@ void Editor::animate_layout(float dt) {
     for (size_t i = 0; i < V.size(); i++) {
         dh_[i] = anim::approach(dh_[i], V[i].h, rate, dt, 0.3f);
     }
+    for (auto& s : spacers_) s.h = anim::approach(s.h, s.target, rate, dt, 0.3f);
+    spacers_.erase(std::remove_if(spacers_.begin(), spacers_.end(), [](const Spacer& s) { return s.target <= 0.0f && s.h <= 0.0f; }),
+                   spacers_.end());
     // A removed line fades out first, holding its space; only then does the
     // space close. Taking turns means text never overlaps.
     for (auto& g : ghosts_) {
@@ -2408,8 +2453,14 @@ bool Editor::handle_image_mouse(bool hovered, ImVec2 d) {
             if (tile_rect(press_img_line_, press_img_tile_, ta, tb)) grab_off_ = ImVec2(press_at_.x - ta.x, press_at_.y - ta.y);
             ghost_at_ = press_at_;
             ghost_k_ = 1.0f;
-            mark_ = mark_old_ = DropMark{};
             land_line_ = -1;
+            // Kept as it was: the preview lays its line out without it.
+            drag_tile_ = V[press_img_line_].tiles[press_img_tile_];
+            drag_token_ = lines_[press_img_line_].substr(drag_tile_.b0, drag_tile_.b1 - drag_tile_.b0);
+            Line own;
+            layout_image(own, drag_token_, -1);
+            drag_own_tile_ = own.img ? own.tiles[0] : drag_tile_;
+            drag_own_h_ = own.img ? own.row_h : drag_tile_.h;
         }
         if (img_drag_) {
             drag_at_ = d;
@@ -2420,27 +2471,43 @@ bool Editor::handle_image_mouse(bool hovered, ImVec2 d) {
             if (my > P_.max.y - edge) scroll_target_ += (my - P_.max.y + edge) * io.DeltaTime * 14;
             drop_line_ = drop_stop_ = drop_own_ = -1;
             if (!V.empty()) {
-                int l = std::clamp(line_at_y(0, d.y), 0, (int)V.size() - 1);
+                // Where the lines really are (drag_real_y_), not the preview.
+                bool real = drag_real_y_.size() == V.size() + 1;
+                int l;
+                if (real) l = std::clamp((int)(std::upper_bound(drag_real_y_.begin(), drag_real_y_.end() - 1, d.y) - drag_real_y_.begin()) - 1, 0, (int)V.size() - 1);
+                else l = std::clamp(line_at_y(0, d.y), 0, (int)V.size() - 1);
                 const Line& L = V[l];
-                float ly = d.y - L.dy - L.pad - (l < (int)yoff_.size() ? yoff_[l] : 0.0f);
-                // Anywhere across a row of images (blank space beside them
-                // too) joins it; only a strip along its top and bottom edge,
-                // and the space between lines, means a line of its own.
-                if (L.img) {
-                    for (int i = 0; i < (int)L.tiles.size(); i++) {
-                        const Line::Tile& t = L.tiles[i];
-                        float edge = std::min(t.h * 0.2f, 22 * dpi);
-                        if (ly < t.y + edge || ly > t.y + t.h - edge) continue;
-                        // This row: before the image whose middle is past x.
-                        int k = i;
-                        for (int j = i; j < (int)L.tiles.size() && L.tiles[j].y == t.y; j++)
-                            if (d.x >= L.tiles[j].x + L.tiles[j].w * 0.5f) k = j + 1;
+                float top = real ? drag_real_y_[l] : L.dy + (l < (int)yoff_.size() ? yoff_[l] : 0.0f);
+                float h = real ? drag_real_y_[l + 1] - drag_real_y_[l] : L.dh;
+                float ly = d.y - top - L.pad;
+                auto it = drag_real_.find(l);
+                const std::vector<Line::Tile>& tiles = it != drag_real_.end() ? it->second : L.tiles;
+                // Anywhere across a line of images (blank space beside them,
+                // and between the rows it wraps into, too) joins the nearest
+                // row; only a strip along the top of its first row and the
+                // bottom of its last, and the space between lines, means a
+                // line of its own.
+                if (L.img && !tiles.empty()) {
+                    float top = tiles.front().y, bottom = 0;
+                    for (auto& t : tiles) bottom = std::max(bottom, t.y + t.h);
+                    float edge_top = std::min(tiles.front().h * 0.2f, 22 * dpi), edge_bottom = std::min(tiles.back().h * 0.2f, 22 * dpi);
+                    if (ly >= top + edge_top && ly <= bottom - edge_bottom) {
+                        int first = 0;
+                        float nearest = 1e9f;
+                        for (int i = 0; i < (int)tiles.size(); i++) {
+                            const Line::Tile& t = tiles[i];
+                            float dist = ly < t.y ? t.y - ly : ly > t.y + t.h ? ly - (t.y + t.h) : 0.0f;
+                            if (dist < nearest) { nearest = dist; first = i; }  // (the first of its row)
+                        }
+                        // That row: before the image whose middle is past x.
+                        int k = first;
+                        for (int j = first; j < (int)tiles.size() && tiles[j].y == tiles[first].y; j++)
+                            if (d.x >= tiles[j].x + tiles[j].w * 0.5f) k = j + 1;
                         drop_line_ = l;
                         drop_stop_ = k;
-                        break;
                     }
                 }
-                if (drop_line_ < 0) drop_own_ = d.y < L.dy + L.dh * 0.5f ? l : l + 1;  // a line of its own
+                if (drop_line_ < 0) drop_own_ = d.y < top + h * 0.5f ? l : l + 1;  // a line of its own
             }
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             anim::active = true;
@@ -2538,6 +2605,75 @@ void Editor::finish_resize() {
     end_edit(false);
 }
 
+// alt+up/down with an image picked moves the image, not its line, one step
+// through the places a drag can put it: into the row above (below) in a
+// line that wraps into rows, by where it sits across; out of its row onto
+// a line of its own; from a line of its own into the row of images above
+// (below), at its end (start). False when it's alone on its line next to
+// text: the line moves as any line does.
+bool Editor::move_picked(int line, int tile, int dir) {
+    const Line& L = lay_[0][line];
+    const Line::Tile& t = L.tiles[tile];
+    float cx = t.x + t.w * 0.5f;
+    // Where it would go among a row's images (first..last): before the first
+    // one whose middle is past its own.
+    auto stop_in = [&](const Line& R, float row_y, int& first, int& last) {
+        first = -1;
+        int count = 0;
+        for (int j = 0; j < (int)R.tiles.size(); j++) {
+            if (R.tiles[j].y != row_y) continue;
+            if (first < 0) first = j;
+            last = j;
+            if (R.tiles[j].x + R.tiles[j].w * 0.5f < cx) count++;
+        }
+        return first + count;
+    };
+    int to_line = -1, to_stop = -1, own = -1;
+    float row_y = -1;  // the next row of this line, that way
+    for (auto& o : L.tiles)
+        if (dir < 0 ? o.y < t.y && (row_y < 0 || o.y > row_y) : o.y > t.y && (row_y < 0 || o.y < row_y)) row_y = o.y;
+    if (row_y >= 0) {
+        // The same number of images, so the same rows: it takes a place in
+        // that row (the last of it, at most, or it would wrap back out).
+        int first, last;
+        int f = std::min(stop_in(L, row_y, first, last), last);
+        to_line = line;
+        to_stop = f >= tile ? f + 1 : f;  // (a stop counts it where it is)
+    } else if (L.tiles.size() > 1) {
+        own = dir < 0 ? line : line + 1;
+    } else {
+        // Joining the row above (below) keeps reading order: after its
+        // images (before them). A line of its own sits at the column's left,
+        // so where it sits across says nothing about where it should go.
+        int m = line + dir;
+        if (m < 0 || m >= (int)lines_.size() || !is_img(m)) return false;
+        to_line = m;
+        to_stop = dir < 0 ? (int)lay_[0][m].tiles.size() : 0;
+    }
+    // Dropped there, as a drag would, flying from where it is.
+    ImVec2 a, b;
+    if (tile_rect(line, tile, a, b)) {
+        if (const TileMorph* mo = tile_morph(line, tile)) {
+            a = ImVec2(a.x + mo->da.x, a.y + mo->da.y);
+            b = ImVec2(b.x + mo->db.x, b.y + mo->db.y);
+        }
+        land_a_ = a;
+        land_b_ = b;
+    }
+    land_drag_ = false;
+    press_img_line_ = line;
+    press_img_tile_ = tile;
+    drop_line_ = to_line;
+    drop_stop_ = to_stop;
+    drop_own_ = own;
+    uint64_t before = version_;
+    move_image();
+    press_img_line_ = press_img_tile_ = drop_line_ = drop_stop_ = drop_own_ = -1;
+    if (version_ != before && land_line_ >= 0) pick(land_line_, land_tile_);
+    else land_line_ = -1;
+    return true;
+}
+
 // Swap the image the caret is on with the one beside it in its row. It
 // glides to its new place (the landing flight); the caret stays on it.
 bool Editor::nudge_image(int dir) {
@@ -2587,18 +2723,85 @@ bool Editor::tile_rect(int line, int tile, ImVec2& a, ImVec2& b) const {
 // or back on the line it's alone on, it wouldn't.)
 bool Editor::drop_changes() const {
     int from = press_img_line_, tile = press_img_tile_;
-    if (from < 0 || from >= (int)lay_[0].size()) return false;
+    std::vector<ImageRef> refs;  // (the text's, not the preview's)
+    if (from < 0 || from >= (int)lines_.size() || !md_image_row(lines_[from], &refs)) return false;
     if (drop_line_ >= 0) return !(drop_line_ == from && (drop_stop_ == tile || drop_stop_ == tile + 1));
     if (drop_own_ < 0) return false;
-    return !(lay_[0][from].tiles.size() == 1 && (drop_own_ == from || drop_own_ == from + 1));
+    return !(refs.size() == 1 && (drop_own_ == from || drop_own_ == from + 1));
+}
+
+// While carried with somewhere new to go: how line `line` would read once
+// it's dropped, and where it sits in it (`slot`, -1 if not there). False
+// for lines it doesn't change.
+bool Editor::drag_preview(int line, std::string& out, int* slot) const {
+    if (!img_drag_ || !drop_changes()) return false;
+    int from = press_img_line_, tile = press_img_tile_;
+    auto tokens = [&](int l) {
+        std::vector<ImageRef> refs;
+        std::vector<std::string> t;
+        if (md_image_row(lines_[l], &refs))
+            for (auto& r : refs) t.push_back(lines_[l].substr(r.begin, r.end - r.begin));
+        return t;
+    };
+    auto join = [](const std::vector<std::string>& t) {
+        std::string s;
+        for (auto& x : t) s += (s.empty() ? "" : " ") + x;
+        return s;
+    };
+    if (line != from && line != drop_line_) return false;
+    std::vector<std::string> rest = tokens(from);  // its line without it
+    if (tile < 0 || tile >= (int)rest.size()) return false;
+    rest.erase(rest.begin() + tile);
+    if (line == drop_line_) {
+        std::vector<std::string> t = line == from ? rest : tokens(line);
+        int k = line == from ? (drop_stop_ > tile ? drop_stop_ - 1 : drop_stop_) : drop_stop_;
+        k = std::clamp(k, 0, (int)t.size());
+        t.insert(t.begin() + k, drag_token_);
+        out = join(t);
+        if (slot) *slot = k;
+        return true;
+    }
+    if (rest.empty()) return false;  // alone on its line: the line stays, empty (drag_hides_source)
+    out = join(rest);
+    if (slot) *slot = -1;
+    return true;
+}
+
+// Taken from a line of its own to somewhere new: its place stays until the
+// drop (so nothing jumps under the pointer), with nothing in it.
+bool Editor::drag_hides_source() const {
+    if (!img_drag_ || !drop_changes() || drop_line_ == press_img_line_) return false;
+    std::vector<ImageRef> refs;
+    return md_image_row(lines_[press_img_line_], &refs) && refs.size() == 1;
+}
+
+// The carried image's place as shown: where it would land in a row, or
+// where it came from when there's nowhere new (-1 when it's going to a line
+// of its own, or its old place is hidden).
+void Editor::drag_slot(int& line, int& tile) const {
+    line = tile = -1;
+    if (!img_drag_) return;
+    std::string s;
+    int k = -1;
+    if (drop_changes()) {
+        if (drop_line_ >= 0 && drag_preview(drop_line_, s, &k)) { line = drop_line_; tile = k; }
+        return;
+    }
+    line = press_img_line_;
+    tile = press_img_tile_;
+}
+
+// What the preview is showing, so a change can be morphed to.
+int Editor::drag_signature() const {
+    if (!img_drag_ || !drop_changes()) return 0;
+    return 1 + (drop_line_ + 1) * 7919 + (drop_stop_ + 1) * 31 + (drop_own_ + 1) * 1000003;
 }
 
 // End a drag. Dropped somewhere new, it moves there; otherwise (or on
 // Escape) it goes back. Either way it flies from where it was let go.
 void Editor::let_go_image(bool drop) {
     // Where the carried copy is now: that's where the flight starts.
-    const Line& S = lay_[0][press_img_line_];
-    const Line::Tile& t = S.tiles[press_img_tile_];
+    const Line::Tile& t = drag_tile_;
     ImVec2 a(ghost_at_.x - grab_off_.x * ghost_k_, ghost_at_.y - grab_off_.y * ghost_k_);
     land_a_ = a;
     land_b_ = ImVec2(a.x + t.w * ghost_k_, a.y + t.h * ghost_k_);
@@ -2606,7 +2809,6 @@ void Editor::let_go_image(bool drop) {
     land_tile_ = press_img_tile_;
     land_drag_ = true;
     if (drop && drop_changes()) move_image();  // sets land_* to where it went
-    mark_ = mark_old_ = DropMark{};
 }
 
 // Drop a dragged image: into a row beside another image, or onto a line
@@ -2684,10 +2886,10 @@ void Editor::move_image() {
     end_edit();
 }
 
-// Moving images, drawn over the page. While carried: the drop marker (an
-// upright bar beside an image in a row, a line across the column between
-// lines) easing from place to place, and the image itself, lifted, under
-// the pointer. After a drop or a cancel: the image flying to its place.
+// Moving images, drawn over the page. While carried: a faint copy in the
+// room opening for a line of its own (in a row, the slot is drawn with the
+// row), and the image itself, lifted, under the pointer. After a drop or a
+// cancel: the image flying to its place.
 void Editor::draw_image_drag(ImDrawList* dl) {
     float dt = anim::step(ImGui::GetIO().DeltaTime);
     auto ease = [&](float rate) { return anim::enabled ? 1.0f - std::exp(-rate * anim::speed * dt) : 1.0f; };
@@ -2732,47 +2934,17 @@ void Editor::draw_image_drag(ImDrawList* dl) {
     }
 
     if (!img_drag_ || press_img_line_ < 0 || press_img_line_ >= (int)lay_[0].size()) return;
-    const Line& S = lay_[0][press_img_line_];
-    if (press_img_tile_ < 0 || press_img_tile_ >= (int)S.tiles.size()) return;
-    const Line::Tile& t = S.tiles[press_img_tile_];
+    const Line::Tile& t = drag_tile_;
 
-    // The marker: where it would land (not there at all where dropping would
-    // change nothing). Within a kind it glides; across kinds it crossfades.
-    float bar = std::max(2.0f, std::round(2 * P_.dpi));
-    int kind = 0;
-    ImVec2 ma, mb;
-    if (drop_changes()) {
-        if (drop_line_ >= 0 && drop_line_ < (int)lay_[0].size() && lay_[0][drop_line_].img) {
-            const Line& L = lay_[0][drop_line_];
-            float x, y, h;
-            img_caret(L, stop_col(L, drop_stop_, (int)lines_[drop_line_].size()), x, y, h);
-            float top = L.dy + L.pad + y + yoff_[drop_line_];
-            ma = ImVec2(x - bar * 0.5f, top);
-            mb = ImVec2(x + bar * 0.5f, top + h);
-            kind = 1;
-        } else if (drop_own_ >= 0) {
-            float y = drop_own_ < (int)lay_[0].size() ? lay_[0][drop_own_].dy : total_h_[0];
-            ma = ImVec2(0, y - bar * 0.5f);
-            mb = ImVec2(P_.column, y + bar * 0.5f);
-            kind = 2;
-        }
+    // A line of its own opening between lines: a faint copy in the room
+    // made for it, as the slot is in a row.
+    for (auto& s : spacers_) {
+        if (s.target <= 0.0f || s.h < 1.0f) continue;
+        const Line::Tile& own = drag_own_tile_;
+        float open = std::clamp(s.h / std::max(1.0f, drag_own_h_), 0.0f, 1.0f);
+        ImVec2 a(own.x, s.dy + own.y + (s.h - drag_own_h_) * 0.5f);
+        picture(own, screen(a), screen(ImVec2(a.x + own.w, a.y + own.h)), 0.22f * open);
     }
-    if (kind != mark_.kind) {
-        // A different kind (or none): the current one fades out where it
-        // stands, and a new one starts where it belongs.
-        if (mark_.kind && mark_.alpha > mark_old_.alpha) mark_old_ = mark_;
-        mark_ = DropMark{ma, mb, 0.0f, kind};
-    }
-    if (mark_.kind) {
-        float k = ease(30.0f);
-        toward(mark_.a, ma, k);
-        toward(mark_.b, mb, k);
-    }
-    float fk = ease(28.0f);
-    mark_.alpha += ((mark_.kind ? 1.0f : 0.0f) - mark_.alpha) * fk;
-    mark_old_.alpha += (0.0f - mark_old_.alpha) * fk;
-    for (const DropMark* m : {&mark_old_, &mark_})
-        if (m->kind && m->alpha > 0.01f) dl->AddRectFilled(screen(m->a), screen(m->b), fade(col_alpha(T.accent, m->alpha)), bar);
 
     // The image, carried: held where it was grabbed, easing after the
     // pointer, shrinking from full size to a size you can see past.
@@ -2908,6 +3080,12 @@ void Editor::draw(const EditorParams& p) {
     for (auto& m : marks_) m.a = anim::approach(m.a, m.live ? 1.0f : 0.0f, 16.0f, dt, 0.004f);
     marks_.erase(std::remove_if(marks_.begin(), marks_.end(), [](const Mark& m) { return !m.live && m.a <= 0.0f; }), marks_.end());
 
+    // A carried image's preview changed (last frame's input): what's drawn
+    // now is where the images morph from.
+    if (int sig = drag_signature(); sig != drag_sig_) {
+        if (!reader_ && lay_[0].size() == lines_.size()) shoot_tiles();
+        drag_sig_ = sig;
+    }
     sync_edits();
     layout(0);
     resolve_pending();
@@ -3492,6 +3670,9 @@ void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float a
     TextPos s0 = std::min(cur_, anchor_), s1 = std::max(cur_, anchor_);
     int on = -1;
     if (editing && picked(&on) != index) on = -1;
+    int slot_line = -1, slot_tile = -1;
+    if (editing) drag_slot(slot_line, slot_tile);
+    bool hidden = editing && index == press_img_line_ && drag_hides_source();
     for (int k = 0; k < (int)L.tiles.size(); k++) {
         const Line::Tile& t = L.tiles[k];
         ImVec2 a(x + t.x, y + t.y), b(a.x + t.w, a.y + t.h);
@@ -3504,8 +3685,10 @@ void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float a
         b = ImVec2(std::round(b.x), std::round(b.y));
         if (b.y < P_.min.y || a.y > P_.max.y) continue;
         if (editing && land_line_ == index && land_tile_ == k) continue;  // in flight (draw_image_drag)
-        // Carried elsewhere: what's left behind is a faint trace of it.
-        bool trace = editing && img_drag_ && press_img_line_ == index && press_img_tile_ == k;
+        // Carried: a faint copy keeps its place, where it came from or where
+        // it would land. From a line of its own, that line waits empty.
+        if (hidden) continue;
+        bool trace = index == slot_line && k == slot_tile;
         float tile_alpha = (trace ? alpha * 0.22f : alpha) * (m ? m->alpha : 1.0f);
         float shown = 0.0f;
         ImTextureID tex = P_.images ? P_.images->texture(t.src, (int)std::ceil(t.w), shown) : ImTextureID{};

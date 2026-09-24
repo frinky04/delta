@@ -783,6 +783,52 @@ static void test_images() {
         key(nr, ImGuiKey_LeftArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
         CHECK_EQ(nr.text(), std::string("![](b.png) ![](a.png) ![](c.png)"));
 
+        // alt+up/down with an image picked moves the image one step: out of
+        // its row onto a line of its own, into the row beside, between the
+        // rows a line wraps into; alone next to text, its line moves.
+        auto pick_at = [&](Editor& e, int line, int b0, int b1) {
+            e.select_range({line, b0}, {line, b1});
+            frame(e);
+        };
+        Editor mv = fresh("![](a.png) ![](b.png) ![](c.png)\ntext");
+        pick_at(mv, 0, 11, 21);  // b
+        mv.move_lines(-1);
+        frame(mv);
+        CHECK_EQ(mv.text(), std::string("![](b.png)\n![](a.png) ![](c.png)\ntext"));
+        CHECK(mv.image_for_caret(&t) == 0 && t == 0 && mv.has_selection());
+        mv.move_lines(1);  // into the row below: its start, keeping reading order
+        frame(mv);
+        CHECK_EQ(mv.text(), std::string("![](b.png) ![](a.png) ![](c.png)\ntext"));
+        CHECK(mv.image_for_caret(&t) == 0 && t == 0);
+        mv.move_lines(1);  // out below
+        frame(mv);
+        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png)\n![](b.png)\ntext"));
+        CHECK(mv.image_for_caret(&t) == 1 && t == 0);
+        mv.move_lines(-1);  // into the row above: its end
+        frame(mv);
+        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png) ![](b.png)\ntext"));
+        CHECK(mv.image_for_caret(&t) == 0 && t == 2);
+        mv.move_lines(1);  // out below again
+        frame(mv);
+        mv.move_lines(1);  // alone, next to text: the line moves
+        frame(mv);
+        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png)\ntext\n![](b.png)"));
+        CHECK(mv.image_for_caret(&t) == 2 && t == 0 && mv.has_selection());
+        mv.undo();
+        mv.undo();
+        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png) ![](b.png)\ntext"));
+
+        Editor mw = fresh("![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)");  // 3 + 2
+        pick_at(mw, 0, 44, 54);  // e: second of the bottom row (middle 452)
+        mw.move_lines(-1);       // into the top row, before c (middle 500)
+        frame(mw);
+        CHECK_EQ(mw.text(), std::string("![](a.png) ![](b.png) ![](e.png) ![](c.png) ![](d.png)"));
+        CHECK(mw.image_for_caret(&t) == 0 && t == 2);
+        mw.move_lines(-1);  // the top row: out above
+        frame(mw);
+        CHECK_EQ(mw.text(), std::string("![](e.png)\n![](a.png) ![](b.png) ![](c.png) ![](d.png)"));
+        CHECK(mw.image_for_caret(&t) == 0 && t == 0);
+
         // Typing between two images splits the row around the text.
         type(r, "hi");
         CHECK_EQ(r.text(), std::string("![](a.png)\nhi\n![](c.png)"));
@@ -806,6 +852,27 @@ static void test_images() {
         CHECK_EQ(dr.text(), std::string("\n![](b.png) ![](a.png)"));
         io.AddMousePosEvent(-1, -1);
         frame(dr);
+
+        // In a line that wraps into rows, the space between them (and the
+        // edges they share) joins the nearer row: only the grid's outer
+        // edges mean a line of its own.
+        Editor dw = fresh("![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)");  // 3 + 2
+        ImVec2 wa, wb, ea, eb;
+        CHECK(dw.image_rect(0, 1, wa, wb) && dw.image_rect(0, 4, ea, eb));
+        auto mouse_w = [&](ImVec2 p, bool down) {
+            io.AddMousePosEvent(p.x, p.y);
+            io.AddMouseButtonEvent(0, down);
+            frame(dw);
+        };
+        ImVec2 fw((ea.x + eb.x) * 0.5f, (ea.y + eb.y) * 0.5f), tw(wb.x - 10, wb.y + 2);  // just under b, its right half
+        mouse_w(fw, false);
+        mouse_w(fw, true);
+        for (int k = 1; k <= 6; k++) mouse_w(ImVec2(fw.x + (tw.x - fw.x) * k / 6, fw.y + (tw.y - fw.y) * k / 6), true);
+        mouse_w(tw, false);
+        frame(dw);
+        CHECK_EQ(dw.text(), std::string("![](a.png) ![](b.png) ![](e.png) ![](c.png) ![](d.png)"));
+        io.AddMousePosEvent(-1, -1);
+        frame(dw);
 
         // A click on an image picks it, whichever half it lands on.
         Editor dk = fresh("![](a.png) ![](b.png) ![](c.png)");

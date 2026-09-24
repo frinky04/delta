@@ -56,7 +56,7 @@ Default keys (all rebindable):
 | `ctrl+n` / `alt+d` / `f2` | new note / today's daily note / rename |
 | `alt+left` / `alt+right` | back / forward through opened notes |
 | `ctrl+e` | reader mode |
-| `alt+up` / `alt+down` | move line(s) |
+| `alt+up` / `alt+down` | move line(s); with an image picked, the image |
 | `shift+alt+up` / `shift+alt+down` | duplicate line(s) |
 | `ctrl+shift+k` / `ctrl+l` | delete line / select line |
 | `ctrl+enter` | toggle task checkbox |
@@ -92,7 +92,7 @@ Pasted and dropped images land on lines of their own (a line with text is split 
 
 **Sizing**, as Obsidian writes it: `![|300](path)` is 300px wide (it scales with zoom), `![|300x200](path)` fits a box. You don't type it: with an image picked (or the pointer over it) a handle sits on its right edge; drag it, and it snaps to a quarter, half, three quarters or all of the column, or the image's own size. Double-click the handle for its own size again.
 
-**Rows**: images on the same line, `![](a.png) ![](b.png)`, sit side by side, all one height, the row exactly as wide as the column; past four they wrap into more rows. Other markdown tools show same-line images side by side too. Arrows pick image by image; backspace and delete take out the picked one; typing with one picked splits the row after it; `ctrl+alt+←` / `ctrl+alt+→` swap the picked image with its neighbour. Drag an image by its body onto another's left or right half to join its row there, or between lines to give it a line of its own; that's also how you reorder them.
+**Rows**: images on the same line, `![](a.png) ![](b.png)`, sit side by side, all one height, the row exactly as wide as the column; past four they wrap into more rows. Other markdown tools show same-line images side by side too. Arrows pick image by image; backspace and delete take out the picked one; typing with one picked splits the row after it; `ctrl+alt+←` / `ctrl+alt+→` swap the picked image with its neighbour, and `alt+↑` / `alt+↓` move it a step up or down: into the row above or below when a line wraps into rows, out of its row onto a line of its own, or from a line of its own into the next row of images (at its end going up, its start going down, keeping reading order). Next to text, its line moves as any line does; to move a whole row, select its line (`ctrl+l`) first. Drag an image by its body onto another's left or right half to join its row there, or between lines to give it a line of its own; that's also how you reorder them.
 
 **Copying** an image (picked, or selected) puts the picture on the clipboard as well as its markdown: other apps get the picture, another note gets the same stored file.
 
