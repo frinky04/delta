@@ -10,7 +10,8 @@ struct ConfigIssue;
 struct Theme {
     bool dark = true;
     ImU32 bg, surface, border, faint, dim, text, bright, accent, code, code_bg, selection, highlight;
-    ImU32 error;  // marks problems (never their text)
+    ImU32 error;     // marks problems (never their text)
+    ImU32 spelling;  // marks misspelt words, quieter than error
 };
 
 extern Theme T;

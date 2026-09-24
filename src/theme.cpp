@@ -58,6 +58,7 @@ void build_theme(const Config& cfg, std::vector<ConfigIssue>& issues) {
         t.code = hex(0x4a4a4a);
         t.code_bg = hex(0xe9e9e9);
         t.error = hex(0xb8412f);
+        t.spelling = hex(0xa95b50);
     } else {
         t.bg = hex(0x0c0c0c);
         t.surface = hex(0x151515);
@@ -70,12 +71,13 @@ void build_theme(const Config& cfg, std::vector<ConfigIssue>& issues) {
         t.code = hex(0x9e9e9e);
         t.code_bg = hex(0x161616);
         t.error = hex(0xd0564a);  // muted brick red
+        t.spelling = hex(0xac5d55);  // the same, nearer grey
     }
 
     struct { const char* name; ImU32* dst; } slots[] = {
         {"background", &t.bg}, {"surface", &t.surface}, {"border", &t.border}, {"faint", &t.faint},
         {"dim", &t.dim}, {"text", &t.text}, {"bright", &t.bright}, {"accent", &t.accent},
-        {"code", &t.code}, {"code_background", &t.code_bg}, {"error", &t.error},
+        {"code", &t.code}, {"code_background", &t.code_bg}, {"error", &t.error}, {"spelling", &t.spelling},
     };
     // Names and values were checked when the config was read.
     (void)issues;

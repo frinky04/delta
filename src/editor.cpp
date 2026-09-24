@@ -69,6 +69,9 @@ void Editor::set_text(const std::string& text) {
     sync_line_ = -1;
     marks_.clear();
     marks_snap_ = true;  // problems set before the first draw arrive with the page
+    sugg_line_ = -1;
+    sugg_a_ = 0;
+    sugg_live_ = false;
 }
 
 void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
@@ -78,7 +81,7 @@ void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
         const std::string& text = lines_[d.line];
         Mark* same = nullptr;
         for (auto& m : marks_)
-            if (!m.live && m.d.msg == d.msg && m.text == text) { same = &m; break; }
+            if (!m.live && m.d.kind == d.kind && m.d.col0 == d.col0 && m.d.msg == d.msg && m.text == text) { same = &m; break; }
         if (same) {
             same->d = d;
             same->live = true;
@@ -86,6 +89,14 @@ void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
             marks_.push_back({d, text, marks_snap_ ? 1.0f : 0.0f, true});
         }
     }
+}
+
+void Editor::set_suggestion(int line, const std::string& text) {
+    if (line < 0) { sugg_live_ = false; return; }  // keeps its text while it fades
+    if (line != sugg_line_) sugg_a_ = 0;
+    sugg_line_ = line;
+    sugg_text_ = text;
+    sugg_live_ = true;
 }
 
 void Editor::reload_text(const std::string& text) {
@@ -623,6 +634,21 @@ void Editor::find_end() {
     find_active_ = false;
     matches_.clear();
     match_ = -1;
+}
+
+void Editor::replace_range(TextPos a, TextPos b, const std::string& with) {
+    clamp(a);
+    clamp(b);
+    if (b < a) std::swap(a, b);
+    begin_edit(Edit::Other);
+    erase(a, b);
+    TextPos e = insert(a, with);
+    cur_ = anchor_ = e;
+    end_edit();
+    pulse_.spans = {{a, e}};
+    pulse_.start = anim::clock;
+    pulse_.version = version_;
+    pulse_.active = e != a;
 }
 
 void Editor::replace_current(const std::string& with) {
@@ -3090,6 +3116,7 @@ void Editor::draw(const EditorParams& p) {
     // Problems fade in and out.
     marks_snap_ = false;
     for (auto& m : marks_) m.a = anim::approach(m.a, m.live ? 1.0f : 0.0f, 16.0f, dt, 0.004f);
+    sugg_a_ = anim::approach(sugg_a_, sugg_live_ ? 1.0f : 0.0f, 16.0f, dt, 0.004f);
     marks_.erase(std::remove_if(marks_.begin(), marks_.end(), [](const Mark& m) { return !m.live && m.a <= 0.0f; }), marks_.end());
 
     // A carried image's preview changed (last frame's input): what's drawn
@@ -3864,12 +3891,13 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
     }
     P_.alpha = base * row_alpha(0);
 
-    // A problem on this line: the part it's about underlined, and the message after the text, where the eye already is.
-    // It crossfades with the line's hint.
+    // Problems on this line: the part each is about underlined, and the
+    // first error's message after the text, where the eye already is. The
+    // message crossfades with the line's hint.
     if (mode == 0 && i >= 0) {
         const Mark* mk = nullptr;
         for (auto& k : marks_)
-            if (k.d.line == i && (!mk || k.a > mk->a)) mk = &k;
+            if (k.d.line == i && k.d.kind == Diagnostic::Kind::Error && (!mk || k.a > mk->a)) mk = &k;
         float pa = mk ? mk->a : 0.0f;
         auto hint = hints_.find(i);
         // An image line whose image can't be shown says so, quietly.
@@ -3891,28 +3919,37 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
             dl->PopClipRect();
         };
 
-        if (!hint_text.empty() && pa < 1.0f)
-            note(hint_text, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), 1.0f - pa));
-        if (pa > 0.0f) {
-            ImU32 err = col_alpha(fade(T.error), pa);
-            // The underline, row by row if the range wraps. No range: the
-            // whole line.
-            int c0 = mk->d.col0 >= 0 ? std::clamp(mk->d.col0, 0, (int)s.size()) : 0;
-            int c1 = mk->d.col0 >= 0 ? std::clamp(mk->d.col1, 0, (int)s.size()) : (int)s.size();
-            if (c1 > c0) {
-                float uh = std::max(1.0f, std::round(P_.dpi));
-                for (int r = 0; r < (int)L.rows.size(); r++) {
-                    int ra = L.rows[r], rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)s.size();
-                    int a = std::max(c0, ra), b = std::min(c1, rb);
-                    if (a >= b) continue;
-                    float ux = x0 + row_x(L, r) + measure(s, st, ra, a, m);
-                    float uw = measure(s, st, a, b, m);
-                    float uy = std::round(y + r * L.row_h + L.row_h * 0.5f + m.size * 0.62f);
-                    dl->AddRectFilled(ImVec2(std::round(ux), uy), ImVec2(std::round(ux + uw), uy + uh), err);
+        // A suggestion for the caret's word covers both.
+        float sa = i == sugg_line_ ? sugg_a_ : 0.0f;
+        if (sa > 0.0f) note(sugg_text_, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), sa));
+        if (!hint_text.empty() && pa < 1.0f && sa < 1.0f)
+            note(hint_text, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), (1.0f - pa) * (1.0f - sa)));
+        // The underlines, row by row if a range wraps. No range: the whole
+        // line. Spelling gets dots, quieter than an error's solid line.
+        float uh = std::max(1.0f, std::round(P_.dpi));
+        for (auto& k : marks_) {
+            if (k.d.line != i || k.a <= 0.0f) continue;
+            bool spell = k.d.kind == Diagnostic::Kind::Spelling;
+            ImU32 col = col_alpha(fade(spell ? T.spelling : T.error), k.a);
+            int c0 = k.d.col0 >= 0 ? std::clamp(k.d.col0, 0, (int)s.size()) : 0;
+            int c1 = k.d.col0 >= 0 ? std::clamp(k.d.col1, 0, (int)s.size()) : (int)s.size();
+            if (c1 <= c0) continue;
+            for (int r = 0; r < (int)L.rows.size(); r++) {
+                int ra = L.rows[r], rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)s.size();
+                int a = std::max(c0, ra), b = std::min(c1, rb);
+                if (a >= b) continue;
+                float ux = std::round(x0 + row_x(L, r) + measure(s, st, ra, a, m));
+                float ux1 = std::round(ux + measure(s, st, a, b, m));
+                float uy = std::round(y + r * L.row_h + L.row_h * 0.5f + m.size * 0.62f);
+                if (!spell) {
+                    dl->AddRectFilled(ImVec2(ux, uy), ImVec2(ux1, uy + uh), col);
+                } else {
+                    float dot = std::max(1.0f, std::round(uh * 1.5f));
+                    for (float dx = ux; dx < ux1; dx += dot * 2) dl->AddRectFilled(ImVec2(dx, uy), ImVec2(std::min(dx + dot, ux1), uy + dot), col);
                 }
             }
-            note(mk->d.msg, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), pa));
         }
+        if (pa > 0.0f && sa < 1.0f) note(mk->d.msg, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), pa * (1.0f - sa)));
     }
 }
 

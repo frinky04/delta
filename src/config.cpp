@@ -52,6 +52,7 @@ const std::vector<Setting>& all_settings() {
         {"colors", "code", K::Colour, "#9e9e9e", "#4a4a4a", 0, 0, nullptr, ""},
         {"colors", "code_background", K::Colour, "#161616", "#e9e9e9", 0, 0, nullptr, ""},
         {"colors", "error", K::Colour, "#d0564a", "#b8412f", 0, 0, nullptr, "problem marks"},
+        {"colors", "spelling", K::Colour, "#ac5d55", "#a95b50", 0, 0, nullptr, "misspelt word marks"},
     };
     return table;
 }

@@ -22,10 +22,13 @@ inline bool operator!=(TextPos a, TextPos b) { return !(a == b); }
 inline bool operator<(TextPos a, TextPos b) { return a.line < b.line || (a.line == b.line && a.col < b.col); }
 
 // A problem on a line: the message, and the byte range it's about
-// (underlined; col0 < 0 for none).
+// (underlined; col0 < 0 for none). An error's message shows after the line;
+// a spelling mark is only a dotted underline, as a line can carry many.
 struct Diagnostic {
+    enum class Kind : uint8_t { Error, Spelling };
     int line = 0, col0 = -1, col1 = -1;
     std::string msg;
+    Kind kind = Kind::Error;
 };
 
 // Where the editor gets images from. The app implements it: it knows which
@@ -97,14 +100,20 @@ public:
     // Markdown for notes, Ini for delta.ini. Set before set_text().
     void set_syntax(Syntax s);
     Syntax syntax() const { return syntax_; }
-    // Problems shown at the end of their (0-based) line. They fade in, and
-    // out once they're gone from the list.
+    // Problems on their (0-based) lines, any number per line. They fade in,
+    // and out once they're gone from the list.
     void set_diagnostics(const std::vector<Diagnostic>& d);
     // Quieter notes shown the same way (config defaults); a problem on the
     // same line wins.
     void set_hints(std::map<int, std::string> h) { hints_ = std::move(h); }
+    // What the word at the caret could be instead, shown the same way but
+    // over any problem or hint on its line: it's about where you are. Line
+    // -1 for none; it fades.
+    void set_suggestion(int line, const std::string& text);
     // Insert text as one undoable edit; returns where it ends.
     TextPos insert_text(TextPos at, const std::string& text);
+    // Swap [a, b) for text as one undoable edit, the caret after it.
+    void replace_range(TextPos a, TextPos b, const std::string& with);
     // Insert whole lines (images, say) at the caret as one undoable edit:
     // onto an empty line, before or after the caret's line, or splitting it
     // around them. The caret ends after the last one.
@@ -355,6 +364,10 @@ private:
     };
     std::vector<Mark> marks_;
     bool marks_snap_ = false;
+    int sugg_line_ = -1;              // see set_suggestion
+    std::string sugg_text_;
+    float sugg_a_ = 0;
+    bool sugg_live_ = false;
 
     // Resizing an image by its handle: the line, the width being dragged to
     // (screen px) and what it snapped to ("" for none).
