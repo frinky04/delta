@@ -242,10 +242,25 @@ const std::vector<std::string>& Speller::suggest(const std::string& word) {
     if (it != suggestions_.end()) return it->second;
     if (suggestions_.size() > max_suggestions) suggestions_.clear();
     std::vector<std::string> out;
+    auto add = [&](std::string s) {
+        if (out.size() < 8 && std::find(out.begin(), out.end(), s) == out.end()) out.push_back(std::move(s));
+    };
+    // A capitalised word (sentence start, mostly) is ranked best as its
+    // lower-case self: hunspell offers "Te" for "Teh", but "the" for "teh".
+    bool capitalised = !word.empty() && word[0] >= 'A' && word[0] <= 'Z' &&
+                       std::none_of(word.begin() + 1, word.end(), [](char c) { return c >= 'A' && c <= 'Z'; });
+    if (ready_ && capitalised) {
+        std::string low = word;
+        low[0] = (char)(low[0] - 'A' + 'a');
+        for (auto& d : dicts_)
+            for (auto s : d->suggest(low)) {
+                if (!s.empty() && s[0] >= 'a' && s[0] <= 'z') s[0] = (char)(s[0] - 'a' + 'A');
+                add(std::move(s));
+            }
+    }
     if (ready_)
         for (auto& d : dicts_)
-            for (auto& s : d->suggest(word))
-                if (out.size() < 8 && std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+            for (auto& s : d->suggest(word)) add(s);
     return suggestions_[word] = std::move(out);
 }
 

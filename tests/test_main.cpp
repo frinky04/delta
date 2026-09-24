@@ -1969,6 +1969,9 @@ static void test_speller() {
     // Suggestions, best first.
     auto sug = sp.suggest("recieve");
     CHECK(!sug.empty() && sug[0] == "receive");
+    // Capitalised, as its lower-case self would be (hunspell alone: "Te", "Shier").
+    CHECK(!sp.suggest("Teh").empty() && sp.suggest("Teh")[0] == "The");
+    CHECK(!sp.suggest("Thier").empty() && sp.suggest("Thier")[0] == "Their");
 
     // British, and both at once.
     sp.load({"en_GB"}, {}, {});
