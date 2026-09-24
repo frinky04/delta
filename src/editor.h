@@ -106,10 +106,6 @@ public:
     // Quieter notes shown the same way (config defaults); a problem on the
     // same line wins.
     void set_hints(std::map<int, std::string> h) { hints_ = std::move(h); }
-    // What the word at the caret could be instead, shown the same way but
-    // over any problem or hint on its line: it's about where you are. Line
-    // -1 for none; it fades.
-    void set_suggestion(int line, const std::string& text);
     // Insert text as one undoable edit; returns where it ends.
     TextPos insert_text(TextPos at, const std::string& text);
     // Swap [a, b) for text as one undoable edit, the caret after it.
@@ -364,10 +360,6 @@ private:
     };
     std::vector<Mark> marks_;
     bool marks_snap_ = false;
-    int sugg_line_ = -1;              // see set_suggestion
-    std::string sugg_text_;
-    float sugg_a_ = 0;
-    bool sugg_live_ = false;
 
     // Resizing an image by its handle: the line, the width being dragged to
     // (screen px) and what it snapped to ("" for none).

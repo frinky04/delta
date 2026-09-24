@@ -69,9 +69,6 @@ void Editor::set_text(const std::string& text) {
     sync_line_ = -1;
     marks_.clear();
     marks_snap_ = true;  // problems set before the first draw arrive with the page
-    sugg_line_ = -1;
-    sugg_a_ = 0;
-    sugg_live_ = false;
 }
 
 void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
@@ -89,14 +86,6 @@ void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
             marks_.push_back({d, text, marks_snap_ ? 1.0f : 0.0f, true});
         }
     }
-}
-
-void Editor::set_suggestion(int line, const std::string& text) {
-    if (line < 0) { sugg_live_ = false; return; }  // keeps its text while it fades
-    if (line != sugg_line_) sugg_a_ = 0;
-    sugg_line_ = line;
-    sugg_text_ = text;
-    sugg_live_ = true;
 }
 
 void Editor::reload_text(const std::string& text) {
@@ -3116,7 +3105,6 @@ void Editor::draw(const EditorParams& p) {
     // Problems fade in and out.
     marks_snap_ = false;
     for (auto& m : marks_) m.a = anim::approach(m.a, m.live ? 1.0f : 0.0f, 16.0f, dt, 0.004f);
-    sugg_a_ = anim::approach(sugg_a_, sugg_live_ ? 1.0f : 0.0f, 16.0f, dt, 0.004f);
     marks_.erase(std::remove_if(marks_.begin(), marks_.end(), [](const Mark& m) { return !m.live && m.a <= 0.0f; }), marks_.end());
 
     // A carried image's preview changed (last frame's input): what's drawn
@@ -3464,6 +3452,7 @@ void Editor::draw(const EditorParams& p) {
             }
         }
     }
+
 
     }  // !morphing
 
@@ -3892,8 +3881,8 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
     P_.alpha = base * row_alpha(0);
 
     // Problems on this line: the part each is about underlined, and the
-    // first error's message after the text, where the eye already is. The
-    // message crossfades with the line's hint.
+    // first error's message after the row it's on, where the eye already is.
+    // The message crossfades with the line's hint (after the last row).
     if (mode == 0 && i >= 0) {
         const Mark* mk = nullptr;
         for (auto& k : marks_)
@@ -3908,24 +3897,34 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
             hint_text = src.find("://") != std::string::npos ? "web images aren't shown" : "image not found";
         }
 
-        int last = L.rows.back();
-        float ex = x0 + row_x(L, (int)L.rows.size() - 1) + measure(s, st, last, (int)s.size(), m) + P_.size * 1.2f;
+        int rows = (int)L.rows.size();
         float ms = std::round(P_.size * 0.86f);
-        float ry = y + (L.rows.size() - 1) * L.row_h;
-        float ty = std::round(ry + (L.row_h - ms) * 0.5f + (m.size - ms) * 0.3f);
-        auto note = [&](const std::string& text, ImU32 col) {
-            dl->PushClipRect(ImVec2(ex, ry), ImVec2(P_.max.x - P_.size, ry + L.row_h), true);
+        float clip_x = P_.max.x - P_.size;
+        auto note_x = [&](int r) {
+            int ra = L.rows[r], rb = r + 1 < rows ? L.rows[r + 1] : (int)s.size();
+            return x0 + row_x(L, r) + measure(s, st, ra, rb, m) + P_.size * 1.2f;
+        };
+        auto note = [&](int r, const std::string& text, ImU32 col) {
+            float ex = note_x(r), ry = y + r * L.row_h;
+            float ty = std::round(ry + (L.row_h - ms) * 0.5f + (m.size - ms) * 0.3f);
+            dl->PushClipRect(ImVec2(ex, ry), ImVec2(clip_x, ry + L.row_h), true);
             dl->AddText(P_.mono, ms, ImVec2(std::round(ex), ty), col, text.c_str());
             dl->PopClipRect();
         };
+        // The error's own row when the message fits beside it; the last row
+        // (which usually has room) when it doesn't.
+        int err_row = rows - 1;
+        if (mk && mk->d.col0 >= 0) {
+            int r = row_of(L, std::clamp(mk->d.col0, 0, (int)s.size()));
+            if (note_x(r) + P_.mono->CalcTextSizeA(ms, FLT_MAX, 0, mk->d.msg.c_str()).x <= clip_x) err_row = r;
+        }
 
-        // A suggestion for the caret's word covers both.
-        float sa = i == sugg_line_ ? sugg_a_ : 0.0f;
-        if (sa > 0.0f) note(sugg_text_, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), sa));
-        if (!hint_text.empty() && pa < 1.0f && sa < 1.0f)
-            note(hint_text, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), (1.0f - pa) * (1.0f - sa)));
+        if (!hint_text.empty() && pa < 1.0f)
+            note(rows - 1, hint_text, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), 1.0f - pa));
         // The underlines, row by row if a range wraps. No range: the whole
-        // line. Spelling gets dots, quieter than an error's solid line.
+        // line. They sit where an underline does, just under the baseline;
+        // on a link, which has its own, just under that. Spelling gets dots,
+        // quieter than an error's solid line.
         float uh = std::max(1.0f, std::round(P_.dpi));
         for (auto& k : marks_) {
             if (k.d.line != i || k.a <= 0.0f) continue;
@@ -3940,7 +3939,10 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
                 if (a >= b) continue;
                 float ux = std::round(x0 + row_x(L, r) + measure(s, st, ra, a, m));
                 float ux1 = std::round(ux + measure(s, st, a, b, m));
-                float uy = std::round(y + r * L.row_h + L.row_h * 0.5f + m.size * 0.62f);
+                bool on_link = false;
+                for (int k2 = a; k2 < b && !on_link; k2++) on_link = (st[k2] & (S_Link | S_WikiLink)) != 0;
+                float text_top = y + r * L.row_h + (L.row_h - L.size) * 0.5f;
+                float uy = std::round(text_top + L.size * 0.86f) + (on_link ? std::max(2 * uh, std::round(L.size * 0.14f)) : 0.0f);
                 if (!spell) {
                     dl->AddRectFilled(ImVec2(ux, uy), ImVec2(ux1, uy + uh), col);
                 } else {
@@ -3949,7 +3951,7 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
                 }
             }
         }
-        if (pa > 0.0f && sa < 1.0f) note(mk->d.msg, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), pa * (1.0f - sa)));
+        if (pa > 0.0f) note(err_row, mk->d.msg, col_alpha(fade(col_mix(T.dim, T.text, 0.45f)), pa));
     }
 }
 

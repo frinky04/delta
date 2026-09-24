@@ -351,28 +351,34 @@ const Diagnostic* App::misspelt_at_caret() const {
     return nullptr;
 }
 
-// With the caret on a misspelt word (one that's marked), its suggestions
-// show at the end of the line.
-void App::show_suggestions() {
-    std::string text;
-    int line = -1;
-    const Diagnostic* d = misspelt_at_caret();
-    if (d &&!(shown_held_.line == d->line && shown_held_.col == d->col0)) {
+// What the status line echoes about the caret's spot: a misspelt word's
+// likeliest fixes, or the message of a problem in a note. Nothing pops up
+// over the text; it's there if you look down.
+void App::update_echo() {
+    echo_.clear();
+    if (!note_ || editor_.reader()) return;
+    TextPos c = editor_.cursor();
+    if (const Diagnostic* d = misspelt_at_caret(); d && !(shown_held_.line == d->line && shown_held_.col == d->col0)) {
+        // Only the best guess ("Disempower?"); the key for the rest (and for
+        // keeping the word) is an aside.
         const std::string& s = editor_.lines()[d->line];
         const auto& sug = speller_.suggest(spell_form(s, {d->col0, d->col1}));
-        line = d->line;
         if (sug.empty()) {
-            text = "no suggestions";
+            echo_.push_back({"no suggestions", Tone::Plain});
         } else {
-            text = "did you mean " + sug[0];
-            for (size_t i = 1; i < sug.size() && i < 3; i++) text += (i + 1 == std::min<size_t>(sug.size(), 3) ? " or " : ", ") + sug[i];
-            text += "?";
+            echo_.push_back({sug[0], Tone::Strong});
+            echo_.push_back({"?", Tone::Plain});
         }
+        if (std::string k = chord_for("edit.fix_spelling"); !k.empty()) echo_.push_back({"   " + k, Tone::Quiet});
+    } else if (!is_config() && c.line != shown_hold_) {
+        // The config's problems say it at the ends of their lines, which are
+        // short and right beside them.
+        for (auto& p : problems_)
+            if (p.line == c.line && p.col0 >= 0 && p.col0 <= c.col && c.col <= p.col1) {
+                echo_.push_back({p.msg, Tone::Strong});
+                break;
+            }
     }
-    std::string key = std::to_string(line) + ":" + text;
-    if (key == shown_hint_) return;
-    shown_hint_ = key;
-    editor_.set_suggestion(line, text);
 }
 
 void App::goto_misspelling(int dir) {
@@ -749,7 +755,6 @@ void App::open_note(const NoteRef& n, bool push_history) {
     spell_pending_ = false;
     edit_version_ = editor_.version();  // opening isn't typing
     spell_hold_.line = -1;
-    shown_hint_ = "-";                   // set_text dropped the suggestion
     apply_spelling();                    // this space may want other dictionaries
     check_spelling();
     show_problems(ImGui::GetTime());
@@ -1716,6 +1721,23 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
     } else if (age >= 3.4f) {
         status_.clear();
     }
+
+    // Otherwise, in the same place, the echo of what the caret is on.
+    if (!echo_.empty()) echo_shown_ = echo_;
+    echo_a_ = anim::approach(echo_a_, echo_.empty() ? 0.0f : 1.0f, 16.0f, ImGui::GetIO().DeltaTime, 0.004f);
+    if (status_.empty() && echo_a_ > 0.0f && !echo_shown_.empty()) {
+        // Centred in the room between the note's name and the counts.
+        float w = 0;
+        for (auto& [text, tone] : echo_shown_) w += W(text);
+        float ex = std::max(left_end, std::round((left_end + rx - w) * 0.5f));
+        dl->PushClipRect(ImVec2(left_end, min.y), ImVec2(rx, max.y), true);
+        for (auto& [text, tone] : echo_shown_) {
+            ImU32 col = tone == Tone::Strong ? T.text : tone == Tone::Quiet ? col_mix(T.faint, T.dim, 0.6f) : T.dim;
+            dl->AddText(mono_, s, ImVec2(ex, ty), col_alpha(col, echo_a_), text.c_str());
+            ex += W(text);
+        }
+        dl->PopClipRect();
+    }
 }
 
 void App::frame() {
@@ -1878,7 +1900,7 @@ void App::frame() {
         }
         check_spelling();
         show_problems(now);
-        show_suggestions();
+        update_echo();
         editor_.draw(p);
         // Double-click an image to view it (in the reader, a click will do).
         int img_line = -1, img_tile = 0;
