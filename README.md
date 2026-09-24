@@ -34,6 +34,8 @@ Markdown symbols stay visible, dimmed, with the formatting applied. `ctrl+e` tog
 
 `[[note]]` and `[[space/note]]` link to notes. Following a link to a missing note creates it. `alt+left` and `alt+right` go back and forward.
 
+`alt+shift+enter` searches the web for the selected text, in your default browser with its search engine.
+
 Find (`ctrl+f`), go to line (`ctrl+g`) and rename (`f2`) open in the status line. `esc` closes them.
 
 ## Spelling

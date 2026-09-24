@@ -111,7 +111,7 @@ target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/d
 find_package(Threads REQUIRED)
 target_link_libraries(delta_core PUBLIC imgui hunspell Threads::Threads)
 if(WIN32)
-  target_link_libraries(delta_core PUBLIC dwmapi dwrite shell32 wininet)
+  target_link_libraries(delta_core PUBLIC dwmapi dwrite shell32 shlwapi wininet)
 endif()
 if(MSVC)
   target_compile_options(delta_core PUBLIC /utf-8)

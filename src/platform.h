@@ -18,6 +18,10 @@ fs::path expand_user(const std::string& s);  // "~/x" -> home/x
 
 bool open_with_default_app(const fs::path& p);
 bool open_url(const std::string& url); // http(s) and mailto only
+// Searches the web for `text` (one line of it) in the default browser, with
+// its own search engine where the browser takes a search from the command
+// line (Chromium and Firefox kin on Windows); any other gets a search page.
+bool web_search(const std::string& text);
 
 bool read_file(const fs::path& p, std::string& out);
 bool atomic_write(const fs::path& p, const std::string& data, std::string* err);

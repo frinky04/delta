@@ -930,6 +930,10 @@ void App::register_commands() {
         if (editor_.link_at_caret(link)) open_link(link);
         else status("no link at the caret");
     });
+    add("edit.web_search", "search the web for selection", "alt+shift+enter", [this] {
+        if (!note_ || !editor_.has_selection()) status("select some text to search the web for it");
+        else if (!web_search(editor_.selected_text())) status("couldn't open a browser", true);
+    });
     add("palette.search", "search notes in this space", "ctrl+shift+f", [this] {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
