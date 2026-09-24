@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "util.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -121,7 +122,7 @@ bool atomic_write(const fs::path& p, const std::string& data, std::string* err) 
 #else
     std::error_code ec;
     fs::rename(tmp, p, ec);
-    if (ec) { if (err) *err = ec.message(); fs::remove(tmp, ec); return false; }
+    if (ec) { if (err) *err = plain_msg(ec.message()); fs::remove(tmp, ec); return false; }
 #endif
     return true;
 }

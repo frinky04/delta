@@ -496,6 +496,21 @@ std::string default_config_text() {
            "[keys]\n";
 }
 
+fs::path make_sandbox(const fs::path& dir, std::string* err) {
+    std::error_code ec;
+    fs::path notes = dir / "notes";
+    fs::create_directories(notes, ec);
+    if (ec) { if (err) *err = plain_msg(ec.message()); return {}; }
+    fs::path cfg = dir / "delta.ini";
+    if (!fs::exists(cfg, ec)) {
+        std::string text = default_config_text();
+        const std::string general = "[general]\n";
+        text.insert(text.find(general) + general.size(), "notes_dir = " + path_u8(fs::absolute(notes, ec).make_preferred()) + "\n");
+        if (!atomic_write(cfg, text, err)) return {};
+    }
+    return cfg;
+}
+
 std::map<std::string, std::string> load_kv(const fs::path& path) {
     std::map<std::string, std::string> kv;
     std::string text;

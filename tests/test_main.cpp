@@ -1,6 +1,9 @@
 // Headless tests: drives the real Editor through ImGui frames with simulated
 // input. No window or GPU; font textures are requested but never uploaded.
 #include <cstdio>
+#include <fstream>
+#include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -2213,6 +2216,99 @@ static void test_spell_config() {
     CHECK_EQ(e.text(), std::string("I recieve it"));
 }
 
+// delta's own words are lower case, and fragments rather than sentences:
+// no capital to start, no full stop to end. Names the user chose keep their
+// case, so only the text we write is checked. The command titles and status
+// messages live in App, which isn't built into the tests, so its source is
+// read instead.
+static bool in_voice(const std::string& s) {
+    return !s.empty() && !std::isupper((unsigned char)s[0]) && s.back() != '.';
+}
+
+static std::string read_src(const char* name) {
+    std::ifstream f(std::string(DELTA_SRC_DIR) + "/" + name, std::ios::binary);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+static void test_ui_voice() {
+    CHECK_EQ(plain_msg("Access is denied.\r\n"), std::string("access is denied"));
+    CHECK_EQ(plain_msg("OS error"), std::string("OS error"));
+    CHECK_EQ(plain_msg(""), std::string());
+
+    const std::string long_name(201, 'x');
+    for (auto* what : {"note", "space"})
+        for (const std::string& name : {std::string(), std::string(".x"), std::string("x."), std::string("a/b"), long_name})
+            CHECK(in_voice(Store::check_name(name, what)));
+
+    for (auto& s : all_settings())  // some need no description
+        if (*s.desc && !in_voice(s.desc)) { CHECK(!"setting description in voice"); std::printf("   %s.%s: %s\n", s.section, s.key, s.desc); }
+
+    const std::regex title(R"re(\badd\("[a-z_.]+", "([^"]*)")re");
+    const std::regex said(R"re(\b(?:status|prompt|pick)\((.*))re");
+    const std::regex literal(R"re("((?:[^"\\]|\\.)*)")re");
+    int titles = 0;
+    for (auto* file : {"app.cpp", "app_images.cpp"}) {
+        std::string src = read_src(file);
+        CHECK(!src.empty());
+        std::istringstream lines(src);
+        int n = 0;
+        for (std::string line; std::getline(lines, line);) {
+            n++;
+            std::smatch m;
+            if (std::regex_search(line, m, title)) {
+                titles++;
+                std::string t = m[1];
+                bool ok = in_voice(t) && std::none_of(t.begin(), t.end(), [](char c) { return std::isupper((unsigned char)c); });
+                if (!ok) { CHECK(!"command title in voice"); std::printf("   %s:%d: %s\n", file, n, t.c_str()); }
+            }
+            // Every literal on a status/prompt/pick line, so both arms of a ?: count.
+            if (!std::regex_search(line, m, said)) continue;
+            std::string rest = m[1];
+            for (std::sregex_iterator it(rest.begin(), rest.end(), literal), end; it != end; ++it) {
+                std::string t = (*it)[1];
+                bool starts = t.empty() || !std::isalpha((unsigned char)t[0]) || !std::isupper((unsigned char)t[0]);
+                bool ends = t.size() < 2 || t.back() != '.' || t[t.size() - 2] == '.';
+                if (!starts || !ends) { CHECK(!"message in voice"); std::printf("   %s:%d: %s\n", file, n, t.c_str()); }
+            }
+        }
+    }
+    CHECK(titles > 50);  // the pattern still finds the command table
+}
+
+// "open the manual" shows the README as the build embedded it.
+extern const unsigned char g_manual[];
+extern const std::size_t g_manual_size;
+
+static void test_manual() {
+    std::string readme = read_src("../README.md");
+    CHECK(!readme.empty());
+    CHECK(std::string((const char*)g_manual, g_manual_size) == readme);
+}
+
+// --sandbox: a config pointing at a notes folder beside it, made once and
+// then reused as it was left.
+static void test_sandbox() {
+    fs::path dir = fs::temp_directory_path() / "delta_test_sandbox";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    std::string err;
+    fs::path cfg = make_sandbox(dir, &err);
+    CHECK(cfg == dir / "delta.ini" && err.empty());
+    CHECK(fs::is_directory(dir / "notes"));
+    Config c;
+    std::vector<ConfigIssue> issues;
+    CHECK(load_config(cfg, c, issues) && issues.empty());
+    CHECK(fs::equivalent(expand_user(c.notes_dir), dir / "notes", ec));
+
+    CHECK(atomic_write(cfg, "[editor]\nfont = Georgia\n", nullptr));
+    CHECK(make_sandbox(dir, &err) == cfg);
+    std::string text;
+    CHECK(read_file(cfg, text) && text == "[editor]\nfont = Georgia\n");  // kept, not rewritten
+    fs::remove_all(dir, ec);
+}
+
 // [editor] font and mono_font: the embedded font by default, else a font
 // file or an installed family, and a problem (with the embedded font) when
 // neither can be found.
@@ -2400,6 +2496,9 @@ int main() {
     test_spell_fix();
     test_spell_config();
     test_fonts();
+    test_ui_voice();
+    test_manual();
+    test_sandbox();
     test_config_set();
     test_font_loader();
 

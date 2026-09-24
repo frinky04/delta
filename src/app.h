@@ -24,6 +24,7 @@ struct GLFWwindow;
 struct AppOptions {
     fs::path config_path;               // empty = default location
     std::vector<std::string> run;       // command ids to run after start-up
+    bool sandbox = false;               // config_path is a sandbox's (see make_sandbox)
 };
 
 class App {
@@ -85,6 +86,13 @@ private:
     void choose_font(bool mono);
     void set_font(bool mono, const std::string& value);
     bool is_config() const { return note_ && note_->path == cfg_path_; }
+    // The README, built in and read only: always in reader mode, never saved.
+    // Its path is one no file can have.
+    static inline const fs::path kManual{"<manual>"};
+    bool is_manual() const { return note_ && note_->path == kManual; }
+    bool is_note() const { return note_ && !is_config() && !is_manual(); }
+    bool need_note();  // is_note(), else says why the note command can't run
+    void open_manual();
     std::vector<BindingDoc> binding_docs() const;
     Command* find_command(const std::string& id);
     std::string chord_for(const std::string& id) const;
@@ -159,6 +167,7 @@ private:
     GLFWwindow* win_ = nullptr;
     Config cfg_;
     fs::path cfg_path_, state_path_;
+    bool sandbox_ = false;  // --sandbox: said in the title
     fs::file_time_type cfg_mtime_{};
     // The config's problems: from the file, or checked live from the text
     // while it's open in delta.
@@ -193,7 +202,7 @@ private:
     NoteIndex note_index_;                    // where [[links]] can lead
     double next_problem_check_ = 0;           // a held-back problem shows then
     uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
-    bool reader_pref_ = false;                // reader mode to restore after the config
+    bool reader_pref_ = false;                // reader mode to restore after the config or manual
     Store store_;
     Editor editor_;
     Palette palette_;

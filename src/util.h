@@ -124,3 +124,13 @@ inline std::string lower(std::string s) {
 }
 
 inline bool iequals(const std::string& a, const std::string& b) { return lower(a) == lower(b); }
+
+// Text from elsewhere (the OS's "Access is denied.") in delta's voice:
+// lower case, no full stop. An acronym at the start ("OS ...") keeps its case.
+inline std::string plain_msg(std::string_view s) {
+    std::string t = trim(s);
+    while (!t.empty() && t.back() == '.') t.pop_back();
+    if (t.size() > 1 && std::isupper((unsigned char)t[0]) && !std::isupper((unsigned char)t[1]))
+        t[0] = (char)std::tolower((unsigned char)t[0]);
+    return t;
+}

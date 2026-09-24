@@ -18,13 +18,13 @@ static bool is_note_file(const fs::directory_entry& e) {
 
 std::string Store::check_name(const std::string& raw, const char* what) {
     std::string name = trim(raw);
-    if (name.empty()) return std::string("Type a ") + what + " name.";
-    if (name[0] == '.') return std::string("A ") + what + " name can't start with a dot.";
-    if (name.back() == '.') return std::string("A ") + what + " name can't end with a dot.";
+    if (name.empty()) return std::string("type a ") + what + " name";
+    if (name[0] == '.') return std::string("a ") + what + " name can't start with a dot";
+    if (name.back() == '.') return std::string("a ") + what + " name can't end with a dot";
     for (char c : name)
         if (std::string("<>:\"/\\|?*").find(c) != std::string::npos || (unsigned char)c < 32)
-            return std::string("A ") + what + " name can't contain " + (c < 32 ? std::string("control characters") : std::string(1, c)) + ".";
-    if (name.size() > 200) return std::string("That ") + what + " name is too long.";
+            return std::string("a ") + what + " name can't contain " + (c < 32 ? std::string("control characters") : std::string(1, c));
+    if (name.size() > 200) return std::string("that ") + what + " name is too long";
     return {};
 }
 
@@ -156,7 +156,7 @@ std::string Store::ensure_space(const std::string& space) const {
     if (auto e = check_name(space, "space"); !e.empty()) return e;
     std::error_code ec;
     fs::create_directories(root_ / u8path(trim(space)), ec);
-    if (ec) return "Couldn't create space: " + ec.message();
+    if (ec) return "couldn't create space: " + plain_msg(ec.message());
     return {};
 }
 
@@ -164,10 +164,10 @@ std::string Store::create_note(const std::string& space, const std::string& raw,
     std::string name = trim(raw);
     if (auto e = check_name(name, "note"); !e.empty()) return e;
     if (auto e = ensure_space(space); !e.empty()) return e;
-    if (exists(space, name)) return "\"" + name + "\" already exists in " + space + ".";
+    if (exists(space, name)) return "\"" + name + "\" already exists in " + space;
     NoteRef n = ref(space, name);
     std::string err;
-    if (!atomic_write(n.path, content, &err)) return "Couldn't create note: " + err;
+    if (!atomic_write(n.path, content, &err)) return "couldn't create note: " + err;
     out = ref(space, name);
     return {};
 }
@@ -177,22 +177,22 @@ std::string Store::rename_note(NoteRef& note, const std::string& raw) const {
     if (auto e = check_name(name, "note"); !e.empty()) return e;
     if (name == note.name) return {};
     // Allow case-only renames (same file on Windows).
-    if (!iequals(name, note.name) && exists(note.space, name)) return "\"" + name + "\" already exists in " + note.space + ".";
+    if (!iequals(name, note.name) && exists(note.space, name)) return "\"" + name + "\" already exists in " + note.space;
     NoteRef to = ref(note.space, name);
     std::error_code ec;
     fs::rename(note.path, to.path, ec);
-    if (ec) return "Couldn't rename: " + ec.message();
+    if (ec) return "couldn't rename: " + plain_msg(ec.message());
     note = ref(note.space, name);
     return {};
 }
 
 std::string Store::move_note(NoteRef& note, const std::string& space) const {
     if (auto e = ensure_space(space); !e.empty()) return e;
-    if (exists(space, note.name)) return "\"" + note.name + "\" already exists in " + space + ".";
+    if (exists(space, note.name)) return "\"" + note.name + "\" already exists in " + space;
     NoteRef to = ref(space, note.name);
     std::error_code ec;
     fs::rename(note.path, to.path, ec);
-    if (ec) return "Couldn't move: " + ec.message();
+    if (ec) return "couldn't move: " + plain_msg(ec.message());
     note = ref(space, note.name);
     return {};
 }
@@ -204,7 +204,7 @@ std::string Store::trash_note(const NoteRef& note) const {
     fs::path to = dir / u8path(note.name + ".md");
     for (int i = 2; fs::exists(to, ec); i++) to = dir / u8path(note.name + " (" + std::to_string(i) + ").md");
     fs::rename(note.path, to, ec);
-    if (ec) return "Couldn't delete: " + ec.message();
+    if (ec) return "couldn't delete: " + plain_msg(ec.message());
     // Stamped with when it was deleted, which is what the trash is sorted by.
     fs::last_write_time(to, fs::file_time_type::clock::now(), ec);
     return {};
@@ -240,7 +240,7 @@ std::string Store::restore_note(const NoteRef& trashed, NoteRef& out) const {
     NoteRef to = ref(trashed.space, name);
     std::error_code ec;
     fs::rename(trashed.path, to.path, ec);
-    if (ec) return "Couldn't restore: " + ec.message();
+    if (ec) return "couldn't restore: " + plain_msg(ec.message());
     out = ref(trashed.space, name);
     return {};
 }
@@ -249,17 +249,17 @@ std::string Store::rename_space(const std::string& from, const std::string& raw)
     std::string to = trim(raw);
     if (auto e = check_name(to, "space"); !e.empty()) return e;
     std::error_code ec;
-    if (!iequals(from, to) && fs::exists(root_ / u8path(to), ec)) return "A space called \"" + to + "\" already exists.";
+    if (!iequals(from, to) && fs::exists(root_ / u8path(to), ec)) return "a space called \"" + to + "\" already exists";
     fs::rename(root_ / u8path(from), root_ / u8path(to), ec);
-    if (ec) return "Couldn't rename space: " + ec.message();
+    if (ec) return "couldn't rename space: " + plain_msg(ec.message());
     return {};
 }
 
 std::string Store::delete_space(const std::string& space) const {
     std::error_code ec;
     fs::path dir = root_ / u8path(space);
-    if (!fs::is_empty(dir, ec)) return "\"" + space + "\" isn't empty. Move or delete its notes first.";
+    if (!fs::is_empty(dir, ec)) return "\"" + space + "\" isn't empty; move or delete its notes first";
     fs::remove(dir, ec);
-    if (ec) return "Couldn't delete space: " + ec.message();
+    if (ec) return "couldn't delete space: " + plain_msg(ec.message());
     return {};
 }

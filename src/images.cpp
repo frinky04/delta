@@ -74,7 +74,7 @@ std::string ImageStore::add(const std::string& bytes, const std::string& ext, st
     fs::path d = dir();
     bool fresh = !fs::exists(root_ / ".delta", ec);
     fs::create_directories(d, ec);
-    if (ec) { if (err) *err = ec.message(); return {}; }
+    if (ec) { if (err) *err = plain_msg(ec.message()); return {}; }
 #ifdef _WIN32
     // Out of sight in Explorer too (dot folders already are elsewhere).
     if (fresh) {

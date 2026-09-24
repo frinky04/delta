@@ -47,7 +47,7 @@ if(NOT MSVC)
   target_compile_options(hunspell PRIVATE -w)  # not our code to tidy
 endif()
 
-# --- embedded fonts and dictionaries -----------------------------------------
+# --- embedded fonts, dictionaries and manual ---------------------------------
 function(embed_file src name out_var)
   set(out ${CMAKE_BINARY_DIR}/generated/${name}.cpp)
   add_custom_command(
@@ -65,6 +65,8 @@ embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.aff g_dict_en_us_aff DICT_EN_US
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.dic g_dict_en_us_dic DICT_EN_US_DIC_CPP)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.aff g_dict_en_gb_aff DICT_EN_GB_AFF_CPP)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.dic g_dict_en_gb_dic DICT_EN_GB_DIC_CPP)
+# The README, shown in the app by "open the manual" (rebuilt when it changes).
+embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual MANUAL_CPP)
 
 # --- app ---------------------------------------------------------------------
 add_library(delta_core STATIC
@@ -91,7 +93,8 @@ add_library(delta_core STATIC
   ${DICT_EN_US_AFF_CPP}
   ${DICT_EN_US_DIC_CPP}
   ${DICT_EN_GB_AFF_CPP}
-  ${DICT_EN_GB_DIC_CPP})
+  ${DICT_EN_GB_DIC_CPP}
+  ${MANUAL_CPP})
 target_include_directories(delta_core PUBLIC src)
 target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/deps)
 find_package(Threads REQUIRED)
@@ -117,6 +120,8 @@ endif()
 # Headless tests (no window): build/delta_tests.exe
 add_executable(delta_tests tests/test_main.cpp)
 target_link_libraries(delta_tests PRIVATE delta_core)
+# test_ui_voice reads App's source for its command titles and messages.
+target_compile_definitions(delta_tests PRIVATE DELTA_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 if(MINGW)
   target_link_options(delta_tests PRIVATE -static)
 endif()

@@ -42,7 +42,7 @@ std::string pick_font(const std::string& value, const std::string& builtin, Font
     FontFace regular;
     if (!find_system_font(value, 400, regular)) {
         std::vector<FontFamily> families = system_font_families();
-        if (families.empty()) return "can't look up installed fonts here; give the font file's path. Using " + builtin;
+        if (families.empty()) return "can't look up installed fonts here; give the font file's path; using " + builtin;
         std::vector<std::string> lowered;
         for (auto& f : families) lowered.push_back(lower(f.name));
         std::string near = suggest(lower(value), lowered);

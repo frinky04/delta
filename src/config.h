@@ -143,6 +143,12 @@ void apply_edit(std::vector<std::string>& lines, const ConfigEdit& e);
 // setting" inserts them, so nothing needs to live in the file.
 std::string default_config_text();
 
+// --sandbox: a config in `dir` whose notes folder is `dir/notes`, so a run
+// starts as a first launch and never touches the real config or notes. A
+// sandbox that's already there is used as it was left. Returns the config's
+// path, or empty (with `err`) if it can't be made.
+fs::path make_sandbox(const fs::path& dir, std::string* err);
+
 // Tiny key=value store for app state (last note, window size...). Kept apart
 // from delta.ini so the user's config never gets rewritten under them.
 std::map<std::string, std::string> load_kv(const fs::path& path);

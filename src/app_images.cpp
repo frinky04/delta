@@ -68,7 +68,7 @@ void App::paste(bool plain) {
         int skipped = 0;
         auto lines = import_files(files, skipped);
         if (!lines.empty()) editor_.insert_lines({as_row(lines)});
-        if (skipped) status(lines.empty() ? "Nothing to paste: those files aren't images" :
+        if (skipped) status(lines.empty() ? "nothing to paste: those files aren't images" :
                             std::to_string(skipped) + (skipped == 1 ? " file wasn't an image" : " files weren't images"));
         return;
     }
@@ -100,7 +100,7 @@ void App::paste(bool plain) {
         if (clipboard_png(png) && image_ext(png) == "png") line = import_image(png, err);
         else if (clipboard_dib(dib) && dib_to_rgba(dib, rgba, w, h)) line = import_image(encode_png(rgba, w, h), err);
         if (!line.empty()) { editor_.insert_lines({line}); return; }
-        if (!err.empty()) { status("Couldn't paste the image: " + err, true); return; }
+        if (!err.empty()) { status("couldn't paste the image: " + err, true); return; }
     }
 
     std::string u = trim(text);
@@ -191,7 +191,7 @@ void App::poll_downloads() {
         if (ok) line = import_image(bytes, err);
         std::string with = line.empty() ? d->url : line;
         // A web page (not an image) just stays the link it was.
-        if (line.empty() && err != "not image/") status("Kept the link: " + err, true);
+        if (line.empty() && err != "not image/") status("kept the link: " + err, true);
         if (note_ && note_->path == d->note) {
             editor_.replace_line_everywhere(d->marker, with);
         } else if (!line.empty()) {
@@ -217,12 +217,12 @@ void App::handle_drops() {
     auto drops = std::move(drops_);
     drops_.clear();
     for (auto& drop : drops) {
-        if (!note_ || is_config()) { status("Open a note to drop images into it"); continue; }
+        if (!is_note()) { status("open a note to drop images into it"); continue; }
         std::vector<fs::path> files;
         for (auto& p : drop.paths) files.push_back(u8path(p));
         int skipped = 0;
         auto lines = import_files(files, skipped);
-        if (lines.empty()) { status("Nothing to add: those files aren't images"); continue; }
+        if (lines.empty()) { status("nothing to add: those files aren't images"); continue; }
         if (editor_.reader()) editor_.set_reader(false, false);
         else if (drop.at.x >= 0) editor_.jump_to(editor_.position_at(drop.at));  // (negative: at the caret)
         editor_.insert_lines({as_row(lines)});

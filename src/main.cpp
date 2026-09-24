@@ -1,6 +1,7 @@
 // delta: spaces-based markdown notes.
 #include <GLFW/glfw3.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -124,10 +125,22 @@ int main(int argc, char** argv) {
     int shot_w = 0, shot_h = 0;
     double shot_delay = 1.0;  // seconds after the first frame
     FILE* frame_log = nullptr;  // --frame-log: one line per frame, for pacing checks
+    // --sandbox [dir]: a config and notes of its own, as on a first launch.
+    // Without a dir it's a temporary one, removed on exit; a dir is kept, so
+    // the next run with it is a second launch.
+    fs::path sandbox_dir;
+    bool keep_sandbox = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
         if (a == "--config") opts.config_path = u8path(next());
+        else if (a == "--sandbox") {
+            opts.sandbox = true;
+            if (i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0) {
+                sandbox_dir = u8path(next());
+                keep_sandbox = true;
+            }
+        }
         else if (a == "--run") {
             std::string list = next();
             size_t start = 0;
@@ -141,6 +154,18 @@ int main(int argc, char** argv) {
         else if (a == "--size") std::sscanf(next().c_str(), "%dx%d", &shot_w, &shot_h);
         else if (a == "--shot-delay") shot_delay = std::atof(next().c_str());
         else if (a == "--frame-log") frame_log = std::fopen(next().c_str(), "w");
+    }
+    if (opts.sandbox) {
+        if (sandbox_dir.empty()) {
+            auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+            sandbox_dir = fs::temp_directory_path() / ("delta-sandbox-" + std::to_string(stamp));
+        }
+        std::string err;
+        opts.config_path = make_sandbox(sandbox_dir, &err);
+        if (opts.config_path.empty()) {
+            std::fprintf(stderr, "delta: can't make the sandbox: %s\n", err.c_str());
+            return 1;
+        }
     }
 
     if (!glfwInit()) return 1;
@@ -243,5 +268,9 @@ int main(int argc, char** argv) {
     ImGui::DestroyContext();
     glfwDestroyWindow(window);
     glfwTerminate();
+    if (opts.sandbox && !keep_sandbox) {
+        std::error_code ec;
+        fs::remove_all(sandbox_dir, ec);
+    }
     return 0;
 }

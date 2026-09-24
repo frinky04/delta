@@ -23,6 +23,8 @@ extern const unsigned char g_font_sans_bold[];
 extern const std::size_t g_font_sans_bold_size;
 extern const unsigned char g_font_mono_bold[];
 extern const std::size_t g_font_mono_bold_size;
+extern const unsigned char g_manual[];
+extern const std::size_t g_manual_size;
 
 namespace {
 
@@ -80,6 +82,7 @@ struct App::Jump {
 
 bool App::init(GLFWwindow* window, const AppOptions& opts) {
     win_ = window;
+    sandbox_ = opts.sandbox;
     images_.start();
     cfg_path_ = opts.config_path.empty() ? config_dir() / "delta.ini" : opts.config_path;
     state_path_ = cfg_path_.parent_path() / "state.ini";
@@ -92,6 +95,7 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     apply_fonts();
     font_loader_.list_families();  // ready for the font picker
 
+    bool first_launch = !fs::exists(state_path_);  // it's written on every quit
     auto state = load_kv(state_path_);
     if (auto it = state.find("zoom"); it != state.end()) zoom_ = std::clamp((float)std::atof(it->second.c_str()), 0.5f, 3.0f);
     if (state.count("width") && state.count("height")) {
@@ -131,6 +135,16 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
         auto notes = store_.notes(space_);
         if (!notes.empty()) open_note(notes.front());
     }
+    if (opts.sandbox) status("sandbox: " + path_u8(cfg_path_.parent_path()));
+    // The first launch opens the manual, over whatever else would open (back
+    // returns to it), with the ways out in the status line.
+    if (first_launch) {
+        open_manual();
+        std::string tip;
+        for (auto [id, what] : {std::pair{"note.new", "new note"}, {"palette.notes", "find a note"}})
+            if (std::string k = chord_for(id); !k.empty()) tip += (tip.empty() ? "" : " \xC2\xB7 ") + k + " " + what;
+        if (!tip.empty()) status(tip);
+    }
     set_title();
     return true;
 }
@@ -157,7 +171,7 @@ void App::load_settings() {
 
     fs::path root = expand_user(cfg_.notes_dir);
     fs::create_directories(root, ec);
-    if (ec) issues.push_back(issue_at(cfg_, "general.notes_dir", true, "can't create this folder: " + ec.message()));
+    if (ec) issues.push_back(issue_at(cfg_, "general.notes_dir", true, "can't create this folder: " + plain_msg(ec.message())));
     store_.set_root(root);
     image_store_.set_root(root);
     if (!Store::check_name(cfg_.default_space, "space").empty()) cfg_.default_space = "default";
@@ -191,7 +205,7 @@ void App::publish_problems(bool announce) {
     const auto& shown = config_problems_;
     if (announce && !shown.empty() && !is_config()) {
         const ConfigIssue& first = shown[0];
-        std::string msg = "Config: " + (first.line >= 0 ? "line " + std::to_string(first.line + 1) + ", " : std::string()) + first.msg;
+        std::string msg = "config: " + (first.line >= 0 ? "line " + std::to_string(first.line + 1) + ", " : std::string()) + first.msg;
         if (shown.size() > 1) msg += " (+" + std::to_string(shown.size() - 1) + " more)";
         status(msg, true);
     }
@@ -435,10 +449,10 @@ void App::apply_spelling(bool force) {
 // Spelling marks for the open note. New lines are checked a few
 // milliseconds' worth a frame, so a long note never stalls one.
 void App::check_spelling() {
-    if (!note_ || is_config() || !cfg_.spell || !speller_.ready()) return;
+    if (!is_note() || !cfg_.spell || !speller_.ready()) return;
     if (spell_report_) {
         spell_report_ = false;
-        if (!speller_.errors().empty()) status("Dictionary " + speller_.errors().front(), true);
+        if (!speller_.errors().empty()) status("dictionary " + speller_.errors().front(), true);
     }
     if (editor_.version() == spell_version_ && speller_.generation() == spell_gen_ && !spell_pending_) return;
     spell_version_ = editor_.version();
@@ -534,7 +548,7 @@ void App::update_echo() {
 void App::goto_misspelling(int dir) {
     Jump j(*this, History::Misspelling);
     if (spelling_.empty()) {
-        status(!cfg_.spell ? "Spellcheck is off" : speller_.loading() || spell_pending_ ? "Still checking the spelling" : "No misspelt words in this note");
+        status(!cfg_.spell ? "spellcheck is off" : speller_.loading() || spell_pending_ ? "still checking the spelling" : "no misspelt words in this note");
         return;
     }
     TextPos a = editor_.cursor(), b = editor_.anchor();
@@ -558,7 +572,7 @@ void App::goto_misspelling(int dir) {
 // at the end of them, the word as it was); one undo puts the word back,
 // whichever it's on.
 void App::quick_fix() {
-    if (!note_ || is_config() || editor_.reader()) return;
+    if (!is_note() || editor_.reader()) return;
     check_spelling();  // marks for the text as it is now, not last frame's
     if (quick_.line >= 0 && editor_.version() == quick_.version && editor_.cursor() == quick_.caret) {
         quick_.pick = (quick_.pick + 1) % (int)quick_.options.size();
@@ -571,10 +585,10 @@ void App::quick_fix() {
     const auto& lines = editor_.lines();
     int near = misspelling_near(spelling_, lines, c);
     const Diagnostic* d = near >= 0 ? &spelling_[near] : nullptr;
-    if (!d || d->col1 > (int)lines[d->line].size()) { status(cfg_.spell ? "No misspelt word here" : "Spellcheck is off"); return; }
+    if (!d || d->col1 > (int)lines[d->line].size()) { status(cfg_.spell ? "no misspelt word here" : "spellcheck is off"); return; }
     std::string word = lines[d->line].substr(d->col0, d->col1 - d->col0);
     const auto& sugg = speller_.suggest(spell_form(lines[d->line], {d->col0, d->col1}));
-    if (sugg.empty()) { status("No suggestions for " + word); return; }
+    if (sugg.empty()) { status("no suggestions for " + word); return; }
     quick_.line = d->line;
     quick_.col0 = d->col0;
     quick_.word = word;
@@ -605,7 +619,7 @@ void App::quick_apply() {
 // it, ctrl+enter adds it to your dictionary; the pass ends where it began,
 // or at escape. From a word that isn't misspelt, it starts at the next one.
 void App::fix_spelling() {
-    if (!note_ || is_config()) return;
+    if (!is_note()) return;
     if (editor_.reader()) editor_.set_reader(false);
     check_spelling();  // marks for the text as it is now, not last frame's
     const Diagnostic* d = misspelt_at_caret();
@@ -655,10 +669,10 @@ void App::add_to_dictionary(const std::string& word) {
     text += word + "\n";
     std::error_code ec;
     fs::create_directories(words_path_.parent_path(), ec);
-    if (!atomic_write(words_path_, text, &err)) { status("Couldn't save words.txt: " + err, true); return; }
+    if (!atomic_write(words_path_, text, &err)) { status("couldn't save words.txt: " + err, true); return; }
     words_mtime_ = mtime_of(words_path_);  // already applied below: no reload
     speller_.add_word(word);
-    status("Added \"" + word + "\" to your dictionary");
+    status("added \"" + word + "\" to your dictionary");
 }
 
 // Steps through the open document's problems. From a note that has none, the
@@ -668,7 +682,7 @@ void App::goto_problem(int dir) {
     const Diagnostic* to = nullptr;
     if (problems_.empty()) {
         bool config_has = std::any_of(config_problems_.begin(), config_problems_.end(), [](const ConfigIssue& is) { return is.line >= 0; });
-        if (is_config() || !config_has) { status(is_config() ? "No problems in the config" : "No problems in this note"); return; }
+        if (is_config() || !config_has) { status(is_config() ? "no problems in the config" : "no problems in this note"); return; }
         open_config();
         if (!is_config() || problems_.empty()) return;
         to = dir > 0 ? &problems_.front() : &problems_.back();
@@ -811,7 +825,7 @@ void App::choose_font(bool mono) {
 // way it's saved, and the reload that follows loads the font.
 void App::set_font(bool mono, const std::string& value) {
     const char* key = mono ? "mono_font" : "font";
-    status(std::string(mono ? "Mono font: " : "Font: ") + value);
+    status(std::string(mono ? "mono font: " : "font: ") + value);
     if (is_config()) {
         ConfigEdit e = config_set(editor_.lines(), "editor", key, value);
         editor_.replace_range({e.line, e.col0}, {e.line, e.col1}, e.text);
@@ -833,7 +847,7 @@ void App::set_font(bool mono, const std::string& value) {
     for (size_t i = 0; i < lines.size(); i++) out += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
     std::string err;
     if (!atomic_write(cfg_path_, out, &err)) {
-        status("Couldn't save the config: " + err, true);
+        status("couldn't save the config: " + err, true);
         return;
     }
     load_settings();
@@ -879,119 +893,121 @@ void App::register_commands() {
     auto ed = [this](void (Editor::*fn)()) { return [this, fn] { if (editing()) (editor_.*fn)(); }; };
 
     // Navigation
-    add("palette.notes", "Find a note in this space", "ctrl+p", [this] { open_palette(""); }, false, true);
-    add("palette.commands", "Show all commands", "ctrl+shift+p f1", [this] { open_palette("/"); }, false, true);
-    add("palette.all", "Find a note in any space", "ctrl+alt+p", [this] { open_palette("*"); }, false, true);
-    add("palette.spaces", "Switch space", "ctrl+shift+s", [this] { open_palette("#"); }, false, true);
-    add("palette.headings", "Jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
-    add("palette.line", "Go to line", "ctrl+g", [this] { open_line(); }, false, true);
-    add("find.open", "Find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
-    add("find.replace", "Find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
-    add("nav.heading_next", "Go to the next heading", "ctrl+alt+down", [this] {
+    add("palette.notes", "find a note in this space", "ctrl+p", [this] { open_palette(""); }, false, true);
+    add("palette.commands", "show all commands", "ctrl+shift+p", [this] { open_palette("/"); }, false, true);
+    add("palette.all", "find a note in any space", "ctrl+alt+p", [this] { open_palette("*"); }, false, true);
+    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("#"); }, false, true);
+    add("palette.headings", "jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
+    add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, true);
+    add("find.open", "find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
+    add("find.replace", "find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
+    add("nav.heading_next", "go to the next heading", "ctrl+alt+down", [this] {
         if (!editing()) return;
         Jump j(*this, History::Heading);
         editor_.goto_heading(1);
     }, true);
-    add("nav.heading_prev", "Go to the previous heading", "ctrl+alt+up", [this] {
+    add("nav.heading_prev", "go to the previous heading", "ctrl+alt+up", [this] {
         if (!editing()) return;
         Jump j(*this, History::Heading);
         editor_.goto_heading(-1);
     }, true);
-    add("edit.expand_selection", "Expand selection", "alt+shift+right", [this] { if (editing()) editor_.expand_selection(); }, true);
-    add("edit.shrink_selection", "Shrink selection", "alt+shift+left", [this] { if (editing()) editor_.shrink_selection(); }, true);
-    add("edit.follow_link", "Follow the link at the caret", "alt+enter", [this] {
+    add("edit.expand_selection", "expand selection", "alt+shift+right", [this] { if (editing()) editor_.expand_selection(); }, true);
+    add("edit.shrink_selection", "shrink selection", "alt+shift+left", [this] { if (editing()) editor_.shrink_selection(); }, true);
+    add("edit.follow_link", "follow the link at the caret", "alt+enter", [this] {
         LinkSpan link;
         if (!editing()) return;
         if (editor_.link_at_caret(link)) open_link(link);
-        else status("No link at the caret");
+        else status("no link at the caret");
     });
-    add("palette.search", "Search notes in this space", "ctrl+shift+f", [this] {
+    add("palette.search", "search notes in this space", "ctrl+shift+f", [this] {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
     }, false, true);
-    add("palette.backlinks", "Show notes that link here", "ctrl+shift+b", [this] { open_palette("<"); }, false, true);
-    add("nav.back", "Go back", "alt+left", [this] { history_step(-1); });
-    add("nav.forward", "Go forward", "alt+right", [this] { history_step(1); });
-    add("nav.switch", "Switch to a recent note", "ctrl+tab", [this] { switch_note(1); }, true);
-    add("nav.switch_back", "Switch to a recent note, oldest first", "ctrl+shift+tab", [this] { switch_note(-1); }, true);
-    add("nav.next_note", "Go to the next note in this space", "ctrl+pagedown", [this] { step_note(1); }, true);
-    add("nav.prev_note", "Go to the previous note in this space", "ctrl+pageup", [this] { step_note(-1); }, true);
+    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("<"); }, false, true);
+    add("nav.back", "go back", "alt+left", [this] { history_step(-1); });
+    add("nav.forward", "go forward", "alt+right", [this] { history_step(1); });
+    add("nav.switch", "switch to a recent note", "ctrl+tab", [this] { switch_note(1); }, true);
+    add("nav.switch_back", "switch to a recent note, oldest first", "ctrl+shift+tab", [this] { switch_note(-1); }, true);
+    add("nav.next_note", "go to the next note in this space", "ctrl+pagedown", [this] { step_note(1); }, true);
+    add("nav.prev_note", "go to the previous note in this space", "ctrl+pageup", [this] { step_note(-1); }, true);
 
     // Notes and spaces
-    add("note.new", "New note", "ctrl+n", [this] {
+    add("note.new", "new note", "ctrl+n", [this] {
         palette_.prompt("new note: " + space_ + "/", "", "+ new note", [this](const std::string& v) { create_note(space_, v); });
     });
-    add("note.daily", "Open today's daily note", "alt+d", [this] { open_daily(); });
-    add("note.rename", "Rename note", "f2", [this] { rename_note(); });
-    add("note.move", "Move note to another space", "", [this] { move_note(); });
-    add("note.delete", "Delete note", "", [this] { delete_note(); });
-    add("note.restore", "Restore a deleted note", "", [this] { restore_note(); });
-    add("note.save", "Save note now", "ctrl+s", [this] { if (save()) status("Saved"); });
-    add("space.new", "New space", "", [this] { new_space(); });
-    add("space.rename", "Rename this space", "", [this] { rename_space(); });
-    add("space.delete", "Delete this space", "", [this] { delete_space(); });
+    add("note.daily", "open today's daily note", "alt+d", [this] { open_daily(); });
+    add("note.rename", "rename note", "f2", [this] { rename_note(); });
+    add("note.move", "move note to another space", "", [this] { move_note(); });
+    add("note.delete", "delete note", "", [this] { delete_note(); });
+    add("note.restore", "restore a deleted note", "", [this] { restore_note(); });
+    add("note.save", "save note now", "ctrl+s", [this] { if (save()) status("saved"); });
+    add("space.new", "new space", "", [this] { new_space(); });
+    add("space.rename", "rename this space", "", [this] { rename_space(); });
+    add("space.delete", "delete this space", "", [this] { delete_space(); });
 
     // View
-    add("view.reader", "Toggle reader mode", "ctrl+e", [this] {
+    add("view.reader", "toggle reader mode", "ctrl+e", [this] {
         if (!note_ || is_config()) return;
+        if (is_manual()) { status("the manual is read only"); return; }
         editor_.set_reader(!editor_.reader());  // morphs between the views
     }, false, false);
-    add("view.line_numbers", "Toggle line numbers", "", [this] { cfg_.line_numbers = !cfg_.line_numbers; });
-    add("view.zoom_in", "Zoom in", "ctrl+= ctrl+numpad+", [this] { zoom_ = std::min(3.0f, zoom_ * 1.1f); status("Zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
-    add("view.zoom_out", "Zoom out", "ctrl+- ctrl+numpad-", [this] { zoom_ = std::max(0.5f, zoom_ / 1.1f); status("Zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
-    add("view.zoom_reset", "Reset zoom", "ctrl+0", [this] { zoom_ = 1; status("Zoom 100%"); }, false, true);
-    add("view.fullscreen", "Toggle full screen", "f11", [this] { toggle_fullscreen(); }, false, true);
+    add("view.line_numbers", "toggle line numbers", "", [this] { cfg_.line_numbers = !cfg_.line_numbers; });
+    add("view.zoom_in", "zoom in", "ctrl+= ctrl+numpad+", [this] { zoom_ = std::min(3.0f, zoom_ * 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
+    add("view.zoom_out", "zoom out", "ctrl+- ctrl+numpad-", [this] { zoom_ = std::max(0.5f, zoom_ / 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
+    add("view.zoom_reset", "reset zoom", "ctrl+0", [this] { zoom_ = 1; status("zoom 100%"); }, false, true);
+    add("view.fullscreen", "toggle full screen", "f11", [this] { toggle_fullscreen(); }, false, true);
 
     // App
-    add("config.open", "Edit config", "ctrl+,", [this] { open_config(); });
-    add("config.add_setting", "Add a setting", "", [this] { add_setting(); });
-    add("font.choose", "Choose font", "", [this] { choose_font(false); });
-    add("font.choose_mono", "Choose mono font", "", [this] { choose_font(true); });
-    add("config.open_external", "Open config in another app", "", [this] {
-        if (!open_with_default_app(cfg_path_)) status("Couldn't open " + path_u8(cfg_path_), true);
+    add("config.open", "edit config", "ctrl+,", [this] { open_config(); });
+    add("config.add_setting", "add a setting", "", [this] { add_setting(); });
+    add("font.choose", "choose font", "", [this] { choose_font(false); });
+    add("font.choose_mono", "choose mono font", "", [this] { choose_font(true); });
+    add("config.open_external", "open config in another app", "", [this] {
+        if (!open_with_default_app(cfg_path_)) status("couldn't open " + path_u8(cfg_path_), true);
     });
-    add("nav.next_problem", "Go to the next problem", "f8", [this] { goto_problem(1); }, true);
-    add("nav.prev_problem", "Go to the previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
-    add("nav.next_misspelling", "Go to the next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
-    add("nav.prev_misspelling", "Go to the previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
-    add("edit.quick_fix", "Fix the misspelt word with its best guess", "alt+.", [this] { quick_fix(); });
-    add("edit.fix_spelling", "Fix spelling, word by word", "ctrl+.", [this] { fix_spelling(); });
-    add("view.spelling", "Toggle spellcheck", "", [this] {
+    add("nav.next_problem", "go to the next problem", "f8", [this] { goto_problem(1); }, true);
+    add("nav.prev_problem", "go to the previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
+    add("nav.next_misspelling", "go to the next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
+    add("nav.prev_misspelling", "go to the previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
+    add("edit.quick_fix", "fix the misspelt word with its best guess", "alt+.", [this] { quick_fix(); });
+    add("edit.fix_spelling", "fix spelling, word by word", "ctrl+.", [this] { fix_spelling(); });
+    add("view.spelling", "toggle spellcheck", "", [this] {
         cfg_.spell = !cfg_.spell;
         apply_spelling();
-        status(cfg_.spell ? "Spellcheck on" : "Spellcheck off");
+        status(cfg_.spell ? "spellcheck on" : "spellcheck off");
     });
-    add("config.reload", "Reload config", "", [this] { load_settings(); status("Config reloaded"); });
-    add("app.open_folder", "Show this space's folder", "", [this] { open_with_default_app(store_.root() / u8path(space_)); });
-    add("app.quit", "Quit", "ctrl+q", [this] { quit_ = true; }, false, true);
+    add("config.reload", "reload config", "", [this] { load_settings(); status("config reloaded"); });
+    add("app.open_folder", "show this space's folder", "", [this] { open_with_default_app(store_.root() / u8path(space_)); });
+    add("app.manual", "open the manual", "f1", [this] { open_manual(); });
+    add("app.quit", "quit", "ctrl+q", [this] { quit_ = true; }, false, true);
 
     // Editing
-    add("edit.undo", "Undo", "ctrl+z", ed(&Editor::undo), true);
-    add("edit.redo", "Redo", "ctrl+y ctrl+shift+z", ed(&Editor::redo), true);
-    add("edit.cut", "Cut", "ctrl+x", [this] { if (editing()) copy_out(true); });
-    add("edit.copy", "Copy", "ctrl+c", [this] { if (note_) copy_out(false); });
-    add("edit.paste", "Paste", "ctrl+v", [this] { paste(false); }, true);
-    add("edit.paste_plain", "Paste as plain text", "ctrl+shift+v", [this] { paste(true); }, true);
-    add("image.view", "View image", "", [this] {
+    add("edit.undo", "undo", "ctrl+z", ed(&Editor::undo), true);
+    add("edit.redo", "redo", "ctrl+y ctrl+shift+z", ed(&Editor::redo), true);
+    add("edit.cut", "cut", "ctrl+x", [this] { if (editing()) copy_out(true); });
+    add("edit.copy", "copy", "ctrl+c", [this] { if (note_) copy_out(false); });
+    add("edit.paste", "paste", "ctrl+v", [this] { paste(false); }, true);
+    add("edit.paste_plain", "paste as plain text", "ctrl+shift+v", [this] { paste(true); }, true);
+    add("image.view", "view image", "", [this] {
         int tile = 0;
         int line = editor_.image_for_caret(&tile);
         if (line >= 0) open_viewer(line, tile);
-        else status("Pick an image to view it");
+        else status("pick an image to view it");
     });
-    add("edit.select_all", "Select all", "ctrl+a", ed(&Editor::select_all));
-    add("edit.select_line", "Select line", "ctrl+l", ed(&Editor::select_line), true);
-    add("edit.line_up", "Move line up", "alt+up", [this] { if (editing()) editor_.move_lines(-1); }, true);
-    add("edit.line_down", "Move line down", "alt+down", [this] { if (editing()) editor_.move_lines(1); }, true);
-    add("edit.duplicate_up", "Duplicate line up", "shift+alt+up", [this] { if (editing()) editor_.duplicate_lines(-1); }, true);
-    add("edit.duplicate_down", "Duplicate line down", "shift+alt+down", [this] { if (editing()) editor_.duplicate_lines(1); }, true);
-    add("edit.delete_line", "Delete line", "ctrl+shift+k", ed(&Editor::delete_lines), true);
-    add("edit.toggle_task", "Toggle task checkbox", "ctrl+enter", ed(&Editor::toggle_task));
-    add("edit.bold", "Bold", "ctrl+b", [this] { if (editing()) editor_.wrap_selection("**"); });
-    add("edit.italic", "Italic", "ctrl+i", [this] { if (editing()) editor_.wrap_selection("*"); });
-    add("edit.code", "Inline code", "ctrl+`", [this] { if (editing()) editor_.wrap_selection("`"); });
-    add("edit.strike", "Strikethrough", "ctrl+shift+x", [this] { if (editing()) editor_.wrap_selection("~~"); });
-    add("edit.indent", "Indent", "ctrl+]", ed(&Editor::indent), true);
-    add("edit.outdent", "Outdent", "ctrl+[", ed(&Editor::outdent), true);
+    add("edit.select_all", "select all", "ctrl+a", ed(&Editor::select_all));
+    add("edit.select_line", "select line", "ctrl+l", ed(&Editor::select_line), true);
+    add("edit.line_up", "move line up", "alt+up", [this] { if (editing()) editor_.move_lines(-1); }, true);
+    add("edit.line_down", "move line down", "alt+down", [this] { if (editing()) editor_.move_lines(1); }, true);
+    add("edit.duplicate_up", "duplicate line up", "shift+alt+up", [this] { if (editing()) editor_.duplicate_lines(-1); }, true);
+    add("edit.duplicate_down", "duplicate line down", "shift+alt+down", [this] { if (editing()) editor_.duplicate_lines(1); }, true);
+    add("edit.delete_line", "delete line", "ctrl+shift+k", ed(&Editor::delete_lines), true);
+    add("edit.toggle_task", "toggle task checkbox", "ctrl+enter", ed(&Editor::toggle_task));
+    add("edit.bold", "bold", "ctrl+b", [this] { if (editing()) editor_.wrap_selection("**"); });
+    add("edit.italic", "italic", "ctrl+i", [this] { if (editing()) editor_.wrap_selection("*"); });
+    add("edit.code", "inline code", "ctrl+`", [this] { if (editing()) editor_.wrap_selection("`"); });
+    add("edit.strike", "strikethrough", "ctrl+shift+x", [this] { if (editing()) editor_.wrap_selection("~~"); });
+    add("edit.indent", "indent", "ctrl+]", ed(&Editor::indent), true);
+    add("edit.outdent", "outdent", "ctrl+[", ed(&Editor::outdent), true);
 }
 
 // ---------------------------------------------------------------------------
@@ -999,6 +1015,7 @@ void App::register_commands() {
 
 void App::set_title() {
     std::string t = note_ ? note_->name + " - delta" : "delta";
+    if (sandbox_) t += " (sandbox)";
     glfwSetWindowTitle(win_, t.c_str());
 }
 
@@ -1007,7 +1024,7 @@ void App::remember_view() {
 }
 
 bool App::save() {
-    if (!note_ || editor_.version() == saved_version_) return true;
+    if (!note_ || is_manual() || editor_.version() == saved_version_) return true;
     std::string text = editor_.text();
     // A download still on its way is saved as the address it came from; the
     // placeholder is only ever on screen.
@@ -1029,7 +1046,7 @@ bool App::save() {
     std::error_code ec;
     fs::create_directories(note_->path.parent_path(), ec);
     if (!atomic_write(note_->path, text, &err)) {
-        status("Couldn't save: " + err, true);
+        status("couldn't save: " + err, true);
         return false;
     }
     saved_version_ = editor_.version();
@@ -1044,28 +1061,27 @@ void App::open_note(const NoteRef& n, bool push_history) {
     close_bar();
     save();
     remember_view();
+    bool config = n.path == cfg_path_, manual = n.path == kManual;
     std::string text;
-    if (!read_file(n.path, text)) {
-        status("Couldn't open " + n.name, true);
+    if (manual) text.assign((const char*)g_manual, g_manual_size);
+    else if (!read_file(n.path, text)) {
+        status("couldn't open " + n.name, true);
         return;
     }
     crlf_ = text.find("\r\n") != std::string::npos;
 
     // The config is edited like a note, but as ini text and never in reader
-    // mode; the reader preference comes back when you return to notes.
-    bool was_config = is_config();
-    bool config = n.path == cfg_path_;
-    if (config && !was_config) {
-        reader_pref_ = editor_.reader();
-        editor_.set_reader(false, false);
-    } else if (!config && was_config) {
-        editor_.set_reader(reader_pref_, false);
-    }
+    // mode; the manual is only ever in reader mode. The reader preference
+    // comes back when you return to notes.
+    bool was_fixed = is_config() || is_manual();
+    if ((config || manual) && !was_fixed) reader_pref_ = editor_.reader();
+    if (config || manual) editor_.set_reader(manual, false);
+    else if (was_fixed) editor_.set_reader(reader_pref_, false);
     editor_.set_syntax(config ? Syntax::Ini : Syntax::Markdown);
     images_.set_note_dir(n.path.parent_path());  // images are found from the note's folder
     editor_.set_text(text);
     note_ = n;
-    if (!config) {
+    if (!config && !manual) {
         space_ = n.space;
         note_index_ = store_.index();  // a note just made by following a link counts at once
     }
@@ -1083,8 +1099,22 @@ void App::open_note(const NoteRef& n, bool push_history) {
     disk_mtime_ = mtime_of(n.path);
     if (auto it = views_.find(path_u8(n.path)); it != views_.end()) editor_.restore_view(it->second.first, it->second.second);
     fade_start_ = anim::clock;
-    if (!config) recent_.visit(n);
+    if (!config && !manual) recent_.visit(n);
     set_title();
+}
+
+bool App::need_note() {
+    if (is_config()) status("open a note first; the config stays where it is");
+    else if (is_manual()) status("open a note first; the manual is read only");
+    return is_note();
+}
+
+void App::open_manual() {
+    NoteRef r;
+    r.space = "delta";
+    r.name = "manual";
+    r.path = kManual;
+    open_note(r);
 }
 
 void App::close_note() {
@@ -1122,7 +1152,7 @@ void App::create_note(const std::string& space, const std::string& raw) {
     }
     open_note(n);
     editor_.restore_view({(int)editor_.lines().size() - 1, 0}, 0);
-    status("Created " + name);
+    status("created " + name);
 }
 
 void App::open_daily() {
@@ -1147,7 +1177,7 @@ void App::open_link(const LinkSpan& link) {
     if (link.wiki) { open_by_name(link.target); return; }
     std::string t = trim(link.target);
     if (t.find("://") != std::string::npos || t.rfind("mailto:", 0) == 0) {
-        if (!open_url(t)) status("Only http, https and mailto links open from notes.", true);
+        if (!open_url(t)) status("only http, https and mailto links open from notes", true);
         return;
     }
     // Relative markdown links: treat as a note name.
@@ -1190,7 +1220,7 @@ void App::open_by_name(std::string target) {
 
 void App::rename_note() {
     if (!note_) return;
-    if (is_config()) { status("The config file stays where it is. Open a note to do that."); return; }
+    if (!need_note()) return;
     open_bar(Bar::Rename);  // see draw_rename_bar
     std::snprintf(bar_buf_, sizeof bar_buf_, "%s", note_->name.c_str());
     bar_last_ = bar_buf_;
@@ -1198,7 +1228,7 @@ void App::rename_note() {
 
 void App::move_note() {
     if (!note_) return;
-    if (is_config()) { status("The config file stays where it is. Open a note to do that."); return; }
+    if (!need_note()) return;
     std::vector<PaletteItem> items;
     for (auto& sp : store_.spaces()) {
         if (sp == note_->space) continue;
@@ -1217,17 +1247,17 @@ void App::move_note() {
             space_ = sp;
             apply_spelling();  // this space may want other dictionaries
             disk_mtime_ = mtime_of(n.path);
-            status("Moved to " + sp);
+            status("moved to " + sp);
         };
         items.push_back(it);
     }
-    if (items.empty()) { status("There's no other space yet. Make one with New space."); return; }
+    if (items.empty()) { status("no other space yet; make one with new space"); return; }
     palette_.pick("move to: ", items);
 }
 
 void App::delete_note() {
     if (!note_) return;
-    if (is_config()) { status("The config file stays where it is. Open a note to do that."); return; }
+    if (!need_note()) return;
     NoteRef n = *note_;
     PaletteItem yes, no;
     yes.label = "delete \"" + n.name + "\"";
@@ -1243,7 +1273,7 @@ void App::delete_note() {
         auto rest = store_.notes(n.space);
         if (!rest.empty()) open_note(rest.front(), false);
         else close_note();
-        status("Deleted " + n.name + " (it's in .trash)");
+        status("deleted " + n.name + " (it's in .trash)");
     };
     no.label = "keep it";
     no.action = [] {};
@@ -1255,7 +1285,7 @@ void App::new_space() {
         std::string name = trim(v);
         if (auto e = store_.ensure_space(name); !e.empty()) { status(e, true); return; }
         switch_space(name);
-        status("Switched to " + name);
+        status("switched to " + name);
     });
 }
 
@@ -1274,13 +1304,13 @@ void App::rename_space() {
             note_ = store_.ref(to, note_->name);
             disk_mtime_ = mtime_of(note_->path);
         }
-        status("Renamed space to " + to);
+        status("renamed space to " + to);
     });
 }
 
 void App::delete_space() {
     std::string sp = space_;
-    if (store_.note_count(sp) > 0) { status(quote(sp) + " still has notes. Move or delete them first.", true); return; }
+    if (store_.note_count(sp) > 0) { status(quote(sp) + " still has notes; move or delete them first", true); return; }
     PaletteItem yes, no;
     yes.label = "delete space \"" + sp + "\"";
     yes.emphasis = true;
@@ -1292,7 +1322,7 @@ void App::delete_space() {
         if (next.empty() && !spaces.empty()) next = spaces.front();
         if (next.empty()) next = "default";
         switch_space(next);
-        status("Deleted space " + sp);
+        status("deleted space " + sp);
     };
     no.label = "keep it";
     no.action = [] {};
@@ -1309,11 +1339,11 @@ void App::restore_note() {
             NoteRef n;
             if (auto e = store_.restore_note(t, n); !e.empty()) { status(e, true); return; }
             open_note(n);
-            status("Restored " + n.name + (n.name != t.name ? " (its name was taken)" : ""));
+            status("restored " + n.name + (n.name != t.name ? " (its name was taken)" : ""));
         };
         items.push_back(std::move(it));
     }
-    if (items.empty()) { status("There are no deleted notes."); return; }
+    if (items.empty()) { status("no deleted notes"); return; }
     palette_.pick("restore: ", std::move(items));
 }
 
@@ -1322,7 +1352,7 @@ void App::history_step(int dir) {
     close_bar();
     const Place* p = history_.step(dir, here(), [](const Place& p) {
         std::error_code ec;
-        return fs::exists(p.note.path, ec);
+        return p.note.path == kManual || fs::exists(p.note.path, ec);
     });
     if (!p) return;
     Place to = *p;
@@ -1343,7 +1373,7 @@ void App::step_note(int dir) {
     for (int k = 0; k < n; k++)
         if (note_ && notes[k].path == note_->path) at = k;
     int to = at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n;
-    if (to == at) { status("This is the only note in " + space_); return; }
+    if (to == at) { status("this is the only note in " + space_); return; }
     open_note(notes[to]);
     status(std::to_string(to + 1) + " of " + std::to_string(n) + " in " + space_);
 }
@@ -1372,7 +1402,7 @@ void App::switch_note(int dir) {
         switch_notes_ = switch_list();
         int n = (int)switch_notes_.size();
         bool first_open = note_ && n && switch_notes_[0].path == note_->path;
-        if (n < (first_open ? 2 : 1)) { status("No other notes yet"); return; }
+        if (n < (first_open ? 2 : 1)) { status("no other notes yet"); return; }
         switch_pick_ = dir > 0 ? (first_open ? 1 : 0) : n - 1;
         switch_pending_ = true;
         switch_time_ = ImGui::GetTime();
@@ -1584,7 +1614,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
 
     // Links here: every [[link]] in any space that leads to the open note.
     if (c == '<') {
-        if (!note_ || is_config()) return;
+        if (!is_note()) return;
         if (cache_all_.empty()) cache_all_ = store_.all_notes();
         total = 0;
         for (auto& n : cache_all_) {
@@ -1670,7 +1700,7 @@ void App::poll_files(double now) {
     auto m = mtime_of(cfg_path_);
     if (m != cfg_mtime_ && m != fs::file_time_type{}) {
         load_settings();
-        if (status_.empty() || !status_error_) status("Config reloaded");
+        if (status_.empty() || !status_error_) status("config reloaded");
     }
     // words.txt edited (here or elsewhere): its words, and no longer those taken out.
     if (auto wm = mtime_of(words_path_); wm != words_mtime_) apply_spelling(true);
@@ -1687,7 +1717,7 @@ void App::poll_files(double now) {
     if (nm == fs::file_time_type{} || nm == disk_mtime_) return;
     disk_mtime_ = nm;
     if (editor_.version() != saved_version_) {
-        status("This note changed on disk. Your next save will overwrite it.", true);
+        status("this note changed on disk; your next save will overwrite it", true);
         return;
     }
     std::string text;
@@ -1754,6 +1784,7 @@ void App::draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float to
     add("palette.notes", "find a note");
     add("palette.spaces", "switch space");
     add("palette.commands", "all commands");
+    add("app.manual", "the manual");
 
     // Set on the page's lines, spaced like the editor's.
     float row_h = std::round(s * cfg_.line_height);
@@ -1916,7 +1947,7 @@ void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
     if (enter && io.KeyCtrl && io.KeyAlt && find_replace_) {
         int n = editor_.replace_all(repl_buf_);
-        status(n ? "Replaced " + std::to_string(n) : "Nothing to replace");
+        status(n ? "replaced " + std::to_string(n) : "nothing to replace");
         find_last_ = find_buf_;
     } else if (enter && bar_field_ == 2) {
         editor_.replace_current(repl_buf_);
@@ -1980,7 +2011,7 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
         int next = fix_pass_next(spelling_, fix_from_, fix_origin_, fix_wrapped_);
         if (next < 0) {
             close_bar();
-            status(spelling_.empty() ? "No misspelt words left" : "Back where you started");
+            status(spelling_.empty() ? "no misspelt words left" : "back where you started");
             return;
         }
         fix_load(spelling_[next]);
@@ -2203,7 +2234,7 @@ void App::draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) 
                 disk_mtime_ = mtime_of(n.path);
                 set_title();
                 close_bar();
-                status("Renamed to " + n.name);
+                status("renamed to " + n.name);
                 return;
             }
         }
@@ -2620,14 +2651,15 @@ void App::shutdown() {
     images_.shutdown();  // while the GL context is still around
     std::map<std::string, std::string> kv;
     kv["space"] = space_;
-    kv["note"] = note_ ? note_->name : "";
+    kv["note"] = is_note() ? note_->name : "";
     kv["zoom"] = std::to_string(zoom_);
-    kv["reader"] = editor_.reader() ? "1" : "0";
+    kv["reader"] = (is_note() ? editor_.reader() : reader_pref_) ? "1" : "0";
     // Where each note's caret and scroll were, so notes reopen where you left
     // them. Paths are relative to the notes folder.
     remember_view();
     int kept = 0;
     for (auto& [path, v] : views_) {
+        if (path == path_u8(kManual)) continue;  // the next build's manual may differ
         std::error_code ec;
         fs::path rel = fs::relative(u8path(path), store_.root(), ec);
         std::string key = path_u8(rel);
