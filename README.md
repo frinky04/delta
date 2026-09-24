@@ -27,6 +27,7 @@ A leading character switches what the palette searches, and backspace goes back 
 - `:` line number
 - `?` text in this space (`tab` for every space)
 - `[` notes that link here
+- `#` notes by tag (`tab` for every space)
 
 `f1` shows this page.
 
@@ -36,9 +37,21 @@ Markdown symbols stay visible, dimmed, with the formatting applied. `ctrl+e` tog
 
 `[[note]]` and `[[space/note]]` link to notes. Following a link to a missing note creates it. `alt+left` and `alt+right` go back and forward.
 
+While you type a `[[link]]` or a `#tag`, a list of notes or tags comes up under the caret. Up and down choose one, `enter` takes it, and `esc` puts the list away.
+
 `alt+shift+enter` searches the web for the selected text, in your default browser with its search engine.
 
 Find (`ctrl+f`), go to line (`ctrl+g`) and rename (`f2`) open in the status line. `esc` closes them.
+
+## Tags
+
+A space is where a note lives; tags say what it is, and a note can have as many as it needs. Write `#` and a name anywhere in a note: `#idea`, `#reading-list`, `#project/delta`. Names are letters, digits, `_`, `-` and `/`, with at least one letter, so `#12` stays a number. Tags in code aren't tags, and case doesn't matter: `#Idea` is `#idea`.
+
+`ctrl+t` lists the tags in this space, and how many notes have each; `tab` widens it to every space. Pick a tag to see its notes. Add more to narrow it down: `#rust #idea` lists the notes that have both, and `-#done` leaves out the ones that have that.
+
+Following a tag (`alt+enter`, or `ctrl`+click) lists the notes that have it.
+
+`f2` with the caret on a tag renames it in every note, in every space, after asking first. Renaming it to a tag that already exists merges the two.
 
 ## Spelling
 

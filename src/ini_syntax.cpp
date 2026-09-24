@@ -4,7 +4,7 @@
 
 #include "util.h"
 
-static void mark(std::vector<uint16_t>& st, size_t a, size_t b, uint16_t f) {
+static void mark(std::vector<Style>& st, size_t a, size_t b, Style f) {
     for (size_t i = a; i < b && i < st.size(); i++) st[i] |= f;
 }
 
@@ -22,7 +22,7 @@ static size_t inline_comment(const std::string& s, size_t from) {
     return std::string::npos;
 }
 
-void ini_analyze(const std::string& s, LineInfo& info, std::vector<uint16_t>& st) {
+void ini_analyze(const std::string& s, LineInfo& info, std::vector<Style>& st) {
     const size_t n = s.size();
     st.assign(n, S_CodeBlock);
     info = LineInfo{};

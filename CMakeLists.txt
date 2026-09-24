@@ -97,6 +97,7 @@ add_library(delta_core STATIC
   src/nav.cpp
   src/fonts.cpp
   src/commands.cpp
+  src/tags.cpp
   ${FONT_SANS_CPP}
   ${FONT_MONO_CPP}
   ${FONT_SANS_BOLD_CPP}

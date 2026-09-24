@@ -17,7 +17,7 @@ std::vector<Diagnostic> link_problems(const std::vector<std::string>& lines, con
     std::vector<Diagnostic> out;
     bool in_code = false;
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     std::vector<LinkSpan> links;
     for (int i = 0; i < (int)lines.size(); i++) {
         const std::string& s = lines[i];
@@ -59,7 +59,7 @@ std::vector<LinkHit> links_to(const std::vector<std::string>& lines, const std::
     std::vector<LinkHit> out;
     bool in_code = false;
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     std::vector<LinkSpan> links;
     for (int i = 0; i < (int)lines.size(); i++) {
         const std::string& s = lines[i];

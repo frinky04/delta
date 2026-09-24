@@ -16,6 +16,8 @@ const char* command_keywords(const std::string& id) {
         {"palette.line", "goto"},
         {"palette.search", "grep text"},
         {"palette.backlinks", "incoming references"},
+        {"palette.tags", "hashtag label"},
+        {"note.rename", "tag hashtag label merge"},
         {"nav.heading_next", "section"},
         {"nav.heading_prev", "section"},
         {"note.delete", "remove"},

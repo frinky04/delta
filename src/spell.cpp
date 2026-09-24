@@ -86,15 +86,15 @@ std::vector<bool> spell_skipped(const std::vector<std::string>& lines) {
 std::vector<WordSpan> spell_words(const std::string& s) {
     std::vector<WordSpan> out;
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     std::vector<LinkSpan> links;
     md_analyze(s, false, info, st, &links);
     if (info.kind != LineKind::Para && info.kind != LineKind::Heading) return out;
 
-    // What markdown says isn't prose: syntax, code, urls.
+    // What markdown says isn't prose: syntax, code, urls, tags.
     int n = (int)s.size();
     std::vector<char> skip(n, 0);
-    const uint16_t never = S_Marker | S_Code | S_CodeBlock | S_Url | S_TaskBox | S_ListMark;
+    const Style never = S_Marker | S_Code | S_CodeBlock | S_Url | S_TaskBox | S_ListMark | S_Tag;
     for (int i = 0; i < n; i++) skip[i] = (st[i] & never) != 0;
     // A [[link]] without an |alias shows its target: a note's name.
     for (auto& l : links)

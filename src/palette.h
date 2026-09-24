@@ -24,6 +24,9 @@ struct PaletteItem {
     std::string aside;          // faint, after the label (the keyword a command matched by)
     bool emphasis = false;      // "+ new ..." rows
     bool current = false;       // where you are: selected when the list is built
+    // Taking the row types this into the query instead of closing (a tag
+    // finished, for the notes that have it). A query's text, mode included.
+    std::string fill;
 };
 
 class Palette {
@@ -36,10 +39,10 @@ public:
 
     // Characters that switch mode when typed first. No prefix is commands,
     // the root that every other mode backspaces out to.
-    static constexpr const char* kModes = ".@:?/[";
+    static constexpr const char* kModes = ".@:?/[#";
     // Modes with a scope, which tab widens from this space to every space
-    // (notes and text search).
-    static constexpr const char* kScoped = ".?";
+    // (notes, text search and tags).
+    static constexpr const char* kScoped = ".?#";
 
     // Extras a pick can have.
     struct PickOptions {
@@ -119,6 +122,7 @@ private:
     bool open_ = false;
     bool hold_ = false;          // see hold()
     double open_time_ = -10;
+    int open_frame_ = -1;        // the frame it opened in: the key or click that opened it doesn't also act on it
     float close_t_ = 1.0f;       // 0..1 progress of the close fade
     char mode_ = 0;              // query mode prefix, kept out of the text box
     bool wide_ = false;          // see wide()

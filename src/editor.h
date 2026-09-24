@@ -86,6 +86,30 @@ struct Heading { int line, level; std::string text; };
 
 enum class Syntax { Markdown, Ini };
 
+// A choice in the completion list.
+struct CompletionItem {
+    std::string label;      // as listed
+    std::string insert;     // what the word becomes
+    std::string meta;       // dim, at the right
+    std::vector<int> hl;    // label bytes the word matched
+    int dim = 0;            // leading label bytes set quieter (a link's "space/")
+};
+
+// Something the editor completes as you type (a #tag, a [[link]]): `trigger`
+// finds the word being written at the caret, `items` what it could become,
+// best first. The list shows under the caret; up and down choose, enter
+// takes one, escape puts it away until the word is done.
+struct Completer {
+    Syntax syntax = Syntax::Markdown;
+    // Where the word being written starts on the caret's line (the caret at
+    // `col`, `st` the line's styles), or -1 if there's none here.
+    std::function<int(const std::string& line, int col, const std::vector<Style>& st)> trigger;
+    std::function<std::vector<CompletionItem>(const std::string& word)> items;
+    int min_chars = 1;      // how much of the word it takes for the list to show
+    int lead = 0;           // bytes before the word that labels start with (a tag's #), to line up with
+    std::string close;      // what ends it (a link's "]]"): added after, unless it's already there
+};
+
 class Editor {
 public:
     Editor();
@@ -209,6 +233,13 @@ public:
 
     std::function<void(const LinkSpan&)> on_link;
 
+    // Completion (see Completer): the first whose trigger fires wins.
+    void add_completer(Completer c) { completers_.push_back(std::move(c)); }
+    bool completing() const { return comp_.open; }
+    // Swap in the whole text as one undoable edit (a rename across notes),
+    // the caret at `cur`; what changed glows as an undo's does.
+    void rewrite(const std::vector<std::string>& lines, TextPos cur);
+
 private:
     struct Line {
         uint64_t hash = 0;
@@ -218,9 +249,9 @@ private:
         int tab = -1;
         bool in_code = false;
         LineInfo info;
-        std::vector<uint16_t> style;
+        std::vector<Style> style;
         std::string rtext;               // reader text
-        std::vector<uint16_t> rstyle;
+        std::vector<Style> rstyle;
         std::vector<int> rmap;
         std::vector<int> rows;           // byte offset where each visual row starts
         float size = 0, row_h = 0, pad = 0, y = 0, h = 0;
@@ -258,11 +289,11 @@ private:
     // layout
     void layout(int mode);
     Metrics metrics(float size) const;
-    bool bold_of(uint16_t style) const;
-    float advance(const Metrics& m, unsigned cp, uint16_t style) const;
+    bool bold_of(Style style) const;
+    float advance(const Metrics& m, unsigned cp, Style style) const;
     const std::string& text_of(int mode, int i) const { return mode ? lay_[1][i].rtext : lines_[i]; }
-    const std::vector<uint16_t>& style_of(int mode, int i) const { return mode ? lay_[1][i].rstyle : lay_[0][i].style; }
-    float measure(const std::string& s, const std::vector<uint16_t>& st, int a, int b, const Metrics& m) const;
+    const std::vector<Style>& style_of(int mode, int i) const { return mode ? lay_[1][i].rstyle : lay_[0][i].style; }
+    float measure(const std::string& s, const std::vector<Style>& st, int a, int b, const Metrics& m) const;
     int row_of(const Line& L, int col) const;
     static float row_x(const Line& L, int row) { return row > 0 ? L.hang : 0.0f; }
     // Is line i showing as an image (an object the caret steps over)?
@@ -342,13 +373,13 @@ private:
     void draw_line(ImDrawList* dl, int mode, int i, float x0, float y0);
     bool draw_morph(ImDrawList* dl, float s);  // edit <-> reader transition, s seconds in; false once settled
     void draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::string& s,
-                        const std::vector<uint16_t>& st, float y, int index, float x0, float shown_h);
+                        const std::vector<Style>& st, float y, int index, float x0, float shown_h);
     void sync_edits();               // pair lines before/after an edit
     void carry_layout(size_t p, size_t s);  // cached layout follows lines that moved
     void animate_layout(float dt);   // displayed heights chase real ones
     void resolve_pending();          // conserve space across the last structural edit
     void draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m, const std::string& s,
-                  const std::vector<uint16_t>& st, int a, int b, float x0, float ry);
+                  const std::vector<Style>& st, int a, int b, float x0, float ry);
     ImU32 fade(ImU32 c) const;
 
     std::vector<std::string> lines_{""};
@@ -541,4 +572,23 @@ private:
 
     int words_ = 0;
     uint64_t words_version_ = 0;
+
+    // The completion list: which completer, the word (its line, where it
+    // starts, as typed), the choices and the one picked. Escape puts it away
+    // for that word (dismissed_*) until you leave it.
+    std::vector<Completer> completers_;
+    struct Comp {
+        bool open = false;
+        int src = -1, line = -1, start = 0;
+        std::string word;
+        std::vector<CompletionItem> items;
+        int sel = 0, top = 0;
+        float a = 0, sel_y = 0;          // fade in, and the pick's glide
+        ImVec2 box_min, box_max;         // where it was drawn (screen), for clicks
+        float row_h = 0, pad_y = 0;
+    } comp_;
+    int comp_dismissed_line_ = -1, comp_dismissed_start_ = -1;
+    void update_completion(bool typed);
+    void accept_completion(int k);
+    void draw_completion(ImDrawList* dl, float dt);
 };

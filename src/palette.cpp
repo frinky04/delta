@@ -71,6 +71,7 @@ void Palette::open(const std::string& text, bool wide) {
     kind_ = Kind::Query;
     opts_ = {};
     generation_++;
+    open_frame_ = ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
     keep_sel_.clear();
     open_ = true;
     hold_ = false;
@@ -373,6 +374,22 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         set_text(buf_ + 1);
     }
 
+    // Taking a row: its action, or (for a row that fills the query) its text.
+    auto take = [&](int k) {
+        if (!items_[k].fill.empty()) {
+            const std::string& t = items_[k].fill;
+            mode_ = !t.empty() && std::strchr(kModes, t[0]) ? t[0] : 0;
+            set_text(mode_ ? t.substr(1) : t);
+            return;
+        }
+        chosen = items_[k].action;
+        commit(k);
+    };
+
+    // Whatever opened it this frame (an enter in a status-line tool, a click
+    // on a #tag) isn't also an answer or a click away.
+    const bool fresh = ImGui::GetFrameCount() == open_frame_;
+
     // Keyboard.
     bool keyed = false;  // the selection moved by key this frame
     int sel_before = sel_;
@@ -390,12 +407,10 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) sel_ = (sel_ - 1 + n) % n;
             if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) sel_ = std::min(n - 1, sel_ + max_rows);
             if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) sel_ = std::max(0, sel_ - max_rows);
-            if ((ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) && items_[sel_].action) {
-                chosen = items_[sel_].action;
-                commit(sel_);
-            }
+            bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+            if (enter && !fresh && items_[sel_].action) take(sel_);
         }
-        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !hovered) close();
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !hovered && !fresh) close();
         keyed = sel_ != sel_before;
     }
 
@@ -445,10 +460,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             float ry = list_y + (k - scroll_) * row_h;
             bool row_hover = hovered && mouse.y >= ry && mouse.y < ry + row_h && mouse.y >= list_y;
             if (row_hover && mouse_moved && open_) sel_ = k;
-            if (row_hover && open_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && it.action) {
-                chosen = it.action;
-                commit(k);
-            }
+            if (row_hover && open_ && !fresh && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && it.action) take(k);
             bool on = k == sel_;
             float a = row_alpha(k);
             ImU32 col = on ? T.text : col_mix(T.dim, T.text, 0.55f);

@@ -51,6 +51,14 @@ std::string ago(std::time_t t) {
 
 std::string quote(const std::string& s) { return "\xE2\x80\x9C" + s + "\xE2\x80\x9D"; }
 
+// Completing as you type, a match has to begin where a word does: "#r" is
+// #rust, not #draft (the palette is looser; it's asked, not offered).
+bool starts_word(const std::string& s, const std::vector<int>& hl) {
+    if (hl.empty()) return true;
+    int i = hl.front();
+    return i <= 0 || i > (int)s.size() || !std::isalnum((unsigned char)s[i - 1]);
+}
+
 fs::file_time_type mtime_of(const fs::path& p) {
     std::error_code ec;
     auto t = fs::last_write_time(p, ec);
@@ -126,6 +134,18 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     }
 
     editor_.on_link = [this](const LinkSpan& l) { open_link(l); };
+    // Completing as you write: [[links]] to notes, #tags from every note.
+    Completer link;
+    link.trigger = md_link_word_start;
+    link.items = [this](const std::string& w) { return complete_links(w); };
+    link.min_chars = 0;
+    link.close = "]]";
+    editor_.add_completer(std::move(link));
+    Completer tag;
+    tag.trigger = tag_word_start;
+    tag.items = [this](const std::string& w) { return complete_tags(w); };
+    tag.lead = 1;
+    editor_.add_completer(std::move(tag));
 
     space_ = state.count("space") ? state["space"] : cfg_.default_space;
     std::error_code ec;
@@ -973,6 +993,7 @@ void App::register_commands() {
         open_palette("?" + sel);
     }, false, true);
     add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, true);
+    add("palette.tags", "find notes by tag", "ctrl+t", [this] { open_palette("#"); }, false, true);
     add("nav.back", "go back", "alt+left", [this] { history_step(-1); });
     add("nav.forward", "go forward", "alt+right", [this] { history_step(1); });
     add("nav.switch", "switch to recent note", "ctrl+tab", [this] { switch_note(1); }, true);
@@ -983,7 +1004,12 @@ void App::register_commands() {
         palette_.prompt("new note: " + space_ + "/", "", "+ new note", [this](const std::string& v) { create_note(space_, v); });
     });
     add("note.daily", "open today's daily note", "alt+d", [this] { open_daily(); });
-    add("note.rename", "rename note", "f2", [this] { rename_note(); });
+    // On a #tag, the tag; anywhere else, the note.
+    add("note.rename", "rename note", "f2", [this] {
+        LinkSpan l;
+        if (editing() && is_note() && editor_.link_at_caret(l) && l.tag) rename_tag_at_caret();
+        else rename_note();
+    });
     add("note.move", "move note to another space", "", [this] { move_note(); });
     add("note.delete", "delete note", "", [this] { delete_note(); });
     add("note.restore", "restore deleted note", "", [this] { restore_note(); });
@@ -1061,7 +1087,8 @@ void App::register_commands() {
     // The palette mode each opens, shown beside its shortcut in the list so
     // the prefixes can be learnt there.
     for (auto [id, p] : {std::pair{"palette.notes", '.'}, {"palette.all", '.'}, {"palette.spaces", '/'},
-                         {"palette.headings", '@'}, {"palette.line", ':'}, {"palette.search", '?'}, {"palette.backlinks", '['}})
+                         {"palette.headings", '@'}, {"palette.line", ':'}, {"palette.search", '?'}, {"palette.backlinks", '['},
+                         {"palette.tags", '#'}})
         if (Command* c = find_command(id)) c->prefix = p;
 }
 
@@ -1278,6 +1305,7 @@ void App::open_daily() {
 }
 
 void App::open_link(const LinkSpan& link) {
+    if (link.tag) { open_palette("#" + link.target + " "); return; }  // the notes that have it
     if (link.wiki) { open_by_name(link.target); return; }
     std::string t = trim(link.target);
     if (t.find("://") != std::string::npos || t.rfind("mailto:", 0) == 0) {
@@ -1731,6 +1759,11 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         return;
     }
 
+    if (c == '#') {
+        build_tags(text.substr(1), out, total);  // untrimmed: a space finishes a tag
+        return;
+    }
+
     // Links here: every [[link]] in any space that leads to the open note.
     if (c == '[') {
         if (!is_note()) { palette_.set_empty("open a note first; its links are listed here"); return; }
@@ -2033,6 +2066,7 @@ void App::draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
         case Bar::Line: draw_line_bar(min, max, s, pad, ty); break;
         case Bar::Rename: draw_rename_bar(min, max, s, pad, ty); break;
         case Bar::Fix: draw_fix_bar(min, max, s, pad, ty); break;
+        case Bar::Tag: draw_tag_bar(min, max, s, pad, ty); break;
         case Bar::None: break;
     }
     bar_focus_ = false;
@@ -2388,6 +2422,294 @@ void App::draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) 
     dl->PushClipRect(ImVec2(x + w, min.y), ImVec2(max.x - pad, max.y), true);
     dl->AddText(mono_, s, ImVec2(rx, ty), msg.empty() ? T.dim : T.text, right.c_str());
     dl->PopClipRect();
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+
+void App::refresh_tags(bool now) {
+    double t = ImGui::GetTime();
+    if (!now && t - tags_time_ < 2.0) return;
+    tags_time_ = t;
+    tags_.refresh(store_.all_notes());
+}
+
+int App::notes_tagged(const std::string& tag) const {
+    std::string key = lower(tag);
+    int n = 0;
+    for (auto& [path, e] : tags_.notes()) n += e.tags.count(key) ? 1 : 0;
+    return n;
+}
+
+// Every tag in every note, best match first: tags mean the same everywhere.
+// The open note counts as it is in the editor, but not the tag being written.
+std::vector<CompletionItem> App::complete_tags(const std::string& word) {
+    refresh_tags(false);
+    struct Tag { std::string name; int notes = 0; };
+    std::map<std::string, Tag> all;
+    auto count = [&](const TagSet& tags) {
+        for (auto& [k, v] : tags) {
+            Tag& t = all[k];
+            if (t.name.empty()) t.name = v;
+            t.notes++;
+        }
+    };
+    for (auto& [path, e] : tags_.notes())
+        if (!is_note() || e.note.path != note_->path) count(e.tags);
+    if (is_note()) {
+        TextPos c = editor_.cursor();
+        TagSet mine;
+        for (auto& t : find_tags(editor_.lines()))
+            if (t.line != c.line || t.col1 != c.col) mine.emplace(lower(t.name), t.name);
+        count(mine);
+    }
+    std::vector<std::pair<int, CompletionItem>> ranked;
+    for (auto& [k, t] : all) {
+        CompletionItem it;
+        int score = 0;
+        if (!fuzzy_match(word, t.name, score, &it.hl) || !starts_word(t.name, it.hl)) continue;
+        for (int& h : it.hl) h++;  // past the #
+        it.label = "#" + t.name;
+        it.insert = t.name;
+        it.meta = std::to_string(t.notes);
+        ranked.push_back({score + std::min(t.notes, 50) * 2, std::move(it)});  // a used tag outranks a slightly shorter one
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    std::vector<CompletionItem> out;
+    for (auto& r : ranked) {
+        out.push_back(std::move(r.second));
+        if (out.size() >= 50) break;
+    }
+    return out;
+}
+
+// Notes to link to: this space's by name, others' as "space/name".
+std::vector<CompletionItem> App::complete_links(const std::string& word) {
+    std::vector<std::pair<int, CompletionItem>> ranked;
+    for (auto& [key, sp] : note_index_.spaces) {
+        bool here = iequals(sp.name, space_);
+        for (auto& [nk, name] : sp.notes) {
+            if (here && is_note() && iequals(name, note_->name)) continue;  // not to itself
+            CompletionItem it;
+            it.label = here ? name : sp.name + "/" + name;
+            int score = 0;
+            if (!fuzzy_match(word, it.label, score, &it.hl) || !starts_word(it.label, it.hl)) continue;
+            it.insert = it.label;
+            it.dim = here ? 0 : (int)sp.name.size() + 1;
+            ranked.push_back({score + (here ? 1 : 0), std::move(it)});
+        }
+    }
+    // Among equals, this space's first, then by name.
+    std::stable_sort(ranked.begin(), ranked.end(), [](auto& a, auto& b) {
+        if (a.first != b.first) return a.first > b.first;
+        return natural_less(a.second.label, b.second.label);
+    });
+    std::vector<CompletionItem> out;
+    for (auto& r : ranked) {
+        out.push_back(std::move(r.second));
+        if (out.size() >= 50) break;
+    }
+    return out;
+}
+
+// The palette's # mode. While a tag is being typed: the tags (on notes with
+// the ones before it), each taken into the query. Once they're all
+// finished: the notes that have them.
+void App::build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total) {
+    if (tags_gen_ != palette_.generation()) {
+        tags_gen_ = palette_.generation();
+        refresh_tags(true);
+        if (is_note()) tags_.set(*note_, editor_.lines());
+    }
+    TagQuery tq = parse_tag_query(query);
+    bool wide = palette_.wide();
+    std::vector<const TagIndex::Entry*> scope;
+    for (auto& [path, e] : tags_.notes())
+        if (wide || iequals(e.note.space, space_)) scope.push_back(&e);
+    std::string elsewhere = wide ? "" : "; tab looks in every space";
+
+    if (tq.typing) {
+        struct Tag { std::string name; int notes = 0; };
+        std::map<std::string, Tag> tags;
+        auto chosen = [&](const std::string& k) {
+            return std::count(tq.want.begin(), tq.want.end(), k) || std::count(tq.skip.begin(), tq.skip.end(), k);
+        };
+        for (auto* e : scope) {
+            if (!tag_query_match(tq, e->tags)) continue;
+            for (auto& [k, v] : e->tags) {
+                if (chosen(k)) continue;
+                Tag& t = tags[k];
+                if (t.name.empty()) t.name = v;
+                t.notes++;
+            }
+        }
+        total = (int)tags.size();
+        std::vector<PaletteItem> rows;
+        for (auto& [k, t] : tags) {
+            PaletteItem it;
+            if (!fuzzy_match(tq.word, t.name, it.score, &it.hl)) continue;
+            for (int& h : it.hl) h++;
+            it.label = "#" + t.name;
+            it.meta = std::to_string(t.notes) + (t.notes == 1 ? " note" : " notes");
+            it.fill = "#" + tag_query_fill(query, t.name);
+            it.action = [] {};
+            rows.push_back(std::move(it));
+        }
+        if (!tq.word.empty())
+            std::stable_sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.score > b.score; });
+        for (auto& r : rows) out.push_back(std::move(r));
+        if (!tags.empty()) palette_.set_empty("no tag matches " + quote(tq.word));
+        else if (tq.want.empty() && tq.skip.empty())
+            palette_.set_empty(wide ? "no tags yet; write #tag in a note to add one" : "no tags in " + space_ + elsewhere);
+        else palette_.set_empty("no other tags on these notes");
+        return;
+    }
+
+    std::vector<const TagIndex::Entry*> hits;
+    for (auto* e : scope)
+        if (tag_query_match(tq, e->tags)) hits.push_back(e);
+    auto label = [&](const NoteRef& n) { return wide ? n.space + "/" + n.name : n.name; };
+    std::sort(hits.begin(), hits.end(), [&](auto* a, auto* b) { return natural_less(label(a->note), label(b->note)); });
+    total = (int)scope.size();
+    for (auto* e : hits) {
+        const NoteRef& n = e->note;
+        PaletteItem it;
+        it.label = label(n);
+        it.dim = wide ? (int)n.space.size() + 1 : 0;
+        // Its other tags, which say what else it is.
+        int shown = 0, more = 0;
+        for (auto& [k, v] : e->tags) {
+            if (std::count(tq.want.begin(), tq.want.end(), k)) continue;
+            if (shown < 3) it.meta += (shown++ ? " #" : "#") + v;
+            else more++;
+        }
+        if (more) it.meta += " +" + std::to_string(more);
+        it.current = note_ && note_->path == n.path;
+        it.action = [this, n] { open_note(n); };
+        out.push_back(std::move(it));
+    }
+    std::string terms;
+    for (auto& w : tq.want) terms += (terms.empty() ? "#" : " #") + w;
+    for (auto& s : tq.skip) terms += (terms.empty() ? "-#" : " -#") + s;
+    palette_.set_empty("no notes with " + terms + elsewhere);
+}
+
+void App::rename_tag_at_caret() {
+    LinkSpan l;
+    if (!editing() || !is_note() || !editor_.link_at_caret(l) || !l.tag) return;
+    refresh_tags(true);
+    tags_.set(*note_, editor_.lines());
+    tag_from_ = l.target;
+    open_bar(Bar::Tag);  // see draw_tag_bar
+    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", l.target.c_str());
+    bar_last_ = bar_buf_;
+}
+
+// Renaming a tag: its name in the status line becomes editable, and enter
+// asks, in the palette, before every note that has it changes.
+void App::draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
+    if (!note_) { close_bar(); return; }
+    auto value = [&] {
+        std::string v = trim(bar_buf_);
+        while (!v.empty() && v[0] == '#') v.erase(0, 1);
+        return v;
+    };
+    std::string v = value();
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    if (enter) {
+        if (v == tag_from_) { close_bar(); return; }
+        std::string e = check_tag(v);
+        if (e.empty()) {
+            close_bar();
+            confirm_tag_rename(tag_from_, v);
+            return;
+        }
+        bar_error_ = e;
+        bar_focus_ = true;
+        bar_select_pending_ = 2;
+    }
+
+    float x = min.x + pad;
+    dl->AddText(mono_, s, ImVec2(x, ty), T.dim, "rename tag #");
+    x += W("rename tag #");
+    float w = std::clamp(W(bar_buf_) + s * 2, s * 12, (max.x - min.x) * 0.45f);
+    bar_input("##tag", bar_buf_, sizeof bar_buf_, 1, x, ty, w);
+
+    if (bar_last_ != bar_buf_) { bar_last_ = bar_buf_; bar_error_.clear(); }
+    v = value();
+    std::string msg = bar_error_;
+    if (msg.empty() && v != tag_from_) msg = check_tag(v);
+    std::string right = msg;
+    if (right.empty()) {
+        int n = notes_tagged(tag_from_);
+        std::string in = std::to_string(n) + (n == 1 ? " note" : " notes");
+        bool merge = !iequals(v, tag_from_) && notes_tagged(v) > 0;
+        right = merge ? "enter to merge into #" + v + ", in " + in : "enter to rename, in " + in;
+    }
+    float rx = std::max(x + w + s * 1.6f, max.x - pad - W(right));
+    dl->PushClipRect(ImVec2(x + w, min.y), ImVec2(max.x - pad, max.y), true);
+    dl->AddText(mono_, s, ImVec2(rx, ty), msg.empty() ? T.dim : T.text, right.c_str());
+    dl->PopClipRect();
+}
+
+void App::confirm_tag_rename(const std::string& from, const std::string& to) {
+    int n = notes_tagged(from);
+    bool merge = !iequals(from, to) && notes_tagged(to) > 0;
+    std::string in = std::to_string(n) + (n == 1 ? " note" : " notes");
+    PaletteItem yes, no;
+    yes.label = merge ? "merge #" + from + " into #" + to : "rename #" + from + " to #" + to;
+    yes.meta = in + ", every space";
+    yes.emphasis = true;
+    yes.action = [this, from, to] { apply_tag_rename(from, to); };
+    no.label = "keep it";
+    no.action = [] {};
+    palette_.pick(merge ? "merge tags? " : "rename tag? ", {yes, no});
+}
+
+// Every note in every space that has #from gets #to instead. The open note
+// changes in the editor, as one undo step; the rest are written in place.
+void App::apply_tag_rename(const std::string& from, const std::string& to) {
+    refresh_tags(true);
+    bool merge = !iequals(from, to) && notes_tagged(to) > 0;
+    std::vector<NoteRef> notes;
+    for (auto& [path, e] : tags_.notes())
+        if (e.tags.count(lower(from)) && !(is_note() && e.note.path == note_->path)) notes.push_back(e.note);
+    int changed = 0, failed = 0;
+    std::string why;
+    for (auto& n : notes) {
+        std::string text;
+        if (!read_file(n.path, text)) { failed++; continue; }
+        bool crlf = text.find("\r\n") != std::string::npos;
+        std::vector<std::string> lines(1);
+        for (char ch : text) {
+            if (ch == '\r') continue;
+            if (ch == '\n') lines.emplace_back();
+            else lines.back() += ch;
+        }
+        if (!rename_tag(lines, from, to)) continue;
+        std::string outs;
+        for (size_t i = 0; i < lines.size(); i++) outs += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
+        std::string err;
+        if (!atomic_write(n.path, outs, &err)) { failed++; why = err; continue; }
+        changed++;
+    }
+    if (is_note()) {
+        std::vector<std::string> lines = editor_.lines();
+        TextPos c = editor_.cursor();
+        if (rename_tag(lines, from, to, &c)) {
+            editor_.rewrite(lines, c);
+            save();
+            changed++;
+        }
+        tags_.set(*note_, editor_.lines());
+    }
+    refresh_tags(true);
+    std::string done = (merge ? "merged #" + from + " into #" : "renamed #" + from + " to #") + to + " in " +
+                       std::to_string(changed) + (changed == 1 ? " note" : " notes");
+    if (failed) status(done + "; " + std::to_string(failed) + " couldn't be changed" + (why.empty() ? "" : ": " + why), true);
+    else status(done);
 }
 
 void App::draw_status(ImVec2 min, ImVec2 max) {
@@ -2778,6 +3100,7 @@ void App::frame() {
             case ':': return "line: ";
             case '?': return "search " + (palette_.wide() ? std::string("all") : space_) + ": ";
             case '[': return note_ ? "links to " + note_->name + ": " : "links here: ";
+            case '#': return "tags " + (palette_.wide() ? std::string("all") : space_) + ": #";
             case '.':  // a query naming its space ("work/plan") is the whole path
                 if (palette_.text().find('/') != std::string::npos) return "";
                 return palette_.wide() ? "all/" : space_ + "/";

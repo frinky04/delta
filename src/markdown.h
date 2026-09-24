@@ -6,7 +6,10 @@
 #include <string>
 #include <vector>
 
-enum : uint16_t {
+// Per-byte style flags.
+using Style = uint32_t;
+
+enum : Style {
     S_Marker    = 1 << 0,   // syntax characters (#, **, `, [, ](url) ...)
     S_Bold      = 1 << 1,
     S_Italic    = 1 << 2,
@@ -23,6 +26,7 @@ enum : uint16_t {
     S_CodeBlock = 1 << 13,  // fenced code content or the fence itself
     S_Highlight = 1 << 14,  // ==text==
     S_WikiLink  = 1 << 15,  // [[note]]
+    S_Tag       = 1 << 16,  // #tag, its # included (not a marker: the reader keeps it)
 };
 
 // Image: a line holding nothing but ![alt](src). It's shown as the image
@@ -41,13 +45,24 @@ struct LineInfo {
     int content_start = 0;    // first byte after all block markers
 };
 
+// A link, or a #tag (following one lists the notes that have it).
 struct LinkSpan {
-    int begin, end;           // whole link incl. brackets
-    std::string target;
+    int begin, end;           // whole link incl. brackets (a tag's # included)
+    std::string target;       // a tag's name, without the #
     bool wiki;
+    bool tag = false;
 };
 
 bool md_is_fence(const std::string& s);
+// What a tag's name is made of: letters, digits, _ - and /.
+bool md_tag_char(unsigned char c);
+// The tag whose name starts at s[at] (just after a #): where the name ends,
+// or `at` if there's no tag there. A tag stands apart from the word before
+// it and isn't only digits ("#12" is an issue number).
+int md_tag_end(const std::string& s, int at);
+// The [[link]] being written at `col` ("[[pl|" or "[[pl|]]"): where its
+// target begins, or -1 if there's none there. `st` is the line's styles.
+int md_link_word_start(const std::string& s, int col, const std::vector<Style>& st);
 // One image in a line: ![alt](src), where alt may end in a size the way
 // Obsidian writes it, "|300" (width) or "|300x200" (a box to fit in).
 struct ImageRef {
@@ -66,7 +81,7 @@ bool md_image_line(const std::string& s, std::string* alt = nullptr, std::string
 std::string md_image_text(const std::string& alt, const std::string& src, int w, int h = 0);
 // The same image with a different width asked for (0: its own size).
 std::string md_image_resized(const std::string& token, int w);
-void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<uint16_t>& style,
+void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<Style>& style,
                 std::vector<LinkSpan>* links = nullptr);
 
 // Reader view of one line: markers removed, bullets become "•", task boxes
@@ -74,7 +89,7 @@ void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<
 // placeholder is S_TaskBox without S_Marker (in the editor the "[ ]" always
 // carries S_Marker), which is how the layout knows to size it as a box.
 // `map[i]` is the source byte for output byte i.
-void md_reader(const std::string& s, const LineInfo& info, const std::vector<uint16_t>& style,
-               std::string& out, std::vector<uint16_t>& out_style, std::vector<int>& map);
+void md_reader(const std::string& s, const LineInfo& info, const std::vector<Style>& style,
+               std::string& out, std::vector<Style>& out_style, std::vector<int>& map);
 
 float md_heading_scale(int level);

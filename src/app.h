@@ -18,6 +18,7 @@
 #include "palette.h"
 #include "speller.h"
 #include "store.h"
+#include "tags.h"
 
 struct GLFWwindow;
 
@@ -118,6 +119,17 @@ private:
     void open_link(const LinkSpan& link);
     void open_by_name(std::string target);
     void rename_note();
+    // Tags: the index kept fresh (at most every couple of seconds, unless
+    // `now`), completing them and [[links]] as you write, the palette's #
+    // mode, and renaming one in every note.
+    void refresh_tags(bool now);
+    std::vector<CompletionItem> complete_tags(const std::string& word);
+    std::vector<CompletionItem> complete_links(const std::string& word);
+    void build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total);
+    void rename_tag_at_caret();
+    void confirm_tag_rename(const std::string& from, const std::string& to);
+    void apply_tag_rename(const std::string& from, const std::string& to);
+    int notes_tagged(const std::string& tag) const;  // in every space
     void move_note();
     void delete_note();
     void new_space();
@@ -153,7 +165,7 @@ private:
     // The status line as a minibuffer: tools that act on the note in view
     // happen down there, so the note stays in sight. (Choosing from a list,
     // headings included, stays in the palette.)
-    enum class Bar { None, Find, Line, Rename, Fix };
+    enum class Bar { None, Find, Line, Rename, Fix, Tag };
     void open_bar(Bar kind);
     void close_bar();                   // keeps where the tool left you
     void cancel_bar();                  // escape: jumps go back to where you were
@@ -167,6 +179,7 @@ private:
     void draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+    void draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void status(const std::string& msg, bool error = false);
     void poll_files(double now);
     float base_size() const;
@@ -209,6 +222,10 @@ private:
     std::vector<Echo> echo_, echo_shown_;
     float echo_a_ = 0;
     NoteIndex note_index_;                    // where [[links]] can lead
+    TagIndex tags_;                           // which notes have which #tags
+    double tags_time_ = -100;                 // when it was last brought up to date
+    int tags_gen_ = -1;                       // ...for the palette as it opened this time
+    std::string tag_from_;                    // the tag being renamed (Bar::Tag), as written
     double next_problem_check_ = 0;           // a held-back problem shows then
     uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
     bool reader_pref_ = false;                // reader mode to restore after the config or manual

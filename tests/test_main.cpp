@@ -24,6 +24,7 @@
 #include "palette.h"
 #include "keys.h"
 #include "commands.h"
+#include "tags.h"
 
 extern const unsigned char g_font_sans[];
 extern const std::size_t g_font_sans_size;
@@ -98,7 +99,7 @@ static Editor fresh(const std::string& text) {
 
 static void test_markdown() {
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
 
     // Block kinds the editor and reader branch on.
     md_analyze("## Title", false, info, st);
@@ -140,7 +141,7 @@ static void test_markdown() {
     // Reader text drops the syntax, and its map always points back into the
     // source in order (clicks and selections in the reader rely on it).
     std::string out;
-    std::vector<uint16_t> ost;
+    std::vector<Style> ost;
     std::vector<int> map;
     md_analyze("## Hello **world**", false, info, st);
     md_reader("## Hello **world**", info, st, out, ost, map);
@@ -514,11 +515,11 @@ static void test_ini() {
     // The editor indexes the style vector by byte, so it must cover every
     // byte of any line, however malformed, and set it all in mono.
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     std::string short_or_not_mono;
     for (const char* s : {"", "   ", "[", "[x", "]", "=", "= ;", " ; c", "a=b ;c", "[editor] ; c", "k = #12345"}) {
         ini_analyze(s, info, st);
-        bool mono = std::all_of(st.begin(), st.end(), [](uint16_t f) { return (f & S_CodeBlock) != 0; });
+        bool mono = std::all_of(st.begin(), st.end(), [](Style f) { return (f & S_CodeBlock) != 0; });
         if (st.size() != std::string(s).size() || !mono) short_or_not_mono += std::string("[") + s + "] ";
     }
     CHECK_EQ(short_or_not_mono, std::string());
@@ -949,7 +950,7 @@ static void test_image_markdown() {
     CHECK(!md_image_line("![a]()"));
     CHECK(!md_image_line("[a](cat.png)"));
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     md_analyze("![](a.png)", false, info, st);
     CHECK(info.kind == LineKind::Image);
     md_analyze("![](a.png)", true, info, st);
@@ -2376,6 +2377,12 @@ static void test_palette_modes() {
     palette_frame(p);
     CHECK(p.in_mode('?') && p.wide());
 
+    p.open("#");
+    palette_frame(p);
+    palette_frame(p, ImGuiKey_Tab);
+    CHECK(p.in_mode('#') && p.scoped() && p.wide());  // tags widen too
+    palette_frame(p);
+
     palette_frame(p);
 
     p.open("");
@@ -2426,7 +2433,8 @@ static void test_command_search() {
                    {"backlinks", "palette.backlinks"}, {"settings", "config.open"}, {"trash", "note.restore"},
                    {"outline", "palette.headings"}, {"goto line", "palette.line"}, {"spell", "view.spelling"},
                    {"help", "app.manual"}, {"new", "note.new"}, {"find replace", "find.replace"},
-                   {"fullscreen", "view.fullscreen"}, {"tgrm", "view.reader"}}) {
+                   {"fullscreen", "view.fullscreen"}, {"tgrm", "view.reader"}, {"tags", "palette.tags"},
+                   {"rename tag", "note.rename"}}) {
         std::string got = top(c.q);
         if (got != c.want) { CHECK(!"command search"); std::printf("   \"%s\": got %s, want %s\n", c.q, got.c_str(), c.want); }
     }
@@ -2627,6 +2635,280 @@ static void test_config_set() {
     CHECK_EQ(set("[editor]\n", "font", "C:/my ;fonts/a.ttf"), std::string("[editor]\nfont = \"C:/my ;fonts/a.ttf\"\n"));
 }
 
+// #tags: what counts as one, finding and renaming them, the palette's
+// queries, and the index of which notes have which.
+static void test_tags() {
+    LineInfo info;
+    std::vector<Style> st;
+    std::vector<LinkSpan> links;
+    auto tags = [&](const std::string& s) {
+        links.clear();
+        md_analyze(s, false, info, st, &links);
+        std::string out;
+        for (auto& l : links)
+            if (l.tag) out += (out.empty() ? "" : ",") + l.target;
+        return out;
+    };
+    CHECK_EQ(tags("#tag"), std::string("tag"));
+    CHECK_EQ(tags("a #one and #two-three, #a/b."), std::string("one,two-three,a/b"));
+    CHECK_EQ(tags("a#b c&#39; #123 ##x"), std::string());  // in a word, an entity, a number, a run of #
+    CHECK_EQ(tags("#12a #\xC3\xBC" "ber"), std::string("12a,\xC3\xBC" "ber"));
+    CHECK_EQ(tags("`#code` [x](u#frag) https://a.b/#y [[n#h]]"), std::string());
+    CHECK_EQ(tags("## Title #inhead"), std::string("inhead"));
+    CHECK_EQ(tags("- [ ] task #todo"), std::string("todo"));
+    CHECK_EQ(tags("(#paren) #end/"), std::string("paren,end"));
+    md_analyze("# Heading", false, info, st);
+    CHECK(info.kind == LineKind::Heading);
+    // A # on its own isn't a heading yet (it may become a tag); with its space it is.
+    for (const char* s : {"#", "##", "  ###"}) {
+        md_analyze(s, false, info, st);
+        CHECK(info.kind != LineKind::Heading);
+    }
+    md_analyze("## ", false, info, st);
+    CHECK(info.kind == LineKind::Heading && info.level == 2);
+    md_analyze("x #tag", false, info, st);
+    CHECK((st[2] & S_Tag) && (st[3] & S_Tag) && !(st[1] & S_Tag));  // the # is part of it
+    std::string out;
+    std::vector<Style> ost;
+    std::vector<int> map;
+    md_reader("x #tag", info, st, out, ost, map);
+    CHECK_EQ(out, std::string("x #tag"));  // the reader keeps the #: it says what the word is
+
+    // Every tag in a note, code skipped; a note's set keeps the first spelling.
+    auto uses = find_tags({"#a and #B", "```", "#incode", "```", "#b"});
+    CHECK_EQ(uses.size(), (size_t)3);
+    if (uses.size() == 3) CHECK(uses[1].line == 0 && uses[1].col0 == 7 && uses[1].col1 == 9 && uses[1].name == "B");
+    TagSet set = tags_of({"#a and #B", "#b"});
+    CHECK(set.size() == 2 && set["b"] == "B");
+
+    CHECK(check_tag("ok-tag/sub").empty());
+    for (const char* bad : {"", "two words", "123", "a/", "a.b"}) {
+        std::string why = check_tag(bad);
+        CHECK(!why.empty() && in_voice(why));
+    }
+
+    // Renaming: any case, not in code, not another tag it's the start of;
+    // the caret stays with its text.
+    std::vector<std::string> lines = {"#Rust and #rust-lang #rust", "`#rust`", "```", "#rust", "```"};
+    TextPos caret{0, 26};
+    CHECK_EQ(rename_tag(lines, "rust", "language", &caret), 2);
+    CHECK_EQ(lines[0], std::string("#language and #rust-lang #language"));
+    CHECK(lines[1] == "`#rust`" && lines[3] == "#rust");
+    CHECK_EQ(caret.col, 34);
+    caret = {0, 3};  // "#la|nguage"
+    rename_tag(lines, "language", "x", &caret);
+    CHECK_EQ(lines[0], std::string("#x and #rust-lang #x"));
+    CHECK_EQ(caret.col, 2);
+
+    // Where a tag being written starts, for completing it.
+    std::vector<Style> none;
+    CHECK_EQ(tag_word_start("a #ru", 5, none), 3);
+    CHECK_EQ(tag_word_start("a #", 3, none), 3);
+    CHECK_EQ(tag_word_start("a #ru st", 5, none), 3);
+    CHECK_EQ(tag_word_start("a #rust", 5, none), -1);  // not in the middle of one
+    CHECK_EQ(tag_word_start("a#ru", 4, none), -1);
+    CHECK_EQ(tag_word_start("#12", 3, none), -1);
+    CHECK_EQ(tag_word_start("ab", 2, none), -1);
+    md_analyze("`#ru`", false, info, st);
+    CHECK_EQ(tag_word_start("`#ru`", 4, st), -1);
+    // ...and a [[link]]'s target.
+    CHECK_EQ(md_link_word_start("see [[pl", 8, none), 6);
+    CHECK_EQ(md_link_word_start("see [[pl]]", 8, none), 6);
+    CHECK_EQ(md_link_word_start("see [[", 6, none), 6);
+    CHECK_EQ(md_link_word_start("[[a|b", 5, none), -1);
+    CHECK_EQ(md_link_word_start("[[a]] b", 7, none), -1);
+    CHECK_EQ(md_link_word_start("[[plan", 3, none), -1);
+
+    // The palette's queries.
+    TagQuery q = parse_tag_query("");
+    CHECK(q.typing && q.word.empty() && q.want.empty());
+    q = parse_tag_query("rust #idea -#done #dr");
+    CHECK(q.want == std::vector<std::string>({"rust", "idea"}) && q.skip == std::vector<std::string>({"done"}));
+    CHECK(q.typing && !q.typing_skip && q.word == "dr");
+    q = parse_tag_query("Rust ");
+    CHECK(!q.typing && q.want == std::vector<std::string>({"rust"}));
+    q = parse_tag_query("rust -dr");
+    CHECK(q.typing && q.typing_skip && q.word == "dr");
+    TagSet has = {{"rust", "Rust"}, {"idea", "idea"}};
+    CHECK(tag_query_match(parse_tag_query("rust #idea "), has));
+    CHECK(!tag_query_match(parse_tag_query("rust -#idea "), has));
+    CHECK(!tag_query_match(parse_tag_query("rust #done "), has));
+    CHECK(tag_query_match(parse_tag_query("zz"), has));  // nothing finished yet
+    CHECK_EQ(tag_query_fill("ru", "rust"), std::string("rust "));
+    CHECK_EQ(tag_query_fill("rust #id", "idea"), std::string("rust #idea "));
+    CHECK_EQ(tag_query_fill("rust -#do", "done"), std::string("rust -#done "));
+    CHECK_EQ(tag_query_fill("rust ", "idea"), std::string("rust #idea "));
+
+    // The index: read once, again when a note changes, forgotten when it goes.
+    fs::path root = fs::temp_directory_path() / "delta_test_tags";
+    fs::remove_all(root);
+    Store store;
+    store.set_root(root);
+    NoteRef a, b, c;
+    store.create_note("work", "a", "#x #y", a);
+    store.create_note("work", "b", "#y", b);
+    store.create_note("home", "c", "#X", c);
+    TagIndex ix;
+    ix.refresh(store.all_notes());
+    auto with = [&](const std::string& t) {
+        int n = 0;
+        for (auto& [path, e] : ix.notes()) n += e.tags.count(t) ? 1 : 0;
+        return n;
+    };
+    CHECK(ix.notes().size() == 3 && with("x") == 2 && with("y") == 2);
+    std::string err;
+    CHECK(atomic_write(a.path, "#z", &err));
+    ix.refresh(store.all_notes());
+    CHECK(with("x") == 1 && with("z") == 1);
+    fs::remove(c.path);
+    ix.refresh(store.all_notes());
+    CHECK(ix.notes().size() == 2 && with("x") == 0);
+    ix.set(a, {"#w"});  // as it is in the editor
+    CHECK(with("w") == 1 && with("z") == 0);
+    fs::remove_all(root);
+}
+
+// Completion as you type: the list comes up for a word being written, enter
+// takes the pick (unless the word is already exactly that), escape puts it
+// away for that word, and moving off it closes it.
+static void test_completion() {
+    auto source = [](std::vector<std::string> names) {
+        return [names](const std::string& w) {
+            std::vector<CompletionItem> out;
+            for (auto& n : names) {
+                CompletionItem it;
+                int score;
+                if (!fuzzy_match(w, n, score, &it.hl)) continue;
+                it.label = n;
+                it.insert = n;
+                out.push_back(it);
+            }
+            return out;
+        };
+    };
+    Editor ed = fresh("");
+    Completer tag;
+    tag.trigger = tag_word_start;
+    tag.items = source({"rust", "rust-lang", "research", "reading"});
+    tag.lead = 1;
+    ed.add_completer(tag);
+    type(ed, "a #");
+    CHECK(!ed.completing());  // a # alone isn't enough
+    type(ed, "r");
+    CHECK(ed.completing());
+    key(ed, ImGuiKey_DownArrow);
+    key(ed, ImGuiKey_Enter);
+    CHECK_EQ(ed.text(), std::string("a #rust-lang"));
+    CHECK(!ed.completing());
+    // The word as typed, and it's the pick: enter breaks the line.
+    type(ed, " #rust");
+    CHECK(ed.completing());
+    key(ed, ImGuiKey_Enter);
+    CHECK_EQ(ed.text(), std::string("a #rust-lang #rust\n"));
+    CHECK(!ed.completing());
+    // Escape: away until the word's done.
+    type(ed, "#re");
+    CHECK(ed.completing());
+    key(ed, ImGuiKey_Escape);
+    CHECK(!ed.completing());
+    type(ed, "a");
+    CHECK(!ed.completing());
+    type(ed, " #r");
+    CHECK(ed.completing());
+    key(ed, ImGuiKey_LeftArrow);  // moving off the word
+    CHECK(!ed.completing());
+    for (int i = 0; i < 30; i++) frame(ed);
+
+    // Links: the ]] comes with it, or is stepped over if it's there.
+    Editor e2 = fresh("");
+    Completer link;
+    link.trigger = md_link_word_start;
+    link.items = source({"Plan", "work/Other"});
+    link.min_chars = 0;
+    link.close = "]]";
+    e2.add_completer(link);
+    type(e2, "see [[");
+    CHECK(e2.completing());
+    type(e2, "pl");
+    key(e2, ImGuiKey_Enter);
+    CHECK_EQ(e2.text(), std::string("see [[Plan]]"));
+    Editor e3 = fresh("[[]]");
+    e3.add_completer(link);
+    key(e3, ImGuiKey_RightArrow);
+    key(e3, ImGuiKey_RightArrow);
+    CHECK(!e3.completing());  // the caret arriving isn't typing
+    type(e3, "o");
+    CHECK(e3.completing());
+    key(e3, ImGuiKey_Enter);
+    CHECK_EQ(e3.text(), std::string("[[work/Other]]"));
+}
+
+// A palette row that fills the query (a tag, in the # mode) keeps the
+// palette open on the new query; a row that doesn't runs and closes it.
+static void test_palette_fill() {
+    Palette p;
+    std::string built;
+    bool ran = false;
+    auto run = [&](ImGuiKey k, std::function<void()> first = {}) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (k != ImGuiKey_None) io.AddKeyEvent(k, true);
+        io.DisplaySize = ImVec2(1000, 800);
+        io.DeltaTime = 1.0f / 60;
+        ImGui::NewFrame();
+        if (first) first();
+        Palette::Frame f{g_sans, g_sans, 17, 15, 1, 100, 600, 40, 700, 0, io.DeltaTime, Palette::Selection::Marker, 2, false};
+        auto chosen = p.draw(f, [&](const std::string& t, std::vector<PaletteItem>& out, int& total) {
+            built = t;
+            total = 1;
+            PaletteItem it;
+            it.label = "#rust";
+            it.action = [&ran] { ran = true; };
+            if (t == "#ru") it.fill = "#rust ";
+            out.push_back(it);
+        }, [](char) { return std::string(); });
+        ImGui::Render();
+        if (k != ImGuiKey_None) io.AddKeyEvent(k, false);
+        if (chosen) chosen();
+    };
+    p.open("#ru");
+    run(ImGuiKey_None);
+    run(ImGuiKey_Enter);
+    run(ImGuiKey_None);
+    CHECK(p.is_open() && p.in_mode('#') && !ran);
+    CHECK_EQ(built, std::string("#rust "));
+    run(ImGuiKey_Enter);
+    CHECK(ran && !p.is_open());
+    for (int i = 0; i < 30; i++) run(ImGuiKey_None);
+
+    // Asked by an enter (the tag rename's question): that enter isn't the answer.
+    ran = false;
+    PaletteItem yes;
+    yes.label = "yes";
+    yes.action = [&ran] { ran = true; };
+    run(ImGuiKey_Enter, [&] { p.pick("sure? ", {yes}); });
+    CHECK(!ran && p.is_open());
+    run(ImGuiKey_None);  // (a release and a press of one key take a frame each)
+    run(ImGuiKey_Enter);
+    CHECK(ran);
+    for (int i = 0; i < 30; i++) run(ImGuiKey_None);
+
+    // Opened by a click outside it (ctrl+click on a #tag): that click doesn't
+    // close it; the next one does.
+    ImGuiIO& io = ImGui::GetIO();
+    auto click = [&](std::function<void()> first = {}) {
+        io.AddMousePosEvent(950, 750);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        run(ImGuiKey_None, first);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        run(ImGuiKey_None);
+    };
+    click([&] { p.open("#rust "); });
+    CHECK(p.is_open());
+    click();
+    CHECK(!p.is_open());
+    for (int i = 0; i < 30; i++) run(ImGuiKey_None);
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -2679,6 +2961,9 @@ int main() {
     test_sandbox();
     test_config_set();
     test_font_loader();
+    test_tags();
+    test_completion();
+    test_palette_fill();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

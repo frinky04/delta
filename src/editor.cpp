@@ -34,7 +34,7 @@ std::vector<std::string> split_lines(const std::string& text) {
     return out;
 }
 
-bool is_mono(uint16_t f) { return f & (S_Code | S_CodeBlock); }
+bool is_mono(Style f) { return f & (S_Code | S_CodeBlock); }
 
 }  // namespace
 
@@ -69,6 +69,8 @@ void Editor::set_text(const std::string& text) {
     sync_line_ = -1;
     marks_.clear();
     marks_snap_ = true;  // problems set before the first draw arrive with the page
+    comp_.open = false;
+    comp_dismissed_line_ = -1;
 }
 
 void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
@@ -148,7 +150,7 @@ std::vector<Heading> Editor::headings() const {
     }
     bool in_code = false;
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     for (int i = 0; i < (int)lines_.size(); i++) {
         md_analyze(lines_[i], in_code, info, st);
         if (info.kind == LineKind::Fence) in_code = !in_code;
@@ -705,7 +707,7 @@ void Editor::goto_heading(int dir) {
     int col = 0;
     if (syntax_ == Syntax::Markdown) {
         LineInfo info;
-        std::vector<uint16_t> st;
+        std::vector<Style> st;
         md_analyze(lines_[target], in_code_before(target), info, st);
         col = info.content_start;
     }
@@ -749,7 +751,7 @@ void Editor::expand_selection() {
 
     const std::string& s = lines_[a.line];
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     if (syntax_ == Syntax::Markdown) md_analyze(s, in_code_before(a.line), info, st);
     int cs = std::min(info.content_start, (int)s.size()), ce = (int)s.size();
     if (a.line == b.line) {
@@ -822,7 +824,7 @@ bool Editor::link_at_caret(LinkSpan& out) const {
     if (syntax_ != Syntax::Markdown) return false;
     std::vector<LinkSpan> links;
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     md_analyze(lines_[cur_.line], in_code_before(cur_.line), info, st, &links);
     for (auto& l : links)
         if (cur_.col >= l.begin && cur_.col <= l.end) { out = l; return true; }
@@ -845,7 +847,7 @@ void Editor::renumber_lists(int l0, int l1) {
     }
     std::vector<LineInfo> infos(n);
     std::vector<char> have(n, 0);
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     auto info = [&](int k) -> const LineInfo& {
         if (!have[k]) {
             md_analyze(lines_[k], code[k], infos[k], st);
@@ -969,7 +971,7 @@ void Editor::delete_lines() {
 
 void Editor::toggle_task_line(int l) {
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     md_analyze(lines_[l], in_code_before(l), info, st);
     if (info.kind == LineKind::Fence || info.kind == LineKind::CodeBlock || info.kind == LineKind::Heading) return;
     std::string& s = lines_[l];
@@ -1175,12 +1177,12 @@ Editor::Metrics Editor::metrics(float size) const {
 
 // The one place that decides which bytes are set in the bold weight, so
 // measuring and drawing always agree. Syntax characters stay regular.
-bool Editor::bold_of(uint16_t f) const {
+bool Editor::bold_of(Style f) const {
     if (syntax_ == Syntax::Ini) return f & I_Section;
-    return (f & (S_Bold | S_Heading)) && !(f & (S_Marker | S_Code | S_CodeBlock));
+    return (f & (S_Bold | S_Heading | S_Tag)) && !(f & (S_Marker | S_Code | S_CodeBlock));
 }
 
-float Editor::advance(const Metrics& m, unsigned cp, uint16_t f) const {
+float Editor::advance(const Metrics& m, unsigned cp, Style f) const {
     if (cp == '\t') return m.tabw;
     if ((f & S_TaskBox) && !(f & S_Marker)) return std::round(m.sans->Size * 1.3f);  // reader checkbox
     bool b = bold_of(f);
@@ -1188,7 +1190,7 @@ float Editor::advance(const Metrics& m, unsigned cp, uint16_t f) const {
     return font->GetCharAdvance((ImWchar)cp);
 }
 
-float Editor::measure(const std::string& s, const std::vector<uint16_t>& st, int a, int b, const Metrics& m) const {
+float Editor::measure(const std::string& s, const std::vector<Style>& st, int a, int b, const Metrics& m) const {
     float x = 0;
     const char* p = s.data();
     for (int i = a; i < b;) {
@@ -1238,7 +1240,7 @@ void Editor::layout(int mode) {
                 if (L.info.kind == LineKind::Fence) L.row_h = std::round(L.row_h * 0.5f);
             }
             const std::string& t = mode ? L.rtext : s;
-            const std::vector<uint16_t>& st = mode ? L.rstyle : L.style;
+            const std::vector<Style>& st = mode ? L.rstyle : L.style;
 
             Metrics m = metrics(L.size);
 
@@ -1943,7 +1945,7 @@ int Editor::col_at_x(int mode, int line, int row, float x) const {
     // Images have places before, between and after them.
     if (L.img) return img_col_at(L, (int)lines_[line].size(), x, L.tiles[0].y + 1);
     const std::string& s = text_of(mode, line);
-    const std::vector<uint16_t>& st = style_of(mode, line);
+    const std::vector<Style>& st = style_of(mode, line);
     Metrics m = metrics(L.size);
     int a = L.rows[row];
     int b = row + 1 < (int)L.rows.size() ? L.rows[row + 1] : (int)s.size();
@@ -2040,7 +2042,7 @@ TextPos Editor::right_of(TextPos p, bool word) const {
 TextPos Editor::smart_home() const {
     const std::string& s = lines_[cur_.line];
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     md_analyze(s, in_code_before(cur_.line), info, st);
     int first = 0;
     while (first < (int)s.size() && (s[first] == ' ' || s[first] == '\t')) first++;
@@ -2256,7 +2258,7 @@ void Editor::newline() {
     delete_selection();
     const std::string s = lines_[cur_.line];
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     md_analyze(s, in_code_before(cur_.line), info, st);
 
     std::string prefix;
@@ -2313,7 +2315,7 @@ void Editor::backspace(bool word) {
         from = {cur_.line - 1, (int)lines_[cur_.line - 1].size()};
     } else {
         LineInfo info;
-        std::vector<uint16_t> st;
+        std::vector<Style> st;
         md_analyze(s, in_code_before(cur_.line), info, st);
         int lead = 0;
         while (lead < (int)s.size() && s[lead] == ' ') lead++;
@@ -2354,7 +2356,7 @@ void Editor::del(bool word) {
 void Editor::tab() {
     if (picked() >= 0) return;  // (it would replace the image)
     LineInfo info;
-    std::vector<uint16_t> st;
+    std::vector<Style> st;
     md_analyze(lines_[cur_.line], in_code_before(cur_.line), info, st);
     if ((has_selection() && cur_.line != anchor_.line) || (info.list && !has_selection())) {
         indent();
@@ -2369,7 +2371,36 @@ void Editor::tab() {
 void Editor::handle_keys() {
     ImGuiIO& io = ImGui::GetIO();
     bool ctrl = io.KeyCtrl, shift = io.KeyShift, alt = io.KeyAlt;
-    auto K = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
+
+    // The completion list takes the keys it uses while it's up. Enter on the
+    // word exactly as typed takes nothing: the line breaks as usual.
+    ImGuiKey taken[6] = {};
+    int n_taken = 0;
+    if (comp_.open && !ctrl && !alt && !shift && !comp_.items.empty()) {
+        int n = (int)comp_.items.size();
+        auto take = [&](ImGuiKey k) { taken[n_taken++] = k; };
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) { comp_.sel = (comp_.sel + 1) % n; take(ImGuiKey_DownArrow); }
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) { comp_.sel = (comp_.sel - 1 + n) % n; take(ImGuiKey_UpArrow); }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            comp_dismissed_line_ = comp_.line;
+            comp_dismissed_start_ = comp_.start;
+            comp_.open = false;
+            take(ImGuiKey_Escape);
+        }
+        bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+        if (enter && comp_.open) {
+            if (comp_.items[comp_.sel].insert == comp_.word) {
+                comp_.open = false;
+            } else {
+                accept_completion(comp_.sel);
+                take(ImGuiKey_Enter);
+                take(ImGuiKey_KeypadEnter);
+            }
+        }
+    }
+    auto K = [&](ImGuiKey k) {
+        return ImGui::IsKeyPressed(k, true) && std::find(taken, taken + n_taken, k) == taken + n_taken;
+    };
 
     // ctrl+alt+left/right: the image the caret is on swaps places with its
     // neighbour in the row (as alt+up/down moves lines).
@@ -3002,6 +3033,21 @@ void Editor::handle_mouse(bool hovered, bool active, ImVec2 d) {
     ImGuiIO& io = ImGui::GetIO();
     int mode = reader_ ? 1 : 0;
     int line, col;
+    // The completion list: a click takes a choice; anywhere else puts it away.
+    if (comp_.open && hovered) {
+        ImVec2 m = io.MousePos;
+        bool over = m.x >= comp_.box_min.x && m.x < comp_.box_max.x && m.y >= comp_.box_min.y && m.y < comp_.box_max.y;
+        if (over) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            int k = comp_.top + (int)std::floor((m.y - comp_.box_min.y - comp_.pad_y) / std::max(1.0f, comp_.row_h));
+            if (over && k >= 0 && k < (int)comp_.items.size()) {
+                accept_completion(k);
+                return;
+            }
+            comp_.open = false;
+        }
+        if (over) return;
+    }
     if (!reader_ && handle_image_mouse(hovered, d)) return;
 
     // Links: ctrl+click in the editor, plain click in the reader.
@@ -3022,7 +3068,7 @@ void Editor::handle_mouse(bool hovered, bool active, ImVec2 d) {
         if (src_col >= 0) {
             links.clear();
             LineInfo info;
-            std::vector<uint16_t> st;
+            std::vector<Style> st;
             md_analyze(lines_[line], lay_[0].size() == lines_.size() ? lay_[0][line].in_code : in_code_before(line), info, st, &links);
             for (auto& l : links)
                 if (src_col >= l.begin && src_col < l.end) hover_link = &l;
@@ -3099,6 +3145,219 @@ void Editor::handle_mouse(bool hovered, bool active, ImVec2 d) {
 }
 
 // ---------------------------------------------------------------------------
+// Completion
+
+void Editor::update_completion(bool typed) {
+    if (!comp_.open && !typed) return;
+    if (reader_ || has_selection() || lay_[0].size() != lines_.size() || completers_.empty()) {
+        comp_.open = false;
+        return;
+    }
+    const std::string& s = lines_[cur_.line];
+    int src = -1, start = -1;
+    for (int k = 0; k < (int)completers_.size() && src < 0; k++) {
+        const Completer& c = completers_[k];
+        if (c.syntax != syntax_ || !c.trigger || !c.items) continue;
+        int at = c.trigger(s, cur_.col, lay_[0][cur_.line].style);
+        if (at >= 0 && at <= cur_.col) src = k, start = at;
+    }
+    if (src < 0) {
+        comp_.open = false;
+        comp_dismissed_line_ = -1;  // out of the word: escape's is over
+        return;
+    }
+    bool same_word = comp_.open && src == comp_.src && cur_.line == comp_.line && start == comp_.start;
+    // Moving the caret (not typing) never brings it up, nor carries it to another word.
+    if (!typed && !same_word) { comp_.open = false; return; }
+    if (cur_.line == comp_dismissed_line_ && start == comp_dismissed_start_) { comp_.open = false; return; }
+    std::string word = s.substr(start, cur_.col - start);
+    if ((int)word.size() < completers_[src].min_chars) { comp_.open = false; return; }
+    if (same_word && word == comp_.word) return;
+
+    std::vector<CompletionItem> items = completers_[src].items(word);
+    // Nothing to offer, or only what's already there.
+    if (items.empty() || (items.size() == 1 && items[0].insert == word)) { comp_.open = false; return; }
+    std::string keep = comp_.open && comp_.sel < (int)comp_.items.size() ? comp_.items[comp_.sel].label : "";
+    if (!comp_.open) {
+        comp_.a = 0;
+        comp_.top = 0;
+        comp_.sel_y = 0;
+    }
+    comp_.open = true;
+    comp_.src = src;
+    comp_.line = cur_.line;
+    comp_.start = start;
+    comp_.word = word;
+    comp_.items = std::move(items);
+    comp_.sel = 0;
+    for (int k = 0; k < (int)comp_.items.size() && !keep.empty(); k++)
+        if (comp_.items[k].label == keep) { comp_.sel = k; break; }
+}
+
+void Editor::accept_completion(int k) {
+    comp_.open = false;
+    if (k < 0 || k >= (int)comp_.items.size() || comp_.src < 0 || cur_.line != comp_.line || comp_.start > cur_.col) return;
+    const Completer& c = completers_[comp_.src];
+    begin_edit(Edit::Other);
+    unpick();
+    TextPos a{comp_.line, comp_.start};
+    erase(a, cur_);
+    TextPos e = insert(a, comp_.items[k].insert);
+    if (!c.close.empty()) {
+        if (lines_[e.line].compare(e.col, c.close.size(), c.close) == 0) e.col += (int)c.close.size();
+        else e = insert(e, c.close);
+    }
+    cur_ = anchor_ = e;
+    end_edit();
+}
+
+// Under the word, as vim sets it: rows of mono text in a block sunk into
+// the page, the pick's row lit, what the word matched in bold, and a detail
+// beside each; a thumb at the right edge when there are more than fit. The
+// labels line up with the word; above its line when there's no room below.
+void Editor::draw_completion(ImDrawList* dl, float dt) {
+    if (!comp_.open || reader_ || comp_.items.empty() || comp_.line >= (int)lay_[0].size()) return;
+    const Completer& c = completers_[comp_.src];
+    ImFont* font = P_.mono ? P_.mono : P_.sans;
+    ImFont* bold = P_.mono_bold ? P_.mono_bold : font;
+    const float fs = std::round(P_.size * P_.ui_size);
+    auto W = [&](ImFont* f, const std::string& t) { return f->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str()).x; };
+    const float dpi = P_.dpi;
+    const float row_h = std::round(fs * 1.45f), pad_y = 0;  // rows flush with the block: a lit first or last row fills its end
+    const int n = (int)comp_.items.size();
+    const int rows = std::min(n, 8);
+
+    comp_.sel = std::clamp(comp_.sel, 0, n - 1);
+    int top_was = comp_.top;
+    if (comp_.sel < comp_.top) comp_.top = comp_.sel;
+    if (comp_.sel >= comp_.top + rows) comp_.top = comp_.sel - rows + 1;
+    comp_.top = std::clamp(comp_.top, 0, n - rows);
+    comp_.a = anim::approach(comp_.a, 1.0f, 30.0f, dt, 0.01f);
+    // The lit row glides between rows, but the rows scrolling under it
+    // would carry it backwards first: then it's just there.
+    if (comp_.a < 0.05f || comp_.top != top_was) comp_.sel_y = (float)comp_.sel;
+    else comp_.sel_y = anim::approach(comp_.sel_y, (float)comp_.sel, 45.0f, dt, 0.01f);
+
+    // A label as the palette sets it: matched characters in the bold
+    // weight, its first `dim` bytes (a link's "space/") quieter, and cut
+    // short with an ellipsis past `max_w`. Returns the width it takes.
+    const std::string ellipsis = "\xE2\x80\xA6";  // "…"
+    auto label = [&](const CompletionItem& it, float lx, float ly, ImU32 base, ImU32 hl, ImU32 quiet, float max_w,
+                     bool draw) {
+        const std::string& s = it.label;
+        std::vector<char> kind(s.size(), 0);  // 0 plain, 1 matched, 2 quiet
+        for (int k = 0; k < std::min(it.dim, (int)s.size()); k++) kind[k] = 2;
+        for (int b : it.hl)
+            for (int e = utf8::next(s, b), i = b; i < e && i >= 0; i++) kind[i] = 1;
+        auto font_of = [&](size_t i) { return kind[i] == 1 ? bold : font; };
+        float total = 0;
+        for (size_t i = 0; i < s.size(); i = utf8::next(s, (int)i))
+            total += font_of(i)->CalcTextSizeA(fs, FLT_MAX, 0, s.data() + i, s.data() + utf8::next(s, (int)i)).x;
+        size_t cut = s.size();
+        bool cut_short = total > max_w;
+        if (cut_short) {
+            float room = max_w - W(font, ellipsis), w = 0;
+            for (cut = 0; cut < s.size();) {
+                size_t e = utf8::next(s, (int)cut);
+                float cw = font_of(cut)->CalcTextSizeA(fs, FLT_MAX, 0, s.data() + cut, s.data() + e).x;
+                if (w + cw > room) break;
+                w += cw;
+                cut = e;
+            }
+        }
+        if (!draw) return std::min(total, max_w);
+        float x = lx;
+        for (size_t i = 0; i < cut;) {
+            size_t j = i;
+            while (j < cut && kind[j] == kind[i]) j++;
+            ImFont* f = font_of(i);
+            dl->AddText(f, fs, ImVec2(std::round(x), ly), kind[i] == 1 ? hl : kind[i] == 2 ? quiet : base, s.data() + i, s.data() + j);
+            x += f->CalcTextSizeA(fs, FLT_MAX, 0, s.data() + i, s.data() + j).x;
+            i = j;
+        }
+        if (cut_short) {
+            dl->AddText(font, fs, ImVec2(std::round(x), ly), base, ellipsis.c_str());
+            x += W(font, ellipsis);
+        }
+        return x - lx;
+    };
+
+    float label_w = 0, meta_w = 0;
+    for (auto& it : comp_.items) {
+        label_w = std::max(label_w, label(it, 0, 0, 0, 0, 0, FLT_MAX, false));
+        if (!it.meta.empty()) meta_w = std::max(meta_w, W(font, it.meta));
+    }
+    const float gap = W(font, "  ");
+    const float margin = std::round(fs * 0.6f);  // the block's side padding
+    const float h = rows * row_h + pad_y * 2;
+    // The labels' text lines up with the word (a tag's with its #).
+    const Line& L = lay_[0][comp_.line];
+    int lead_col = std::max(0, comp_.start - c.lead);
+    ImVec2 at = pos_xy({comp_.line, lead_col});
+    float row_top = origin_y_ + at.y + yoff_[comp_.line];
+    float lx = std::round(col_x_ + at.x);
+
+    // No further right than the text column (from a word far along its
+    // line, half of it at least): long labels end in "…".
+    const float meta_part = meta_w > 0 ? gap + meta_w : 0;
+    const float room = std::max(col_x_ + P_.column - lx, P_.column * 0.5f) - margin;
+    label_w = std::max(std::min(label_w, room - meta_part), fs * 4);
+    float list_w = label_w + meta_part;
+    lx = std::max(P_.min.x + margin, std::min(lx, P_.max.x - margin - list_w));
+    float space = std::round(2 * dpi);
+    float y = row_top + L.row_h + space;
+    if (y + h > P_.max.y && row_top - space - h >= P_.min.y) y = row_top - space - h;
+    y = std::round(y);
+
+    // A block a shade darker than the page, sunk into it rather than
+    // floating over it, cornered like the caret and the palette's bar.
+    float x0 = std::round(lx - margin), x1 = std::round(lx + list_w + margin);
+    comp_.box_min = ImVec2(x0, y);
+    comp_.box_max = ImVec2(x1, y + h);
+    comp_.row_h = row_h;
+    comp_.pad_y = pad_y;
+    auto col = [&](ImU32 c0) { return fade(col_alpha(c0, comp_.a)); };
+    const float corner = std::round(dpi);
+    ImU32 sunk = col_mix(T.bg, IM_COL32(0, 0, 0, 255), T.dark ? 0.3f : 0.04f);
+    dl->AddRectFilled(comp_.box_min, comp_.box_max, col(sunk), corner);
+
+    dl->PushClipRect(ImVec2(x0, y), ImVec2(x1, y + h), true);
+    const float ty = std::round((row_h - fs) * 0.5f);
+    const float sy = std::round(y + pad_y + (comp_.sel_y - comp_.top) * row_h);
+    dl->AddRectFilled(ImVec2(x0, sy), ImVec2(x1, sy + row_h), col(T.selection), corner);
+    for (int k = comp_.top; k < comp_.top + rows; k++) {
+        const CompletionItem& it = comp_.items[k];
+        float ry = y + pad_y + (k - comp_.top) * row_h;
+        bool on = k == comp_.sel;
+        ImU32 quiet = col(on ? col_mix(T.dim, T.text, 0.45f) : T.dim);
+        label(it, lx, ry + ty, col(on ? T.text : col_mix(T.dim, T.text, 0.55f)), col(on ? T.bright : T.text), quiet, label_w, true);
+        if (!it.meta.empty())
+            dl->AddText(font, fs, ImVec2(lx + label_w + gap + meta_w - W(font, it.meta), ry + ty), quiet, it.meta.c_str());
+    }
+    // More than fit: a thumb flush with the right edge, as long as the
+    // share showing, where the rows showing are.
+    if (n > rows) {
+        float tw = std::max(2.0f, std::round(3 * dpi));
+        float th = std::max(std::round(h * rows / n), std::round(row_h * 0.5f));
+        float tt = std::round(y + (h - th) * comp_.top / (n - rows));
+        dl->AddRectFilled(ImVec2(x1 - tw, tt), ImVec2(x1, tt + th), col(T.faint), corner);
+    }
+    dl->PopClipRect();
+}
+
+void Editor::rewrite(const std::vector<std::string>& lines, TextPos cur) {
+    std::vector<std::string> before = lines_;
+    begin_edit(Edit::Other);
+    lines_ = lines.empty() ? std::vector<std::string>{""} : lines;
+    cur_ = anchor_ = cur;
+    clamp(cur_);
+    anchor_ = cur_;
+    last_edit_ = Edit::None;
+    end_edit(false);
+    pulse_changes(before);
+}
+
+// ---------------------------------------------------------------------------
 // Drawing
 
 ImU32 Editor::fade(ImU32 c) const { return col_alpha(c, P_.alpha); }
@@ -3169,6 +3428,9 @@ void Editor::draw(const EditorParams& p) {
         if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
     }
     settle_on_images();
+    // The completion list follows typing; it goes while the keys are elsewhere.
+    if (!p.keyboard) comp_.open = false;
+    else update_completion(version_ != before && (last_edit_ == Edit::Type || last_edit_ == Edit::Delete));
 
     animate_layout(dt);
 
@@ -3449,7 +3711,7 @@ void Editor::draw(const EditorParams& p) {
             // settled, so it stays readable.
             bool settled = caret_.settled();
             if (block && settled && p.keyboard && cur_.col < (int)line.size() && line[cur_.col] != '\t') {
-                uint16_t f = L.style[cur_.col];
+                Style f = L.style[cur_.col];
                 bool mono = is_mono(f), bold = bold_of(f);
                 ImFont* bold_font = mono ? p.mono_bold : p.sans_bold;
                 ImFont* font = bold && bold_font ? bold_font : (mono ? p.mono : p.sans);
@@ -3462,6 +3724,7 @@ void Editor::draw(const EditorParams& p) {
             }
         }
     }
+    draw_completion(dl, dt);
 
     }  // !morphing
 
@@ -3542,7 +3805,7 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
     // same-style text) snap to whole pixels, glyphs inside sit at fractional
     // offsets. Matching that exactly means a word that doesn't move sits on
     // the same pixel before, during and after the morph.
-    auto glyph_x = [&](const Line& L, const std::string& s, const std::vector<uint16_t>& st, const Metrics& m, int r, int k) {
+    auto glyph_x = [&](const Line& L, const std::string& s, const std::vector<Style>& st, const Metrics& m, int r, int k) {
         int rs = L.rows[r];
         int s0 = k;
         while (s0 > rs && st[s0 - 1] == st[k] && (s[s0 - 1] == '\t') == (s[k] == '\t')) s0--;
@@ -3608,11 +3871,11 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
         // the editor to its reader position. Runs break at spaces, row ends
         // and wherever the mapping to source jumps (removed syntax).
         std::vector<char> covered(src.size(), 0);
-        auto is_deco = [&](uint16_t f) {
+        auto is_deco = [&](Style f) {
             return (f & (S_TaskBox | S_QuoteMark)) || ((f & S_ListMark) && L0.info.list && !L0.info.ordered);
         };
         for (int k = 0; k < (int)rt.size();) {
-            uint16_t f = L1.rstyle[k];
+            Style f = L1.rstyle[k];
             int r1 = row_of(L1, k);
             int r1_end = r1 + 1 < (int)L1.rows.size() ? L1.rows[r1 + 1] : (int)rt.size();
             bool deco = is_deco(f);
@@ -3826,7 +4089,7 @@ void Editor::draw_line(ImDrawList* dl, int mode, int i, float x0, float y0) {
 // number, or -1 for a ghost (no line number or problems). `shown_h` is how
 // much of its height has opened: a row fades in only once its room is there.
 void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::string& s,
-                            const std::vector<uint16_t>& st, float y, int index, float x0, float shown_h) {
+                            const std::vector<Style>& st, float y, int index, float x0, float shown_h) {
     const int i = index;
     line_mark_a_ = i < 0 ? 0.25f
                  : mode == 0 && syntax_ == Syntax::Markdown && i < (int)mark_a_.size() ? mark_a_[i] : 1.0f;
@@ -3971,7 +4234,7 @@ struct Look {
     bool bold = false, italic = false, strike = false, underline = false;
 };
 
-Look resolve(uint16_t f, const LineInfo& info, bool reader) {
+Look resolve(Style f, const LineInfo& info, bool reader) {
     Look k{T.text};
     if (f & S_Heading) { k.col = T.bright; k.bold = true; }
     if (f & S_Quote) { k.col = col_mix(T.text, T.dim, 0.35f); k.italic = true; }
@@ -3982,6 +4245,9 @@ Look resolve(uint16_t f, const LineInfo& info, bool reader) {
     // Structural markers (bullets, >, [ ]) sit one step above other syntax.
     ImU32 structural = col_mix(T.dim, T.text, 0.45f);
     if (f & (S_Link | S_WikiLink)) { k.col = T.bright; k.underline = true; }
+    // A tag is one token, # and all: bold, a step quieter than the text
+    // around it (it says what the note is, not what it says).
+    if (f & S_Tag) { k.col = col_mix(T.text, T.dim, 0.4f); k.bold = true; }
     if (f & (S_Code | S_CodeBlock)) { k.col = T.code; k.bold = k.italic = false; }
     if (f & S_TaskDone) { k.col = T.dim; k.strike = !(f & S_Marker); }
     if (f & S_ListMark) k.col = structural;
@@ -3997,7 +4263,7 @@ Look resolve(uint16_t f, const LineInfo& info, bool reader) {
 
 // delta.ini: sections stand out, values read brighter than their keys,
 // syntax and comments step back.
-Look resolve_ini(uint16_t f) {
+Look resolve_ini(Style f) {
     Look k{T.text};
     if (f & I_Comment) k.col = T.dim;
     else if (f & I_Section) { k.col = T.bright; k.bold = true; }
@@ -4024,7 +4290,7 @@ void put_text(ImDrawList* dl, ImFont* font, float size, float x, float y, ImU32 
 }  // namespace
 
 void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m, const std::string& s,
-                      const std::vector<uint16_t>& st, int a, int b, float x0, float ry) {
+                      const std::vector<Style>& st, int a, int b, float x0, float ry) {
     const char* p = s.data();
     float ty = ry + (L.row_h - L.size) * 0.5f;
     float mono_ty = ty + m.mono_dy;
@@ -4035,12 +4301,12 @@ void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m,
         float x = x0;
         int i = a;
         while (i < b) {
-            uint16_t f = st[i];
+            Style f = st[i];
             int key = (f & S_Code) ? 1 : (f & S_Highlight) ? 2 : 0;
             float w = 0;
             int j = i;
             while (j < b) {
-                uint16_t g = st[j];
+                Style g = st[j];
                 int k2 = (g & S_Code) ? 1 : (g & S_Highlight) ? 2 : 0;
                 if (k2 != key) break;
                 int len;
@@ -4063,7 +4329,7 @@ void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m,
     float x = x0;
     int i = a;
     while (i < b) {
-        uint16_t f = st[i];
+        Style f = st[i];
         int j = i;
         float w = 0;
         bool tab = s[i] == '\t';

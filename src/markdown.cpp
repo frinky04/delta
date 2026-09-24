@@ -26,6 +26,38 @@ bool md_is_fence(const std::string& s) {
     return s.compare(i, 3, "```") == 0 || s.compare(i, 3, "~~~") == 0;
 }
 
+bool md_tag_char(unsigned char c) { return std::isalnum(c) || c == '_' || c == '-' || c == '/' || c >= 0x80; }
+
+int md_tag_end(const std::string& s, int at) {
+    const int n = (int)s.size();
+    if (at < 1 || at > n || s[at - 1] != '#') return at;
+    // Not a word's #, a run of #s or an html entity (&#39;).
+    if (at >= 2) {
+        unsigned char b = (unsigned char)s[at - 2];
+        if (is_word(b) || b == '#' || b == '&') return at;
+    }
+    int e = at;
+    while (e < n && md_tag_char((unsigned char)s[e])) e++;
+    while (e > at && s[e - 1] == '/') e--;  // "#a/" ends a sentence, not a path
+    for (int k = at; k < e; k++)
+        if (std::isalpha((unsigned char)s[k]) || (unsigned char)s[k] >= 0x80) return e;
+    return at;
+}
+
+int md_link_word_start(const std::string& s, int col, const std::vector<Style>& st) {
+    const int n = (int)s.size();
+    if (col < 2 || col > n) return -1;
+    size_t open = s.rfind("[[", (size_t)col - 2);
+    if (open == std::string::npos) return -1;
+    int from = (int)open + 2;
+    // Still in the target: not past its end, an |alias or a #heading.
+    if (s.substr(from, col - from).find_first_of("[]|#") != std::string::npos) return -1;
+    if (open < st.size() && (st[open] & (S_Code | S_CodeBlock))) return -1;
+    // At the end of what's typed so far.
+    if (col < n && s.compare(col, 2, "]]") != 0 && !is_ws(s[col])) return -1;
+    return from;
+}
+
 // One ![alt](src) starting at s[a]; sets `end` past its ")".
 static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
     size_t n = s.size();
@@ -145,11 +177,11 @@ static bool is_rule(const std::string& s) {
     return count >= 3;
 }
 
-static void mark(std::vector<uint16_t>& st, size_t a, size_t b, uint16_t f) {
+static void mark(std::vector<Style>& st, size_t a, size_t b, Style f) {
     for (size_t i = a; i < b && i < st.size(); i++) st[i] |= f;
 }
 
-static void inline_parse(const std::string& s, size_t from, std::vector<uint16_t>& st, std::vector<LinkSpan>* links) {
+static void inline_parse(const std::string& s, size_t from, std::vector<Style>& st, std::vector<LinkSpan>* links) {
     const size_t n = s.size();
     std::vector<char> used(n, 0);
     auto use = [&](size_t a, size_t b) { for (size_t i = a; i < b && i < n; i++) used[i] = 1; };
@@ -229,8 +261,19 @@ static void inline_parse(const std::string& s, size_t from, std::vector<uint16_t
         i = e;
     }
 
+    // #tags: after links, so a url's #fragment isn't one.
+    for (size_t i = from; i + 1 < n; i++) {
+        if (used[i] || s[i] != '#') continue;
+        size_t e = (size_t)md_tag_end(s, (int)i + 1);
+        if (e == i + 1 || any_used(i, e)) continue;
+        mark(st, i, e, S_Tag);
+        if (links) links->push_back({(int)i, (int)e, s.substr(i + 1, e - i - 1), false, true});
+        use(i, e);
+        i = e - 1;
+    }
+
     // Emphasis. Longer delimiters first so ** isn't eaten as two *s.
-    struct Delim { const char* d; size_t len; uint16_t flag; bool intraword_ok; };
+    struct Delim { const char* d; size_t len; Style flag; bool intraword_ok; };
     static const Delim delims[] = {
         {"**", 2, S_Bold, true}, {"__", 2, S_Bold, false}, {"~~", 2, S_Strike, true},
         {"==", 2, S_Highlight, true}, {"*", 1, S_Italic, true}, {"_", 1, S_Italic, false},
@@ -261,7 +304,7 @@ static void inline_parse(const std::string& s, size_t from, std::vector<uint16_t
     }
 }
 
-void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<uint16_t>& st, std::vector<LinkSpan>* links) {
+void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<Style>& st, std::vector<LinkSpan>* links) {
     const size_t n = s.size();
     st.assign(n, 0);
     info = LineInfo{};
@@ -294,10 +337,11 @@ void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<
     if (i <= 3 && s[i] == '#') {
         size_t j = i;
         while (j < n && s[j] == '#') j++;
-        if (j - i <= 6 && (j == n || s[j] == ' ')) {
+        // Only once a space follows: a # just typed may be a #tag's.
+        if (j - i <= 6 && j < n && s[j] == ' ') {
             info.kind = LineKind::Heading;
             info.level = (int)(j - i);
-            size_t content = j < n ? j + 1 : n;
+            size_t content = j + 1;
             mark(st, 0, n, S_Heading);
             mark(st, 0, content, S_Marker);
             info.content_start = info.marker_begin = (int)content;
@@ -348,10 +392,10 @@ void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<
     inline_parse(s, info.content_start, st, links);
 }
 
-void md_reader(const std::string& s, const LineInfo& info, const std::vector<uint16_t>& st,
-               std::string& out, std::vector<uint16_t>& ost, std::vector<int>& map) {
+void md_reader(const std::string& s, const LineInfo& info, const std::vector<Style>& st,
+               std::string& out, std::vector<Style>& ost, std::vector<int>& map) {
     out.clear(); ost.clear(); map.clear();
-    auto emit = [&](const char* text, uint16_t style, int src) {
+    auto emit = [&](const char* text, Style style, int src) {
         for (const char* c = text; *c; c++) { out += *c; ost.push_back(style); map.push_back(src); }
     };
     if (info.kind == LineKind::Fence || info.kind == LineKind::Rule || info.kind == LineKind::Image) return;
@@ -362,8 +406,8 @@ void md_reader(const std::string& s, const LineInfo& info, const std::vector<uin
     }
     const int n = (int)s.size();
     for (int i = 0; i < n;) {
-        uint16_t f = st[i];
-        auto run_end = [&](uint16_t flag) { int j = i; while (j < n && (st[j] & flag)) j++; return j; };
+        Style f = st[i];
+        auto run_end = [&](Style flag) { int j = i; while (j < n && (st[j] & flag)) j++; return j; };
         if (f & S_QuoteMark) {
             emit("  ", S_QuoteMark, i);  // bar is drawn over this gap
             i = run_end(S_QuoteMark);

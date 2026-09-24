@@ -10,7 +10,7 @@
 
 #include "markdown.h"
 
-enum : uint16_t {
+enum : Style {
     I_Comment = 1 << 1,
     I_Section = 1 << 2,   // name inside [ ]
     I_Key     = 1 << 4,
@@ -20,7 +20,7 @@ enum : uint16_t {
     I_Bracket = 1 << 9,
 };
 
-void ini_analyze(const std::string& s, LineInfo& info, std::vector<uint16_t>& style);
+void ini_analyze(const std::string& s, LineInfo& info, std::vector<Style>& style);
 
 // "[name]" lines, for the @ palette.
 bool ini_section(const std::string& s, std::string& name);
