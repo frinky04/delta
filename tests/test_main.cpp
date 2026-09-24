@@ -636,35 +636,114 @@ struct FakeImages : ImageSource {
     }
 };
 
-static void test_images() {
-    // What counts as an image line.
+// Every image src in a document, sorted: an edit or move must neither lose
+// nor duplicate one.
+static std::vector<std::string> image_srcs(const std::string& text) {
+    std::vector<std::string> out;
+    for (size_t at = 0; at <= text.size();) {
+        size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        std::vector<ImageRef> refs;
+        if (md_image_row(text.substr(at, nl - at), &refs))
+            for (auto& r : refs) out.push_back(r.src);
+        at = nl + 1;
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// Every line holding an image is still a whole image line: no token cut in
+// half, none run into text or into its neighbour.
+static bool image_lines_valid(const std::string& text) {
+    for (size_t at = 0; at <= text.size();) {
+        size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        std::string line = text.substr(at, nl - at);
+        if (line.find("![") != std::string::npos && !md_image_row(line)) return false;
+        at = nl + 1;
+    }
+    return true;
+}
+
+static ImVec2 mid(ImVec2 a, ImVec2 b) { return ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f); }
+
+// Press at `from`, drag to `to` and let go (or press escape first), then let
+// any landing settle and move the pointer away.
+static void drag(Editor& ed, ImVec2 from, ImVec2 to, bool escape = false) {
+    ImGuiIO& io = ImGui::GetIO();
+    auto at = [&](ImVec2 p, bool down) {
+        io.AddMousePosEvent(p.x, p.y);
+        io.AddMouseButtonEvent(0, down);
+        frame(ed);
+    };
+    at(from, false);
+    at(from, false);
+    at(from, true);
+    for (int k = 1; k <= 6; k++) at(ImVec2(from.x + (to.x - from.x) * k / 6, from.y + (to.y - from.y) * k / 6), true);
+    if (escape) {
+        io.AddKeyEvent(ImGuiKey_Escape, true);
+        frame(ed);
+        io.AddKeyEvent(ImGuiKey_Escape, false);
+    }
+    at(to, false);
+    for (int k = 0; k < 30; k++) frame(ed);
+    io.AddMousePosEvent(-1, -1);
+    frame(ed);
+}
+
+static void click(Editor& ed, ImVec2 p) {
+    ImGuiIO& io = ImGui::GetIO();
+    for (bool down : {false, true, false}) {
+        io.AddMousePosEvent(p.x, p.y);
+        io.AddMouseButtonEvent(0, down);
+        frame(ed);
+    }
+}
+
+static void test_image_markdown() {
+    // What counts as an image line, and the src a note's link resolves from.
     std::string alt, src;
-    CHECK(md_image_line("![a cat](cat.png)", &alt, &src));
-    CHECK_EQ(alt, std::string("a cat"));
-    CHECK_EQ(src, std::string("cat.png"));
-    CHECK(md_image_line("  ![](../.delta/images/ab12.png)  ", &alt, &src));
-    CHECK_EQ(src, std::string("../.delta/images/ab12.png"));
-    CHECK(md_image_line("![x](<my pics/cat 1.png> \"title\")", &alt, &src));
-    CHECK_EQ(src, std::string("my pics/cat 1.png"));
-    CHECK(md_image_line("![x](cat.png \"a title\")", &alt, &src));
-    CHECK_EQ(src, std::string("cat.png"));
-    CHECK(md_image_line("![[nested] alt](cat.png)", &alt, &src));
-    CHECK_EQ(alt, std::string("[nested] alt"));
-    CHECK(!md_image_line("see ![a](cat.png)"));        // text around it: stays text
+    CHECK(md_image_line("![a cat](cat.png)", &alt, &src) && alt == "a cat" && src == "cat.png");
+    CHECK(md_image_line("  ![](../.delta/images/ab12.png)  ", nullptr, &src) && src == "../.delta/images/ab12.png");
+    CHECK(md_image_line("![x](<my pics/cat 1.png> \"title\")", nullptr, &src) && src == "my pics/cat 1.png");
+    CHECK(md_image_line("![[nested] alt](cat.png)", &alt, &src) && alt == "[nested] alt" && src == "cat.png");
+    // Anything else stays text.
+    CHECK(!md_image_line("see ![a](cat.png)"));
     CHECK(!md_image_line("![a](cat.png) more"));
     CHECK(!md_image_line("![a]()"));
-    CHECK(!md_image_line("[a](cat.png)"));             // a link, not an image
+    CHECK(!md_image_line("[a](cat.png)"));
     LineInfo info;
     std::vector<uint16_t> st;
     md_analyze("![](a.png)", false, info, st);
     CHECK(info.kind == LineKind::Image);
     md_analyze("![](a.png)", true, info, st);
-    CHECK(info.kind == LineKind::CodeBlock);           // not inside code
+    CHECK(info.kind == LineKind::CodeBlock);  // not inside code
 
-    // Hashes, the store, and finding images from a note.
-    CHECK_EQ(sha256_hex(""), std::string("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    // Rows: images separated by spaces; sizes the way Obsidian writes them.
+    std::vector<ImageRef> refs;
+    CHECK(md_image_row("![](a.png) ![](b.png)  ![x](<c d.png>)", &refs) && refs.size() == 3 &&
+          refs[0].src == "a.png" && refs[1].src == "b.png" && refs[2].src == "c d.png");
+    CHECK(!md_image_row("![](a.png)![](b.png)"));
+    CHECK(!md_image_row("![](a.png) and ![](b.png)"));
+    CHECK(md_image_row("![cat|300](a.png)", &refs) && refs[0].alt == "cat" && refs[0].w == 300 && refs[0].h == 0);
+    CHECK(md_image_row("![|300x200](a.png)", &refs) && refs[0].w == 300 && refs[0].h == 200);
+    CHECK(md_image_row("![a|b](a.png)", &refs) && refs[0].alt == "a|b" && refs[0].w == 0);  // not a size
+
+    // What the editor writes parses back to the same image; resizing keeps
+    // alt, src and title and only changes the size.
+    for (int w : {0, 120}) {
+        std::string t = md_image_text("my cat", "my pics/cat 1.png", w);
+        CHECK(md_image_row(t, &refs) && refs.size() == 1 && refs[0].alt == "my cat" &&
+              refs[0].src == "my pics/cat 1.png" && refs[0].w == w);
+    }
+    CHECK_EQ(md_image_resized("![cat|300](a.png \"t\")", 120), std::string("![cat|120](a.png \"t\")"));
+    CHECK_EQ(md_image_resized("![cat|300](a.png)", 0), std::string("![cat](a.png)"));
+}
+
+static void test_image_store() {
     CHECK_EQ(sha256_hex("abc"), std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
-    CHECK_EQ(sha256_hex(std::string(1000, 'a')).substr(0, 16), std::string("41edece42d63e8d9"));
+    CHECK_EQ(sha256_hex(std::string(1000, 'a')).substr(0, 16), std::string("41edece42d63e8d9"));  // several blocks
+
     fs::path root = fs::temp_directory_path() / "delta_test_images";
     std::error_code ec;
     fs::remove_all(root, ec);
@@ -674,35 +753,63 @@ static void test_images() {
     std::string err;
     std::string link = store.add("fake png bytes", "PNG", &err);
     CHECK(err.empty());
-    CHECK_EQ(link, "../.delta/images/" + sha256_hex("fake png bytes").substr(0, 32) + ".png");
-    CHECK_EQ(store.add("fake png bytes", "png"), link);  // same bytes, same file
+    // A relative link into the hidden store, which from any space's folder
+    // finds the stored bytes.
+    CHECK(link.rfind("../.delta/images/", 0) == 0);
+    std::string back;
+    CHECK(read_file(resolve_image(root / "space", link), back) && back == "fake png bytes");
+    // Named by content: the same bytes are one file, other bytes another.
+    CHECK_EQ(store.add("fake png bytes", "png"), link);
     CHECK(store.add("other bytes", "png") != link);
     int files = 0;
     for (auto& f : fs::directory_iterator(store.dir())) { (void)f; files++; }
     CHECK_EQ(files, 2);
-    fs::path note_dir = root / "space";
-    CHECK(resolve_image(note_dir, link) == (root / ".delta" / "images" / link.substr(17)).lexically_normal());
-    CHECK(resolve_image(note_dir, "https://example.com/a.png").empty());
-    CHECK(resolve_image(note_dir, "my%20cat.png") == (note_dir / "my cat.png").lexically_normal());
     fs::remove_all(root, ec);
 
-    // Downscaling averages: a 2x2 checker of black and white becomes grey,
-    // and a transparent pixel's colour doesn't bleed in.
-    const uint8_t px[] = {0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255};
+    fs::path note_dir = root / "space";
+    CHECK(resolve_image(note_dir, "https://example.com/a.png").empty());  // never fetched from the web
+    CHECK(resolve_image(note_dir, "my%20cat.png") == (note_dir / "my cat.png").lexically_normal());
+}
+
+static void test_image_codecs() {
+    // Clipboard formats: PNG and bitmaps round-trip exactly; formats are told apart.
+    std::vector<uint8_t> px = {255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 10, 20, 30, 0, 1, 2, 3, 255, 9, 9, 9, 9};  // 3x2
+    std::string png = encode_png(px, 3, 2);
+    CHECK_EQ(image_ext(png), std::string("png"));
+    CHECK(image_ext("not an image").empty());
+    std::vector<uint8_t> back;
+    int w = 0, h = 0;
+    CHECK(image_decode_bytes(png, back, w, h) && w == 3 && h == 2 && back == px);
+    CHECK(dib_to_rgba(rgba_to_dib(px, 3, 2), back, w, h) && w == 3 && h == 2 && back == px);
+    // A 32-bit bitmap whose fourth byte is all zero is opaque, not invisible.
+    std::vector<uint8_t> clear = px;
+    for (size_t i = 3; i < clear.size(); i += 4) clear[i] = 0;
+    CHECK(dib_to_rgba(rgba_to_dib(clear, 3, 2), back, w, h) && back[3] == 255 && back[0] == 255);
+
+    // Downscaling averages: a black and white checker becomes grey, and a
+    // transparent pixel's colour doesn't bleed in.
+    const uint8_t checker[] = {0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255};
     std::vector<uint8_t> out;
-    resample_rgba(px, 2, 2, 1, 1, out);
+    resample_rgba(checker, 2, 2, 1, 1, out);
     CHECK(std::abs(out[0] - 128) <= 1 && out[3] == 255);
-    const uint8_t half[] = {200, 0, 0, 255, 0, 255, 0, 0};  // red, and a transparent "green"
+    const uint8_t half[] = {200, 0, 0, 255, 0, 255, 0, 0};
     resample_rgba(half, 2, 1, 1, 1, out);
     CHECK(out[0] == 200 && out[1] == 0 && std::abs(out[3] - 128) <= 1);
+}
 
-    // In the editor: the caret never rests on an image; arrows pick it whole.
+static bool picked(Editor& e, int line, int tile = 0) {
+    int t = -1;
+    return e.has_selection() && e.image_for_caret(&t) == line && t == tile;
+}
+
+// One image on a line of its own: an object the caret steps over and edits
+// act on whole, never a half-deleted ![...](...).
+static void test_image_editing() {
     FakeImages fake;
     g_images = &fake;
     Editor ed = fresh("para\n![](a.png)\nafter");
     ed.select_range({0, 4}, {0, 4});
     frame(ed);
-    auto picked = [](Editor& e, int line) { return e.has_selection() && e.image_for_caret() == line; };
     key(ed, ImGuiKey_RightArrow);
     CHECK(picked(ed, 1));
     key(ed, ImGuiKey_RightArrow);
@@ -711,14 +818,7 @@ static void test_images() {
     CHECK(picked(ed, 1));
     key(ed, ImGuiKey_LeftArrow);
     CHECK(!ed.has_selection() && ed.cursor().line == 0 && ed.cursor().col == 4);
-    key(ed, ImGuiKey_DownArrow);
-    CHECK(picked(ed, 1));
-    key(ed, ImGuiKey_DownArrow);
-    CHECK(!ed.has_selection() && ed.cursor().line == 2);
-    CHECK_EQ(ed.word_count(), 2);  // the image isn't words
-
-    // A caret put on its line (a click beside it, a jump) picks it.
-    ed.select_range({1, 0}, {1, 0});
+    ed.select_range({1, 0}, {1, 0});  // a click beside it, a jump
     frame(ed);
     CHECK(picked(ed, 1));
 
@@ -732,373 +832,264 @@ static void test_images() {
     frame(ed);
     key(ed, ImGuiKey_Enter);
     CHECK_EQ(ed.text(), std::string("para\n![](a.png)\n\nx\nafter"));
-    CHECK(!ed.has_selection() && ed.cursor().line == 2 && ed.cursor().col == 0);
 
-    // Backspace on an empty line below takes the line and picks the image;
-    // the next one removes it (its line is left empty); undo brings it back.
+    // Backspace on the empty line below takes the line and picks the image;
+    // the next removes the image whole; undo brings it back.
     key(ed, ImGuiKey_Backspace);
     CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
     CHECK(picked(ed, 1));
     key(ed, ImGuiKey_Backspace);
     CHECK_EQ(ed.text(), std::string("para\n\nx\nafter"));
-    CHECK(!ed.has_selection() && ed.cursor().line == 1);
     ed.undo();
     CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
-    // Below it on a line with text, backspace just picks it.
+    // From a line with text below it, backspace only picks it.
     ed.select_range({2, 0}, {2, 0});
     frame(ed);
     key(ed, ImGuiKey_Backspace);
     CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
     CHECK(picked(ed, 1));
+    // Delete on a picked image removes it whole.
+    key(ed, ImGuiKey_Delete);
+    CHECK_EQ(ed.text(), std::string("para\n\nx\nafter"));
 
-    // Delete on a picked image removes it too; from an empty line above,
-    // that line goes and the image is picked.
-    Editor e2 = fresh("![](a.png)");
-    e2.select_range({0, 0}, {0, 0});
-    frame(e2);
-    key(e2, ImGuiKey_Delete);
-    CHECK_EQ(e2.text(), std::string(""));
-    Editor e3 = fresh("\n![](a.png)");
-    e3.select_range({0, 0}, {0, 0});
-    frame(e3);
-    key(e3, ImGuiKey_Delete);
-    CHECK_EQ(e3.text(), std::string("![](a.png)"));
-    CHECK(picked(e3, 0));
+    // Cut and paste carry it whole to another line.
+    Editor cp = fresh("![](a.png)\ntext\n");
+    cp.select_range({0, 0}, {0, 0});
+    frame(cp);
+    cp.cut();
+    frame(cp);
+    CHECK(image_srcs(cp.text()).empty());
+    cp.select_range({2, 0}, {2, 0});
+    frame(cp);
+    cp.paste();
+    frame(cp);
+    CHECK_EQ(cp.text(), std::string("\ntext\n![](a.png)"));
+    // Copy leaves it and pastes a second one.
+    cp.select_range({2, 0}, {2, 0});
+    frame(cp);
+    cp.copy();
+    cp.select_range({0, 0}, {0, 0});
+    frame(cp);
+    cp.paste();
+    frame(cp);
+    CHECK(image_srcs(cp.text()) == std::vector<std::string>({"a.png", "a.png"}) && image_lines_valid(cp.text()));
 
     // An image that can't be shown stays ordinary text.
-    Editor e4 = fresh("![](missing.png)");
-    e4.select_range({0, 0}, {0, 0});
-    frame(e4);
-    key(e4, ImGuiKey_RightArrow);
-    CHECK_EQ(e4.cursor().col, 1);
+    Editor missing = fresh("![](missing.png)");
+    missing.select_range({0, 0}, {0, 0});
+    frame(missing);
+    key(missing, ImGuiKey_RightArrow);
+    CHECK(!missing.has_selection() && missing.cursor().col == 1);
 
-    // Pasted or dropped images arrive as whole lines: onto an empty line,
-    // after the caret's line, or splitting it; one undo takes them back.
-    Editor e5 = fresh("one\n\nthree");
-    e5.select_range({1, 0}, {1, 0});
-    frame(e5);
-    e5.insert_lines({"![](a.png)", "![](b.png)"});
-    CHECK_EQ(e5.text(), std::string("one\n![](a.png)\n![](b.png)\nthree"));
-    CHECK(e5.cursor().line == 2 && e5.cursor().col == (int)std::string("![](b.png)").size());
-    e5.undo();
-    CHECK_EQ(e5.text(), std::string("one\n\nthree"));
-    e5.select_range({0, 2}, {0, 2});  // mid-word: the line splits around it
-    frame(e5);
-    e5.insert_lines({"![](a.png)"});
-    CHECK_EQ(e5.text(), std::string("on\n![](a.png)\ne\n\nthree"));
-    e5.select_range({4, 5}, {4, 5});
-    frame(e5);
-    e5.insert_lines({"![](c.png)"});
-    CHECK_EQ(e5.text(), std::string("on\n![](a.png)\ne\n\nthree\n![](c.png)"));
-    frame(e5);
-    CHECK_EQ(e5.image_for_caret(), 5);  // the caret is left beside it
-    CHECK_EQ(e5.image_src(5), std::string("c.png"));
-    e5.select_range({5, 0}, {5, 10});
-    frame(e5);
-    CHECK_EQ(e5.image_for_caret(), 5);  // a selection of exactly the image
-    e5.select_range({4, 0}, {5, 10});
-    frame(e5);
-    CHECK_EQ(e5.image_for_caret(), -1);
+    // Pasted or dropped images arrive as whole lines: onto an empty line, or
+    // splitting the caret's line; one undo takes them back.
+    Editor ins = fresh("one\n\nthree");
+    ins.select_range({1, 0}, {1, 0});
+    frame(ins);
+    ins.insert_lines({"![](a.png)", "![](b.png)"});
+    CHECK_EQ(ins.text(), std::string("one\n![](a.png)\n![](b.png)\nthree"));
+    ins.undo();
+    CHECK_EQ(ins.text(), std::string("one\n\nthree"));
+    ins.select_range({0, 2}, {0, 2});
+    frame(ins);
+    ins.insert_lines({"![](a.png)"});
+    CHECK_EQ(ins.text(), std::string("on\n![](a.png)\ne\n\nthree"));
 
-    // A download landing swaps its placeholder everywhere, undo history too.
-    Editor e6 = fresh("x");
-    e6.select_range({0, 1}, {0, 1});
-    frame(e6);
-    e6.insert_lines({"![](delta-pending:1)"});
-    CHECK(e6.replace_line_everywhere("![](delta-pending:1)", "![](real.png)"));
-    CHECK_EQ(e6.text(), std::string("x\n![](real.png)"));
-    e6.undo();
-    CHECK_EQ(e6.text(), std::string("x"));
-    e6.redo();
-    CHECK_EQ(e6.text(), std::string("x\n![](real.png)"));
-    CHECK(!e6.replace_line_everywhere("![](delta-pending:1)", "y"));
+    // A download landing swaps its placeholder everywhere, undo history
+    // too: undo and redo never bring the placeholder back.
+    Editor dl = fresh("x");
+    dl.select_range({0, 1}, {0, 1});
+    frame(dl);
+    dl.insert_lines({"![](delta-pending:1)"});
+    dl.insert_lines({"![](b.png)"});  // edits after it, before the download lands
+    dl.insert_lines({"![](c.png)"});
+    dl.undo();  // something to redo, too
+    CHECK(dl.replace_line_everywhere("![](delta-pending:1)", "![](real.png)"));
+    CHECK_EQ(dl.text(), std::string("x\n![](real.png)\n![](b.png)"));
+    dl.redo();
+    CHECK_EQ(dl.text(), std::string("x\n![](real.png)\n![](b.png)\n![](c.png)"));
+    dl.undo();
+    dl.undo();
+    CHECK_EQ(dl.text(), std::string("x\n![](real.png)"));
     g_images = nullptr;
+}
 
-    // Sizes, the way Obsidian writes them, and rows of images.
-    std::vector<ImageRef> refs;
-    CHECK(md_image_row("![cat|300](a.png)", &refs));
-    CHECK(refs.size() == 1 && refs[0].alt == "cat" && refs[0].w == 300 && refs[0].h == 0);
-    CHECK(md_image_row("![|300x200](a.png)", &refs) && refs[0].w == 300 && refs[0].h == 200);
-    CHECK(md_image_row("![a|b](a.png)", &refs) && refs[0].alt == "a|b" && refs[0].w == 0);  // not a size
-    CHECK(md_image_row("![](a.png) ![](b.png)  ![x](<c d.png>)", &refs));
-    CHECK(refs.size() == 3 && refs[1].src == "b.png" && refs[2].src == "c d.png");
-    CHECK(!md_image_row("![](a.png)![](b.png)"));      // they need space between
-    CHECK(!md_image_row("![](a.png) and ![](b.png)"));
-    CHECK_EQ(md_image_resized("![cat|300](a.png \"t\")", 120), std::string("![cat|120](a.png \"t\")"));
-    CHECK_EQ(md_image_resized("![cat|300](a.png)", 0), std::string("![cat](a.png)"));
-    CHECK_EQ(md_image_resized("![](a.png)", 50), std::string("![|50](a.png)"));
-    CHECK_EQ(md_image_text("x", "my pic.png", 200), std::string("![x|200](<my pic.png>)"));
+// Rows of images on one line: each image is its own object, and moving them
+// around by keyboard keeps every image and the text around them intact.
+static void test_image_rows() {
+    FakeImages fake;
+    g_images = &fake;
+    // Arrows pick image by image; backspace takes the picked one out and
+    // picks the one before, delete the one that takes its place.
+    Editor r = fresh("![](a.png) ![](b.png) ![](c.png)");
+    r.select_range({0, 0}, {0, 0});
+    frame(r);
+    int t = -1;
+    key(r, ImGuiKey_RightArrow);
+    key(r, ImGuiKey_RightArrow);
+    CHECK(r.image_for_caret(&t) == 0 && t == 2);
+    key(r, ImGuiKey_LeftArrow);
+    key(r, ImGuiKey_Backspace);
+    CHECK_EQ(r.text(), std::string("![](a.png) ![](c.png)"));
+    CHECK(r.image_for_caret(&t) == 0 && t == 0);
+    // Typing with a picked image in a row goes after it, splitting the row.
+    type(r, "hi");
+    CHECK_EQ(r.text(), std::string("![](a.png)\nhi\n![](c.png)"));
+    Editor rd = fresh("![](a.png) ![](b.png) ![](c.png)");
+    rd.select_range({0, 11}, {0, 21});  // exactly b: picks it
+    frame(rd);
+    CHECK(picked(rd, 0, 1));
+    key(rd, ImGuiKey_Delete);
+    CHECK_EQ(rd.text(), std::string("![](a.png) ![](c.png)"));
 
+    // ctrl+alt+left/right swaps the image with its neighbour in the row.
+    Editor nr = fresh("![](a.png) ![](b.png) ![](c.png)");
+    nr.select_range({0, 21}, {0, 21});  // just after b: on b
+    frame(nr);
+    key(nr, ImGuiKey_RightArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
+    CHECK_EQ(nr.text(), std::string("![](a.png) ![](c.png) ![](b.png)"));
+    key(nr, ImGuiKey_RightArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);  // at the end: nowhere to go
+    CHECK_EQ(nr.text(), std::string("![](a.png) ![](c.png) ![](b.png)"));
+    key(nr, ImGuiKey_LeftArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
+    key(nr, ImGuiKey_LeftArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
+    CHECK_EQ(nr.text(), std::string("![](b.png) ![](a.png) ![](c.png)"));
+
+    // alt+up/down on a picked image: out of its row onto a line of its own,
+    // into the row beside, and alone next to text, its line moves.
+    Editor mv = fresh("![](a.png) ![](b.png) ![](c.png)\ntext");
+    mv.select_range({0, 11}, {0, 21});  // b
+    frame(mv);
+    mv.move_lines(-1);
+    frame(mv);
+    CHECK_EQ(mv.text(), std::string("![](b.png)\n![](a.png) ![](c.png)\ntext"));
+    mv.move_lines(1);  // into the row below, at its start
+    frame(mv);
+    CHECK_EQ(mv.text(), std::string("![](b.png) ![](a.png) ![](c.png)\ntext"));
+    mv.move_lines(1);  // out below
+    frame(mv);
+    mv.move_lines(1);  // alone, next to text: the line moves
+    frame(mv);
+    CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png)\ntext\n![](b.png)"));
+    CHECK(picked(mv, 2, 0));
+
+    // Any run of moves keeps every image exactly once, every image line
+    // whole and the text lines in order; undo walks all the way back and
+    // redo all the way forward.
+    const std::string start = "intro\n![](a.png) ![](b.png) ![](c.png)\ntext\n![](d.png) ![](e.png)\nend";
+    Editor st = fresh(start);
+    st.select_range({1, 11}, {1, 21});  // b
+    frame(st);
+    const std::vector<std::string> all = image_srcs(start);
+    const int steps[] = {-1, -1, 1, 1, 1, 2, 1, 1, -2, 1, 1, -1, 2, 2, -1, -1, -1, -1, -2, 2, -2, -2, 1};  // +-1: alt, +-2: ctrl+alt
+    bool kept = true, whole = true, text_ok = true, stays_picked = true;
+    for (int s : steps) {
+        if (s == 1 || s == -1) {
+            st.move_lines(s);
+            frame(st);
+        } else {
+            key(st, s > 0 ? ImGuiKey_RightArrow : ImGuiKey_LeftArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
+        }
+        std::string now = st.text();
+        kept &= image_srcs(now) == all;
+        whole &= image_lines_valid(now);
+        size_t i = now.find("intro"), j = now.find("text"), k = now.find("end");
+        text_ok &= i != std::string::npos && j != std::string::npos && k != std::string::npos && i < j && j < k;
+        int line = st.image_for_caret(&t);
+        stays_picked &= st.has_selection() && line >= 0 && st.image_src(line, t) == "b.png";
+    }
+    CHECK(kept);
+    CHECK(whole);
+    CHECK(text_ok);
+    CHECK(stays_picked);
+    std::string moved = st.text();
+    CHECK(moved != start);
+    for (int k = 0; k < 40; k++) st.undo();
+    CHECK_EQ(st.text(), start);
+    for (int k = 0; k < 40; k++) st.redo();
+    CHECK_EQ(st.text(), moved);
+    g_images = nullptr;
+}
+
+// The mouse on images: layout that doesn't distort or overflow, clicks that
+// pick, drags that move (or cancel cleanly), and the resize handle.
+static void test_image_mouse() {
+    FakeImages fake;  // every image is 800x400
     g_images = &fake;
     {
-        // |300: 300 px wide (at 1:1), height from the 2:1 image.
+        // An image keeps its shape; a row stays inside the column, one height.
         Editor s = fresh("![|300](a.png)");
         ImVec2 a, b;
-        CHECK(s.image_rect(0, 0, a, b));
-        CHECK(std::fabs((b.x - a.x) - 300) < 1 && std::fabs((b.y - a.y) - 150) < 1);
-
-        // A row: justified, one height, exactly the column's width.
+        CHECK(s.image_rect(0, 0, a, b) && std::fabs((b.x - a.x) - 2 * (b.y - a.y)) < 2);
         Editor r = fresh("![](a.png) ![](b.png) ![](c.png)");
         ImVec2 a0, b0, a2, b2;
         CHECK(r.image_rect(0, 0, a0, b0) && r.image_rect(0, 2, a2, b2));
-        CHECK(std::fabs(a0.y - a2.y) < 0.5f && std::fabs((b0.y - a0.y) - (b2.y - a2.y)) < 1);
-        CHECK(std::fabs((b2.x - a0.x) - 600) < 1.5f);
-        CHECK_EQ((int)r.image_list().size(), 3);
-        // Five wrap into two rows.
-        Editor r5 = fresh("![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)");
-        ImVec2 p0, q0, p4, q4;
-        CHECK(r5.image_rect(0, 0, p0, q0) && r5.image_rect(0, 4, p4, q4));
-        CHECK(p4.y > q0.y);
-
-        // Arrows pick image by image; backspace takes the picked one out and
-        // picks the one before, delete the one that takes its place.
-        r.select_range({0, 0}, {0, 0});
-        frame(r);
-        int t = -1;
-        CHECK(r.image_for_caret(&t) == 0 && t == 0);
-        key(r, ImGuiKey_RightArrow);
-        CHECK(r.image_for_caret(&t) == 0 && t == 1);
-        key(r, ImGuiKey_RightArrow);
-        CHECK(r.image_for_caret(&t) == 0 && t == 2);
-        key(r, ImGuiKey_LeftArrow);
-        key(r, ImGuiKey_Backspace);
-        CHECK_EQ(r.text(), std::string("![](a.png) ![](c.png)"));
-        CHECK(r.image_for_caret(&t) == 0 && t == 0);
-        Editor rd = fresh("![](a.png) ![](b.png) ![](c.png)");
-        rd.select_range({0, 11}, {0, 21});  // b
-        frame(rd);
-        key(rd, ImGuiKey_Delete);
-        CHECK_EQ(rd.text(), std::string("![](a.png) ![](c.png)"));
-        CHECK(rd.image_for_caret(&t) == 0 && t == 1);
-        // Up and down go between the rows a long row wraps into (3 + 2):
-        // the nearest image below.
-        r5.select_range({0, 0}, {0, 0});
-        frame(r5);
-        key(r5, ImGuiKey_DownArrow);
-        CHECK(r5.image_for_caret(&t) == 0 && t == 3);
-        key(r5, ImGuiKey_UpArrow);
-        CHECK(r5.image_for_caret(&t) == 0 && t == 0);
-        // Stepping along a row in view doesn't scroll: it keeps the picked
-        // image in view, not the line's whole height or the image after it.
-        std::string above;
-        for (int k = 0; k < 40; k++) above += "line\n";
-        Editor sv = fresh(above + "![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)\nend");
-        sv.select_range({40, 0}, {40, 0});
-        frame(sv);
-        float s0 = sv.scroll();
-        key(sv, ImGuiKey_RightArrow);
-        key(sv, ImGuiKey_RightArrow);
-        CHECK(sv.image_for_caret(&t) == 40 && t == 2);
-        CHECK(std::fabs(sv.scroll() - s0) < 0.5f);
-        // ctrl+alt+right swaps the image the caret is on with the next; at
-        // the end of the row there's nowhere to go.
-        Editor nr = fresh("![](a.png) ![](b.png) ![](c.png)");
-        nr.select_range({0, 21}, {0, 21});  // just after b: on b
-        frame(nr);
-        key(nr, ImGuiKey_RightArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
-        CHECK_EQ(nr.text(), std::string("![](a.png) ![](c.png) ![](b.png)"));
-        CHECK_EQ(nr.cursor().col, 32);
-        key(nr, ImGuiKey_RightArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
-        CHECK_EQ(nr.text(), std::string("![](a.png) ![](c.png) ![](b.png)"));
-        key(nr, ImGuiKey_LeftArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
-        key(nr, ImGuiKey_LeftArrow, ImGuiMod_Ctrl | ImGuiMod_Alt);
-        CHECK_EQ(nr.text(), std::string("![](b.png) ![](a.png) ![](c.png)"));
-
-        // alt+up/down with an image picked moves the image one step: out of
-        // its row onto a line of its own, into the row beside, between the
-        // rows a line wraps into; alone next to text, its line moves.
-        auto pick_at = [&](Editor& e, int line, int b0, int b1) {
-            e.select_range({line, b0}, {line, b1});
-            frame(e);
-        };
-        Editor mv = fresh("![](a.png) ![](b.png) ![](c.png)\ntext");
-        pick_at(mv, 0, 11, 21);  // b
-        mv.move_lines(-1);
-        frame(mv);
-        CHECK_EQ(mv.text(), std::string("![](b.png)\n![](a.png) ![](c.png)\ntext"));
-        CHECK(mv.image_for_caret(&t) == 0 && t == 0 && mv.has_selection());
-        mv.move_lines(1);  // into the row below: its start, keeping reading order
-        frame(mv);
-        CHECK_EQ(mv.text(), std::string("![](b.png) ![](a.png) ![](c.png)\ntext"));
-        CHECK(mv.image_for_caret(&t) == 0 && t == 0);
-        mv.move_lines(1);  // out below
-        frame(mv);
-        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png)\n![](b.png)\ntext"));
-        CHECK(mv.image_for_caret(&t) == 1 && t == 0);
-        mv.move_lines(-1);  // into the row above: its end
-        frame(mv);
-        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png) ![](b.png)\ntext"));
-        CHECK(mv.image_for_caret(&t) == 0 && t == 2);
-        mv.move_lines(1);  // out below again
-        frame(mv);
-        mv.move_lines(1);  // alone, next to text: the line moves
-        frame(mv);
-        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png)\ntext\n![](b.png)"));
-        CHECK(mv.image_for_caret(&t) == 2 && t == 0 && mv.has_selection());
-        mv.undo();
-        mv.undo();
-        CHECK_EQ(mv.text(), std::string("![](a.png) ![](c.png) ![](b.png)\ntext"));
-
-        Editor mw = fresh("![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)");  // 3 + 2
-        pick_at(mw, 0, 44, 54);  // e: second of the bottom row (middle 452)
-        mw.move_lines(-1);       // into the top row, before c (middle 500)
-        frame(mw);
-        CHECK_EQ(mw.text(), std::string("![](a.png) ![](b.png) ![](e.png) ![](c.png) ![](d.png)"));
-        CHECK(mw.image_for_caret(&t) == 0 && t == 2);
-        mw.move_lines(-1);  // the top row: out above
-        frame(mw);
-        CHECK_EQ(mw.text(), std::string("![](e.png)\n![](a.png) ![](b.png) ![](c.png) ![](d.png)"));
-        CHECK(mw.image_for_caret(&t) == 0 && t == 0);
-
-        // Typing between two images splits the row around the text.
-        type(r, "hi");
-        CHECK_EQ(r.text(), std::string("![](a.png)\nhi\n![](c.png)"));
-
-        // Dragging an image onto the right half of another joins its row.
+        CHECK(std::fabs((b0.y - a0.y) - (b2.y - a2.y)) < 1 && b2.x - a0.x <= 600 + 1.5f);
+    }
+    {
+        // A click on an image picks it and changes nothing.
+        Editor dk = fresh("![](a.png) ![](b.png) ![](c.png)");
+        ImVec2 a, b;
+        CHECK(dk.image_rect(0, 1, a, b));
+        click(dk, ImVec2(a.x + 5, (a.y + b.y) * 0.5f));
+        CHECK(picked(dk, 0, 1));
+        CHECK_EQ(dk.text(), std::string("![](a.png) ![](b.png) ![](c.png)"));
+    }
+    {
+        // Dragging an image onto the right half of another joins its row, after it.
         Editor dr = fresh("![](a.png)\n\n![](b.png)");
         ImVec2 sa, sb, ta, tb;
         CHECK(dr.image_rect(0, 0, sa, sb) && dr.image_rect(2, 0, ta, tb));
-        ImGuiIO& io = ImGui::GetIO();
-        auto mouse = [&](ImVec2 p, bool down) {
-            io.AddMousePosEvent(p.x, p.y);
-            io.AddMouseButtonEvent(0, down);
-            frame(dr);
-        };
-        ImVec2 from((sa.x + sb.x) * 0.5f, (sa.y + sb.y) * 0.5f), to(tb.x - 20, (ta.y + tb.y) * 0.5f);
-        mouse(from, false);
-        mouse(from, true);
-        for (int k = 1; k <= 6; k++) mouse(ImVec2(from.x + (to.x - from.x) * k / 6, from.y + (to.y - from.y) * k / 6), true);
-        mouse(to, false);
-        frame(dr);
+        drag(dr, mid(sa, sb), ImVec2(tb.x - 20, (ta.y + tb.y) * 0.5f));
         CHECK_EQ(dr.text(), std::string("\n![](b.png) ![](a.png)"));
-        io.AddMousePosEvent(-1, -1);
-        frame(dr);
-
-        // In a line that wraps into rows, the space between them (and the
-        // edges they share) joins the nearer row: only the grid's outer
-        // edges mean a line of its own.
-        Editor dw = fresh("![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)");  // 3 + 2
-        ImVec2 wa, wb, ea, eb;
-        CHECK(dw.image_rect(0, 1, wa, wb) && dw.image_rect(0, 4, ea, eb));
-        auto mouse_w = [&](ImVec2 p, bool down) {
-            io.AddMousePosEvent(p.x, p.y);
-            io.AddMouseButtonEvent(0, down);
-            frame(dw);
-        };
-        ImVec2 fw((ea.x + eb.x) * 0.5f, (ea.y + eb.y) * 0.5f), tw(wb.x - 10, wb.y + 2);  // just under b, its right half
-        mouse_w(fw, false);
-        mouse_w(fw, true);
-        for (int k = 1; k <= 6; k++) mouse_w(ImVec2(fw.x + (tw.x - fw.x) * k / 6, fw.y + (tw.y - fw.y) * k / 6), true);
-        mouse_w(tw, false);
-        frame(dw);
-        CHECK_EQ(dw.text(), std::string("![](a.png) ![](b.png) ![](e.png) ![](c.png) ![](d.png)"));
-        io.AddMousePosEvent(-1, -1);
-        frame(dw);
-
-        // A click on an image picks it, whichever half it lands on.
-        Editor dk = fresh("![](a.png) ![](b.png) ![](c.png)");
-        CHECK(dk.image_rect(0, 1, sa, sb));
-        auto click = [&](ImVec2 p, bool down) {
-            io.AddMousePosEvent(p.x, p.y);
-            io.AddMouseButtonEvent(0, down);
-            frame(dk);
-        };
-        ImVec2 left_half(sa.x + 5, (sa.y + sb.y) * 0.5f);
-        click(left_half, false);
-        click(left_half, true);
-        click(left_half, false);
-        CHECK(dk.has_selection() && dk.image_for_caret(&t) == 0 && t == 1);
-        CHECK_EQ(dk.text(), std::string("![](a.png) ![](b.png) ![](c.png)"));
-        io.AddMousePosEvent(-1, -1);
-        frame(dk);
-
-        // The blank space beside a resized image joins its row too.
-        Editor db = fresh("![|200](a.png)\n\n![](b.png)");
-        CHECK(db.image_rect(0, 0, ta, tb) && db.image_rect(2, 0, sa, sb));
-        auto mouse4 = [&](ImVec2 p, bool down) {
-            io.AddMousePosEvent(p.x, p.y);
-            io.AddMouseButtonEvent(0, down);
-            frame(db);
-        };
-        ImVec2 f4((sa.x + sb.x) * 0.5f, (sa.y + sb.y) * 0.5f), t4(tb.x + 250, (ta.y + tb.y) * 0.5f);
-        mouse4(f4, false);
-        mouse4(f4, true);
-        for (int k = 1; k <= 6; k++) mouse4(ImVec2(f4.x + (t4.x - f4.x) * k / 6, f4.y + (t4.y - f4.y) * k / 6), true);
-        mouse4(t4, false);
-        frame(db);
-        CHECK_EQ(db.text(), std::string("![|200](a.png) ![](b.png)\n"));
-        io.AddMousePosEvent(-1, -1);
-        frame(db);
-
+        dr.undo();
+        CHECK_EQ(dr.text(), std::string("![](a.png)\n\n![](b.png)"));
+    }
+    {
         // Escape mid-drag: it goes back, nothing changes.
         Editor dc = fresh("![](a.png)\n\n![](b.png)");
+        ImVec2 sa, sb, ta, tb;
         CHECK(dc.image_rect(0, 0, sa, sb) && dc.image_rect(2, 0, ta, tb));
-        auto mouse3 = [&](ImVec2 p, bool down) {
-            io.AddMousePosEvent(p.x, p.y);
-            io.AddMouseButtonEvent(0, down);
-            frame(dc);
-        };
-        ImVec2 f3((sa.x + sb.x) * 0.5f, (sa.y + sb.y) * 0.5f), t3(tb.x - 20, (ta.y + tb.y) * 0.5f);
-        mouse3(f3, false);
-        mouse3(f3, true);
-        for (int k = 1; k <= 6; k++) mouse3(ImVec2(f3.x + (t3.x - f3.x) * k / 6, f3.y + (t3.y - f3.y) * k / 6), true);
-        io.AddKeyEvent(ImGuiKey_Escape, true);
-        frame(dc);
-        io.AddKeyEvent(ImGuiKey_Escape, false);
-        mouse3(t3, false);
-        for (int k = 0; k < 30; k++) frame(dc);
+        drag(dc, mid(sa, sb), ImVec2(tb.x - 20, (ta.y + tb.y) * 0.5f), true);
         CHECK_EQ(dc.text(), std::string("![](a.png)\n\n![](b.png)"));
-        io.AddMousePosEvent(-1, -1);
-        frame(dc);
-
-        // The handle: drag near half the column and it snaps there, written
-        // as a width; a double-click puts it back to its own size.
+    }
+    {
+        // The handle on its right edge writes a width into the markdown; a
+        // double-click takes it out again.
         Editor rs = fresh("![](a.png)\n\ntext");
         ImVec2 ia, ib;
-        CHECK(rs.image_rect(0, 0, ia, ib));  // 800 wide, capped to the 600 column
-        auto mouse2 = [&](ImVec2 p, bool down) {
-            io.AddMousePosEvent(p.x, p.y);
-            io.AddMouseButtonEvent(0, down);
-            frame(rs);
-        };
+        CHECK(rs.image_rect(0, 0, ia, ib));
         ImVec2 grip(ib.x - 1, (ia.y + ib.y) * 0.5f);
-        mouse2(grip, false);
-        mouse2(grip, false);
-        mouse2(grip, true);
-        for (int k = 1; k <= 5; k++) mouse2(ImVec2(grip.x - (grip.x - (ia.x + 304)) * k / 5, grip.y), true);
-        mouse2(ImVec2(ia.x + 304, grip.y), false);
-        CHECK_EQ(rs.text(), std::string("![|300](a.png)\n\ntext"));
+        drag(rs, grip, ImVec2(ia.x + 304, grip.y));
+        std::vector<ImageRef> refs;
+        std::string line0 = rs.text().substr(0, rs.text().find('\n'));
+        CHECK(md_image_row(line0, &refs) && refs.size() == 1 && refs[0].src == "a.png" &&
+              refs[0].w > 250 && refs[0].w < 350);
+        CHECK_EQ(rs.text().substr(line0.size()), std::string("\n\ntext"));
         CHECK(rs.image_rect(0, 0, ia, ib));
         grip = ImVec2(ib.x - 1, (ia.y + ib.y) * 0.5f);
         g_time += 1.0;  // clear of the last click, for the double-click
-        mouse2(grip, false);
-        mouse2(grip, true);
-        mouse2(grip, false);
-        mouse2(grip, true);
-        mouse2(grip, false);
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(grip.x, grip.y);
+        frame(rs);
+        for (bool down : {true, false, true, false}) {
+            io.AddMousePosEvent(grip.x, grip.y);
+            io.AddMouseButtonEvent(0, down);
+            frame(rs);
+        }
         CHECK_EQ(rs.text(), std::string("![](a.png)\n\ntext"));
         io.AddMousePosEvent(-1, -1);
         frame(rs);
     }
     g_images = nullptr;
+}
 
-    // Clipboard formats: PNG and bitmaps round-trip, formats are told apart.
-    std::vector<uint8_t> px2 = {255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 10, 20, 30, 0, 1, 2, 3, 255, 9, 9, 9, 9};  // 3x2
-    std::string png = encode_png(px2, 3, 2);
-    CHECK_EQ(image_ext(png), std::string("png"));
-    std::vector<uint8_t> back;
-    int bw = 0, bh = 0;
-    CHECK(image_decode_bytes(png, back, bw, bh));
-    CHECK(bw == 3 && bh == 2 && back == px2);
-    std::string dib = rgba_to_dib(px2, 3, 2);
-    CHECK(dib_to_rgba(dib, back, bw, bh));
-    CHECK(bw == 3 && bh == 2 && back == px2);
-    CHECK(image_ext("not an image").empty());
-    // A 32-bit bitmap whose fourth byte is all zero is opaque, not invisible.
-    std::vector<uint8_t> clear = px2;
-    for (size_t i = 3; i < clear.size(); i += 4) clear[i] = 0;
-    CHECK(dib_to_rgba(rgba_to_dib(clear, 3, 2), back, bw, bh));
-    CHECK(back[3] == 255 && back[0] == 255);
+static void test_images() {
+    test_image_markdown();
+    test_image_store();
+    test_image_codecs();
+    test_image_editing();
+    test_image_rows();
+    test_image_mouse();
 }
 
 static void test_smear() {
