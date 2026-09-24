@@ -25,6 +25,20 @@ bool atomic_write(const fs::path& p, const std::string& data, std::string* err);
 // Dark title bar + caption colour on Windows 11; no-op elsewhere.
 void style_native_window(GLFWwindow* w, unsigned rgb_bg, unsigned rgb_text, bool dark);
 
+// An installed font face: its file, and which face it is when the file holds
+// several (.ttc).
+struct FontFace {
+    fs::path file;
+    int index = 0;
+    int weight = 400;  // as found, which is the nearest to the one asked for
+};
+// The installed face of `family` nearest `weight` (400 regular, 600
+// semibold), upright and normal width. False if there's no such family, or
+// it isn't a local file. Windows (DirectWrite) only; elsewhere finds nothing.
+bool find_system_font(const std::string& family, int weight, FontFace& out);
+// Every installed family's name, for suggesting one.
+std::vector<std::string> system_font_families();
+
 // The clipboard beyond text (Windows; elsewhere these find nothing).
 std::vector<fs::path> clipboard_files();      // files copied in a file manager
 bool clipboard_png(std::string& png);          // an image offered as PNG bytes

@@ -40,6 +40,7 @@ static bool render_frame(bool slept) {
     g_in_frame = true;
     ImGuiIO& io = ImGui::GetIO();
     anim::active = false;
+    g_app->apply_fonts();  // a saved config may have picked others
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();

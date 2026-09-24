@@ -37,6 +37,8 @@ const std::vector<Setting>& all_settings() {
         {"general", "daily_format", K::Text, "%Y-%m-%d", nullptr, 0, 0, nullptr, "strftime codes"},
         {"general", "new_note_heading", K::Bool, "true", nullptr, 0, 0, nullptr, "name as first heading"},
 
+        {"editor", "font", K::Text, "Noto Sans", nullptr, 0, 0, nullptr, "an installed font's name, or a font file"},
+        {"editor", "mono_font", K::Text, "Noto Sans Mono", nullptr, 0, 0, nullptr, "for code; a name or a file"},
         {"editor", "font_size", K::Float, "14", nullptr, 8, 48, nullptr, "px"},
         {"editor", "line_height", K::Float, "1.5", nullptr, 1, 3, nullptr, "x font size"},
         {"editor", "column_width", K::Int, "72", nullptr, 20, 400, nullptr, "characters"},
@@ -310,6 +312,8 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
     c.daily_space = get("general.daily_space");
     c.daily_format = get("general.daily_format");
     c.new_note_heading = flag("general.new_note_heading");
+    c.font = get("editor.font");
+    c.mono_font = get("editor.mono_font");
     c.font_size = num("editor.font_size");
     c.line_height = num("editor.line_height");
     c.column_width = (int)num("editor.column_width");

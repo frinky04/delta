@@ -100,6 +100,8 @@ public:
     // Markdown for notes, Ini for delta.ini. Set before set_text().
     void set_syntax(Syntax s);
     Syntax syntax() const { return syntax_; }
+    // The fonts in EditorParams are new ones: lay the text out again.
+    void fonts_changed();
     // Problems on their (0-based) lines, any number per line. They fade in,
     // and out once they're gone from the list.
     void set_diagnostics(const std::vector<Diagnostic>& d);

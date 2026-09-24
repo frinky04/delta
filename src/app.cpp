@@ -66,30 +66,9 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     words_path_ = cfg_path_.parent_path() / "words.txt";
     pending_run_ = opts.run;
 
-    ImGuiIO& io = ImGui::GetIO();
-    ImFontConfig fc;
-    fc.FontDataOwnedByAtlas = false;
-    sans_ = io.Fonts->AddFontFromMemoryTTF((void*)g_font_sans, (int)g_font_sans_size, 17.0f, &fc);
-    mono_ = io.Fonts->AddFontFromMemoryTTF((void*)g_font_mono, (int)g_font_mono_size, 17.0f, &fc);
-    sans_bold_ = io.Fonts->AddFontFromMemoryTTF((void*)g_font_sans_bold, (int)g_font_sans_bold_size, 17.0f, &fc);
-    mono_bold_ = io.Fonts->AddFontFromMemoryTTF((void*)g_font_mono_bold, (int)g_font_mono_bold_size, 17.0f, &fc);
-    // Glyphs Noto doesn't have (arrows, symbols) fall back to the system.
-#ifdef _WIN32
-    const char* fallbacks[] = {"C:\\Windows\\Fonts\\seguisym.ttf", "C:\\Windows\\Fonts\\seguiemj.ttf"};
-    for (ImFont* target : {sans_, mono_, sans_bold_, mono_bold_}) {
-        for (const char* path : fallbacks) {
-            std::error_code ec;
-            if (!fs::exists(path, ec)) continue;
-            ImFontConfig m;
-            m.MergeMode = true;
-            m.DstFont = target;
-            io.Fonts->AddFontFromFileTTF(path, 17.0f, &m);
-        }
-    }
-#endif
-
     register_commands();
     load_settings();
+    apply_fonts();
 
     auto state = load_kv(state_path_);
     if (auto it = state.find("zoom"); it != state.end()) zoom_ = std::clamp((float)std::atof(it->second.c_str()), 0.5f, 3.0f);
@@ -162,6 +141,14 @@ void App::load_settings() {
     if (!Store::check_name(cfg_.default_space, "space").empty()) cfg_.default_space = "default";
     if (!Store::check_name(cfg_.daily_space, "space").empty()) cfg_.daily_space = "daily";
     apply_spelling();
+    // Loaded before the next frame (apply_fonts), so a change shows as soon
+    // as the config is saved.
+    auto pick = [&](const char* key, const std::string& value, FontPick& out) {
+        std::string bad = pick_font(value, find_setting("editor", key)->def, out);
+        if (!bad.empty()) issues.push_back(issue_at(cfg_, std::string("editor.") + key, true, bad));
+    };
+    pick("font", cfg_.font, sans_pick_);
+    pick("mono_font", cfg_.mono_font, mono_pick_);
 
     // Problems show on their lines when the config is open in delta;
     // otherwise the first one goes to the status bar.
@@ -174,6 +161,63 @@ void App::load_settings() {
         if (all.size() > 1) msg += " (+" + std::to_string(all.size() - 1) + " more)";
         status(msg, true);
     }
+}
+
+void App::apply_fonts() {
+    auto key_of = [](const FontFace& f) { return path_u8(f.file) + "#" + std::to_string(f.index) + "\n"; };
+    std::string key = key_of(sans_pick_.regular) + key_of(sans_pick_.bold) + key_of(mono_pick_.regular) + key_of(mono_pick_.bold);
+    if (sans_ && key == fonts_key_) return;
+    bool reload = sans_ != nullptr;
+    fonts_key_ = key;
+
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    // A bold may be its regular font again: remove each only once.
+    if (sans_bold_ != sans_) atlas->RemoveFont(sans_bold_);
+    if (mono_bold_ != mono_) atlas->RemoveFont(mono_bold_);
+    for (ImFont* f : {sans_, mono_})
+        if (f) atlas->RemoveFont(f);
+
+    // One font: the picked face, if there is one, then the embedded face for
+    // the glyphs it lacks, then the system's symbol fonts for the glyphs Noto
+    // lacks (arrows, emoji). A face that can't be read is left out.
+    auto load = [&](const FontFace& face, const unsigned char* noto, std::size_t noto_size) {
+        ImFont* font = nullptr;
+        auto add = [&](void* data, std::size_t size, bool owned, int index) {
+            ImFontConfig c;
+            c.FontDataOwnedByAtlas = owned;
+            c.FontNo = (ImU32)index;
+            c.MergeMode = font != nullptr;
+            c.DstFont = font;
+            ImFont* f = atlas->AddFontFromMemoryTTF(data, (int)size, 17.0f, &c);
+            if (!font) font = f;
+        };
+        auto add_file = [&](const fs::path& path, int index) {
+            std::string bytes;
+            if (!read_file(path, bytes) || bytes.empty()) return;
+            void* data = IM_ALLOC(bytes.size());  // the atlas frees it
+            std::memcpy(data, bytes.data(), bytes.size());
+            add(data, bytes.size(), true, index);
+        };
+        if (!face.file.empty()) add_file(face.file, face.index);
+        add((void*)noto, noto_size, false, 0);
+#ifdef _WIN32
+        for (const char* path : {"C:\\Windows\\Fonts\\seguisym.ttf", "C:\\Windows\\Fonts\\seguiemj.ttf"}) {
+            std::error_code ec;
+            if (fs::exists(path, ec)) add_file(path, 0);
+        }
+#endif
+        return font;
+    };
+    sans_ = load(sans_pick_.regular, g_font_sans, g_font_sans_size);
+    mono_ = load(mono_pick_.regular, g_font_mono, g_font_mono_size);
+    // A picked font without a semibold uses its regular face for bold, not
+    // Noto's semibold, which wouldn't match it. (The editor is given none
+    // then, and draws bold doubled.)
+    sans_bold_ = sans_pick_.embedded() || !sans_pick_.bold.file.empty()
+                     ? load(sans_pick_.bold, g_font_sans_bold, g_font_sans_bold_size) : sans_;
+    mono_bold_ = mono_pick_.embedded() || !mono_pick_.bold.file.empty()
+                     ? load(mono_pick_.bold, g_font_mono_bold, g_font_mono_bold_size) : mono_;
+    if (reload) editor_.fonts_changed();
 }
 
 // Problems the rest of delta finds in a config: key chords and command ids
@@ -2087,8 +2131,8 @@ void App::frame() {
         EditorParams p;
         p.sans = sans_;
         p.mono = mono_;
-        p.sans_bold = sans_bold_;
-        p.mono_bold = mono_bold_;
+        p.sans_bold = sans_bold_ != sans_ ? sans_bold_ : nullptr;  // none: drawn doubled
+        p.mono_bold = mono_bold_ != mono_ ? mono_bold_ : nullptr;
         p.size = s;
         p.line_height = cfg_.line_height;
         p.column = column;

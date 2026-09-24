@@ -17,6 +17,8 @@ struct Config {
     bool new_note_heading = true;
 
     // [editor]
+    std::string font = "Noto Sans";            // installed family or font file; the default is embedded
+    std::string mono_font = "Noto Sans Mono";  // the same, for code
     float font_size = 14.0f;     // px, as in CSS (the em size)
     float line_height = 1.5f;    // multiple of font_size, as in CSS
     int column_width = 72;       // measured in "ch" (width of the digit 0)

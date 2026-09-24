@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "editor.h"
+#include "fonts.h"
 #include "keys.h"
 #include "image_cache.h"
 #include "images.h"
@@ -37,6 +38,9 @@ public:
     ImU32 background() const;
     void set_dpi(float dpi) { dpi_ = dpi; }
     void on_focus(bool focused);
+    // Loads the fonts the config picks, if they aren't the ones loaded.
+    // Only between frames: the old fonts go.
+    void apply_fonts();
 
 private:
     struct Command {
@@ -221,6 +225,8 @@ private:
     ImFont* mono_ = nullptr;
     ImFont* sans_bold_ = nullptr;  // SemiBold weights
     ImFont* mono_bold_ = nullptr;
+    FontPick sans_pick_, mono_pick_;  // what the config asks for
+    std::string fonts_key_;           // which picks are loaded
     float dpi_ = 1, zoom_ = 1;
 
     std::string space_;

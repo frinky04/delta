@@ -1109,6 +1109,12 @@ void Editor::restore_view(TextPos cur, float scroll) {
     caret_snap_ = true;
 }
 
+void Editor::fonts_changed() {
+    lay_[0].clear();  // widths are cached per line
+    lay_[1].clear();
+    snap_heights_ = true;
+}
+
 void Editor::set_syntax(Syntax s) {
     if (s == syntax_) return;
     syntax_ = s;

@@ -11,6 +11,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dwmapi.h>
+#include <dwrite.h>
 #include <shellapi.h>
 #include <wininet.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -139,6 +140,117 @@ void style_native_window(GLFWwindow* w, unsigned rgb_bg, unsigned rgb_text, bool
 #else
     (void)w; (void)rgb_bg; (void)rgb_text; (void)dark;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Installed fonts
+
+#ifdef _WIN32
+namespace {
+
+// Releases a COM pointer when it goes.
+template <class T>
+struct Com {
+    T* p = nullptr;
+    Com() = default;
+    Com(const Com&) = delete;
+    Com& operator=(const Com&) = delete;
+    ~Com() { if (p) p->Release(); }
+    T* operator->() const { return p; }
+    T** operator&() { return &p; }
+};
+
+std::wstring widen(const std::string& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+std::string narrow(const std::wstring& w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// The installed fonts, per-user ones included. Asked for afresh each time
+// so fonts installed while delta runs are found.
+bool system_collection(Com<IDWriteFontCollection>& out) {
+    static IDWriteFactory* factory = [] {
+        IDWriteFactory* f = nullptr;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&f))) f = nullptr;
+        return f;
+    }();
+    return factory && SUCCEEDED(factory->GetSystemFontCollection(&out, TRUE));
+}
+
+}  // namespace
+#endif
+
+bool find_system_font(const std::string& family, int weight, FontFace& out) {
+#ifdef _WIN32
+    Com<IDWriteFontCollection> fonts;
+    if (!system_collection(fonts)) return false;
+    UINT32 at = 0;
+    BOOL found = FALSE;
+    if (FAILED(fonts->FindFamilyName(widen(family).c_str(), &at, &found)) || !found) return false;
+    Com<IDWriteFontFamily> fam;
+    Com<IDWriteFont> font;
+    Com<IDWriteFontFace> face;
+    if (FAILED(fonts->GetFontFamily(at, &fam)) ||
+        FAILED(fam->GetFirstMatchingFont((DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font)) ||
+        FAILED(font->CreateFontFace(&face)))
+        return false;
+
+    // The file behind the face, if it's a file on this machine.
+    UINT32 files = 0;
+    if (FAILED(face->GetFiles(&files, nullptr)) || files != 1) return false;
+    Com<IDWriteFontFile> file;
+    Com<IDWriteFontFileLoader> loader;
+    Com<IDWriteLocalFontFileLoader> local;
+    const void* key = nullptr;
+    UINT32 key_size = 0, len = 0;
+    if (FAILED(face->GetFiles(&files, &file)) || FAILED(file->GetReferenceKey(&key, &key_size)) ||
+        FAILED(file->GetLoader(&loader)) ||
+        FAILED(loader->QueryInterface(__uuidof(IDWriteLocalFontFileLoader), (void**)&local)) ||
+        FAILED(local->GetFilePathLengthFromKey(key, key_size, &len)))
+        return false;
+    std::wstring path(len + 1, L'\0');
+    if (FAILED(local->GetFilePathFromKey(key, key_size, path.data(), len + 1))) return false;
+    path.resize(len);
+
+    out.file = fs::path(path);
+    out.index = (int)face->GetIndex();
+    // A bold DirectWrite would fake by thickening isn't in the file.
+    out.weight = (font->GetSimulations() & DWRITE_FONT_SIMULATIONS_BOLD) ? 400 : (int)font->GetWeight();
+    return true;
+#else
+    (void)family; (void)weight; (void)out;
+    return false;
+#endif
+}
+
+std::vector<std::string> system_font_families() {
+    std::vector<std::string> out;
+#ifdef _WIN32
+    Com<IDWriteFontCollection> fonts;
+    if (!system_collection(fonts)) return out;
+    for (UINT32 i = 0, n = fonts->GetFontFamilyCount(); i < n; i++) {
+        Com<IDWriteFontFamily> fam;
+        Com<IDWriteLocalizedStrings> names;
+        if (FAILED(fonts->GetFontFamily(i, &fam)) || FAILED(fam->GetFamilyNames(&names))) continue;
+        UINT32 at = 0, len = 0;
+        BOOL has = FALSE;
+        if (FAILED(names->FindLocaleName(L"en-us", &at, &has)) || !has) at = 0;
+        if (FAILED(names->GetStringLength(at, &len))) continue;
+        std::wstring w(len + 1, L'\0');
+        if (FAILED(names->GetString(at, w.data(), len + 1))) continue;
+        w.resize(len);
+        out.push_back(narrow(w));
+    }
+#endif
+    return out;
 }
 
 // ---------------------------------------------------------------------------

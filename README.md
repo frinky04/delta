@@ -11,7 +11,7 @@ build/delta.exe
 build/delta_tests.exe   # headless editor/markdown tests
 ```
 
-ImGui 1.92.9b, GLFW 3.4 and stb_image 2.30 are vendored in `third_party/`. Both fonts are embedded in the exe. With MinGW the exe is statically linked, so it runs on its own.
+ImGui 1.92.9b, GLFW 3.4 and stb_image 2.30 are vendored in `third_party/`. The default fonts are embedded in the exe (see Config to pick others). With MinGW the exe is statically linked, so it runs on its own.
 
 ## Spaces
 
@@ -135,6 +135,16 @@ Any palette command can be bound in `[keys]` by its id ("Add a setting" lists th
 note.daily = alt+d ctrl+shift+d   ; several chords, space-separated
 edit.bold =                       ; empty unbinds
 ```
+
+Fonts are set in `[editor]`: `font` for prose and `mono_font` for code (and the status bar and palette, which are set in mono). Either takes an installed font's family name or the path of a `.ttf`, `.otf` or `.ttc` file:
+
+```ini
+[editor]
+font = Georgia
+mono_font = ~/fonts/Iosevka-Regular.ttf
+```
+
+The defaults, `Noto Sans` and `Noto Sans Mono`, are the embedded fonts. Looking up a font by name works on Windows only; elsewhere, give a path. Bold uses the family's semibold weight, or the next heavier one it has. A font file on its own, or a family without heavier weights, gets its bold drawn doubled instead. That includes variable fonts, since only their default weight can be drawn. Characters a font lacks come from Noto, and then from the system's symbol fonts. A new font shows as soon as the config is saved.
 
 Window position, the last open note and zoom live in `state.ini` next to it, so the app never rewrites your config.
 

@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "editor.h"
+#include "fonts.h"
 #include "images.h"
 #include "platform.h"
 #include "imgui.h"
@@ -2113,6 +2114,42 @@ static void test_spell_config() {
     CHECK_EQ(e.text(), std::string("I recieve it"));
 }
 
+// [editor] font and mono_font: the embedded font by default, else a font
+// file or an installed family, and a problem (with the embedded font) when
+// neither can be found.
+static void test_fonts() {
+    FontPick p;
+    CHECK_EQ(pick_font("", "Noto Sans", p), std::string());
+    CHECK(p.embedded());
+    CHECK_EQ(pick_font("noto sans", "Noto Sans", p), std::string());  // the default, however it's cased
+    CHECK(p.embedded());
+
+    fs::path root = fs::temp_directory_path() / "delta_test_fonts";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    fs::path ttf = root / "Mine.ttf", junk = root / "junk.ttf";
+    CHECK(atomic_write(ttf, std::string((const char*)g_font_mono, g_font_mono_size), nullptr));
+    CHECK(atomic_write(junk, "not a font", nullptr));
+
+    CHECK_EQ(pick_font(path_u8(ttf), "Noto Sans", p), std::string());
+    CHECK(p.regular.file == ttf && p.bold.file.empty());  // one file, one weight
+    CHECK_EQ(pick_font(path_u8(root / "gone.ttf"), "Noto Sans", p), std::string("no font file here, using Noto Sans"));
+    CHECK(p.embedded());
+    CHECK_EQ(pick_font(path_u8(junk), "Noto Sans", p).rfind("not a font", 0), (size_t)0);
+    CHECK(p.embedded());
+
+#ifdef _WIN32
+    // Families every Windows install has.
+    CHECK_EQ(pick_font("consolas", "Noto Sans Mono", p), std::string());
+    CHECK(!p.embedded() && fs::exists(p.regular.file));
+    CHECK(!p.bold.file.empty() && p.bold.file != p.regular.file && p.bold.weight >= 600);
+    CHECK_EQ(pick_font("Consolsa", "Noto Sans Mono", p), std::string("no installed font with this name; did you mean Consolas?"));
+    CHECK(p.embedded());
+    CHECK_EQ(pick_font("Zzqx Nothing Like It", "Noto Sans", p), std::string("no installed font with this name, using Noto Sans"));
+#endif
+    fs::remove_all(root);
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -2154,6 +2191,7 @@ int main() {
     test_speller();
     test_spell_fix();
     test_spell_config();
+    test_fonts();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
