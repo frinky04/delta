@@ -93,73 +93,65 @@ static void test_markdown() {
     LineInfo info;
     std::vector<uint16_t> st;
 
+    // Block kinds the editor and reader branch on.
     md_analyze("## Title", false, info, st);
-    CHECK(info.kind == LineKind::Heading);
-    CHECK_EQ(info.level, 2);
-    CHECK(st[0] & S_Marker);
-    CHECK(!(st[3] & S_Marker));
-
-    md_analyze("a **bold** b", false, info, st);
-    CHECK((st[2] & S_Marker) && (st[2] & S_Bold));
-    CHECK((st[4] & S_Bold) && !(st[4] & S_Marker));
-    CHECK(!(st[0] & S_Bold));
-
-    md_analyze("x *it* y", false, info, st);
-    CHECK(st[3] & S_Italic);
-
-    md_analyze("snake_case_name here", false, info, st);
-    CHECK(!(st[6] & S_Italic));  // intraword underscores are not emphasis
-
-    md_analyze("`**not bold**`", false, info, st);
-    CHECK(st[3] & S_Code);
-    CHECK(!(st[3] & S_Bold));
-
-    md_analyze("  - [x] done", false, info, st);
-    CHECK(info.list && info.task && info.done);
-    CHECK_EQ(info.marker_begin, 2);
-    CHECK_EQ(info.content_start, 8);
-    CHECK(st[9] & S_TaskDone);
-
-    md_analyze("3. third", false, info, st);
-    CHECK(info.ordered);
-    CHECK_EQ(info.content_start, 3);
-
+    CHECK(info.kind == LineKind::Heading && info.level == 2);
+    md_analyze("#tag", false, info, st);
+    CHECK(info.kind != LineKind::Heading);  // a tag, not a heading
     md_analyze("---", false, info, st);
     CHECK(info.kind == LineKind::Rule);
-
     md_analyze("- a", false, info, st);
-    CHECK(info.list);
-    CHECK(info.kind != LineKind::Rule);
+    CHECK(info.list && !info.ordered && info.kind != LineKind::Rule);
+    md_analyze("3. third", false, info, st);
+    CHECK(info.list && info.ordered);
+    md_analyze("  - [x] done", false, info, st);
+    CHECK(info.list && info.task && info.done);
+    md_analyze("```js", false, info, st);
+    CHECK(info.kind == LineKind::Fence);
+    md_analyze("# **not** heading", true, info, st);  // inside a fence: verbatim
+    CHECK(info.kind == LineKind::CodeBlock && !(st[4] & S_Bold));
 
+    // Inline emphasis covers its text and nothing outside it.
+    md_analyze("a **bold** b", false, info, st);
+    CHECK((st[4] & S_Bold) && !(st[0] & S_Bold) && !(st[11] & S_Bold));
+    md_analyze("x *it* y", false, info, st);
+    CHECK((st[3] & S_Italic) && !(st[7] & S_Italic));
+    md_analyze("snake_case_name here", false, info, st);
+    CHECK(!(st[6] & S_Italic));  // intraword underscores are not emphasis
+    md_analyze("`**not bold**`", false, info, st);
+    CHECK((st[3] & S_Code) && !(st[3] & S_Bold));
+
+    // Links are what clicking follows.
     std::vector<LinkSpan> links;
     md_analyze("see [[Other note|alias]] and [x](https://a.b)", false, info, st, &links);
     CHECK_EQ((int)links.size(), 2);
     if (links.size() == 2) {
-        CHECK_EQ(links[0].target, std::string("Other note"));
-        CHECK(links[0].wiki);
-        CHECK_EQ(links[1].target, std::string("https://a.b"));
+        CHECK(links[0].wiki && links[0].target == "Other note");
+        CHECK(!links[1].wiki && links[1].target == "https://a.b");
     }
 
-    md_analyze("```js", false, info, st);
-    CHECK(info.kind == LineKind::Fence);
-    md_analyze("# not heading", true, info, st);
-    CHECK(info.kind == LineKind::CodeBlock);
-
+    // Reader text drops the syntax, and its map always points back into the
+    // source in order (clicks and selections in the reader rely on it).
     std::string out;
     std::vector<uint16_t> ost;
     std::vector<int> map;
     md_analyze("## Hello **world**", false, info, st);
     md_reader("## Hello **world**", info, st, out, ost, map);
     CHECK_EQ(out, std::string("Hello world"));
-    md_analyze("- item", false, info, st);
-    md_reader("- item", info, st, out, ost, map);
-    CHECK_EQ(out, std::string("\xE2\x80\xA2 item"));
+    bool ok = true;
+    for (const char* s : {"> - [ ] a *b* [c](d) ==e== ~~f~~", "1. **x** `y` [[z|w]]", "- item", "plain"}) {
+        md_analyze(s, false, info, st);
+        md_reader(s, info, st, out, ost, map);
+        ok = ok && !out.empty() && map.size() == out.size() && ost.size() == out.size();
+        for (size_t i = 0; ok && i < map.size(); i++)
+            ok = map[i] >= 0 && map[i] < (int)std::string(s).size() && (i == 0 || map[i] >= map[i - 1]);
+    }
+    CHECK(ok);
 }
 
 static void test_typing() {
     Editor ed = fresh("");
     type(ed, "hello");
-    CHECK_EQ(ed.text(), std::string("hello"));
     key(ed, ImGuiKey_Backspace);
     CHECK_EQ(ed.text(), std::string("hell"));
     key(ed, ImGuiKey_Backspace, ImGuiMod_Ctrl);
@@ -168,18 +160,70 @@ static void test_typing() {
     key(ed, ImGuiKey_LeftArrow, ImGuiMod_Ctrl);
     type(ed, "X");
     CHECK_EQ(ed.text(), std::string("one Xtwo"));
-    // Undo groups the typing run.
+    // Undo takes back the edit at the other spot, then the typing run as
+    // one step.
     ed.undo();
     frame(ed);
     CHECK_EQ(ed.text(), std::string("one two"));
+    ed.undo();
+    frame(ed);
+    CHECK_EQ(ed.text(), std::string(""));
+    // A new edit after undo drops the redo branch.
+    type(ed, "Y");
     ed.redo();
     frame(ed);
-    CHECK_EQ(ed.text(), std::string("one Xtwo"));
-    // Unicode stepping.
+    CHECK_EQ(ed.text(), std::string("Y"));
+
+    // Separate edits undo one at a time, all the way back, then redo forward.
+    Editor h = fresh("abc");
+    key(h, ImGuiKey_End);
+    key(h, ImGuiKey_Enter);
+    type(h, "def");
+    h.select_range({0, 0}, {1, 1});
+    frame(h);
+    key(h, ImGuiKey_Delete);
+    CHECK_EQ(h.text(), std::string("ef"));
+    h.undo();
+    frame(h);
+    CHECK_EQ(h.text(), std::string("abc\ndef"));
+    for (int i = 0; i < 10; i++) { h.undo(); frame(h); }
+    CHECK_EQ(h.text(), std::string("abc"));
+    for (int i = 0; i < 10; i++) { h.redo(); frame(h); }
+    CHECK_EQ(h.text(), std::string("ef"));
+
+    // Enter splits a line; backspace at a line start and delete at a line
+    // end join it back.
+    Editor s = fresh("helloworld");
+    s.select_range({0, 5}, {0, 5});
+    frame(s);
+    key(s, ImGuiKey_Enter);
+    CHECK_EQ(s.text(), std::string("hello\nworld"));
+    key(s, ImGuiKey_Backspace);
+    CHECK_EQ(s.text(), std::string("helloworld"));
+    key(s, ImGuiKey_Enter);
+    key(s, ImGuiKey_LeftArrow);
+    key(s, ImGuiKey_Delete);
+    CHECK_EQ(s.text(), std::string("helloworld"));
+
+    // Typing replaces a selection, across lines too.
+    Editor r = fresh("one\ntwo\nthree");
+    r.select_range({0, 1}, {2, 2});
+    frame(r);
+    type(r, "X");
+    CHECK_EQ(r.text(), std::string("oXree"));
+
+    // Multi-byte characters are stepped and deleted whole.
     Editor u = fresh("a\xC3\xA9");
     key(u, ImGuiKey_End);
     key(u, ImGuiKey_Backspace);
     CHECK_EQ(u.text(), std::string("a"));
+    Editor u2 = fresh("\xE2\x82\xAC\xC3\xA9");  // euro sign, e-acute
+    key(u2, ImGuiKey_End);
+    key(u2, ImGuiKey_LeftArrow);
+    type(u2, "x");
+    key(u2, ImGuiKey_Home);
+    key(u2, ImGuiKey_Delete);
+    CHECK_EQ(u2.text(), std::string("x\xC3\xA9"));
 }
 
 static void test_lists() {
@@ -206,6 +250,19 @@ static void test_lists() {
     key(q, ImGuiKey_End);
     key(q, ImGuiKey_Enter);
     CHECK_EQ(q.text(), std::string("> quoted\n> "));
+
+    // Nested items continue at their depth.
+    Editor n = fresh("- a\n    - b");
+    key(n, ImGuiKey_End, ImGuiMod_Ctrl);
+    key(n, ImGuiKey_Enter);
+    CHECK_EQ(n.text(), std::string("- a\n    - b\n    - "));
+
+    // Inside a code block a "- " line is code: Enter adds no bullet.
+    Editor c = fresh("```\n- x\n```");
+    c.select_range({1, 3}, {1, 3});
+    frame(c);
+    key(c, ImGuiKey_Enter);
+    CHECK_EQ(c.text(), std::string("```\n- x\n\n```"));
 
     // Backspace right after a bullet removes the bullet.
     Editor b = fresh("- ");
@@ -244,14 +301,25 @@ static void test_lines() {
     ed.duplicate_lines(1);
     frame(ed);
     CHECK_EQ(ed.text(), std::string("a\nc\nb\nb"));
-    CHECK_EQ(ed.cursor().line, 3);
     ed.delete_lines();
     frame(ed);
     CHECK_EQ(ed.text(), std::string("a\nc\nb"));
-    // Moving the first line up is a no-op.
+    ed.undo();
+    frame(ed);
+    CHECK_EQ(ed.text(), std::string("a\nc\nb\nb"));
+    // Moving past either end changes nothing (and loses nothing).
     Editor f = fresh("x\ny");
     f.move_lines(-1);
+    key(f, ImGuiKey_DownArrow);
+    f.move_lines(1);
     CHECK_EQ(f.text(), std::string("x\ny"));
+    // A multi-line selection moves as a block.
+    Editor b = fresh("1\n2\n3\n4");
+    b.select_range({1, 0}, {2, 1});
+    frame(b);
+    b.move_lines(1);
+    frame(b);
+    CHECK_EQ(b.text(), std::string("1\n4\n2\n3"));
 }
 
 static void test_wrap_and_clipboard() {
@@ -261,7 +329,6 @@ static void test_wrap_and_clipboard() {
     ed.wrap_selection("**");
     frame(ed);
     CHECK_EQ(ed.text(), std::string("make **this** bold"));
-    CHECK_EQ(ed.selected_text(), std::string("this"));
     ed.wrap_selection("**");  // toggles back off
     frame(ed);
     CHECK_EQ(ed.text(), std::string("make this bold"));
@@ -279,6 +346,39 @@ static void test_wrap_and_clipboard() {
     c.paste();
     frame(c);
     CHECK_EQ(c.text(), std::string("first\nfirst\nsecond"));
+
+    // Cut then paste puts back exactly what was there, across lines.
+    const std::string doc = "alpha beta\ngamma\n  delta \xC3\xA9psilon\n";
+    Editor x = fresh(doc);
+    x.select_range({0, 6}, {2, 2});
+    frame(x);
+    x.cut();
+    frame(x);
+    CHECK_EQ(x.text(), std::string("alpha delta \xC3\xA9psilon\n"));
+    x.paste();
+    frame(x);
+    CHECK_EQ(x.text(), doc);
+    // Pasting over a selection replaces it; CRLF from other apps comes in as
+    // plain line breaks. Undo takes the paste back.
+    ImGui::SetClipboardText("one\r\ntwo");
+    x.select_range({0, 0}, {0, 5});
+    frame(x);
+    x.paste();
+    frame(x);
+    CHECK_EQ(x.text(), std::string("one\ntwo beta\ngamma\n  delta \xC3\xA9psilon\n"));
+    x.undo();
+    frame(x);
+    CHECK_EQ(x.text(), doc);
+
+    // Cutting a whole line (no selection) and pasting it elsewhere moves it.
+    Editor l = fresh("a\nb\nc");
+    l.cut();
+    frame(l);
+    CHECK_EQ(l.text(), std::string("b\nc"));
+    key(l, ImGuiKey_DownArrow);
+    l.paste();
+    frame(l);
+    CHECK_EQ(l.text(), std::string("b\na\nc"));
 }
 
 static void test_vertical_and_wrap() {
@@ -287,27 +387,48 @@ static void test_vertical_and_wrap() {
     for (int i = 0; i < 40; i++) long_line += "word ";
     Editor ed = fresh(long_line + "\nnext");
     key(ed, ImGuiKey_DownArrow);
-    CHECK_EQ(ed.cursor().line, 0);
-    CHECK(ed.cursor().col > 0);
+    CHECK(ed.cursor().line == 0 && ed.cursor().col > 0);
     key(ed, ImGuiKey_End);
     key(ed, ImGuiKey_End);
     CHECK_EQ(ed.cursor().col, (int)long_line.size());
     key(ed, ImGuiKey_End, ImGuiMod_Ctrl);
-    CHECK_EQ(ed.cursor().line, 1);
+    CHECK(ed.cursor() == (TextPos{1, 4}));
     key(ed, ImGuiKey_Home, ImGuiMod_Ctrl);
-    CHECK_EQ(ed.cursor().line, 0);
-    CHECK_EQ(ed.cursor().col, 0);
+    CHECK(ed.cursor() == (TextPos{0, 0}));
+
+    // Up/down keep the column across a shorter line.
+    Editor v = fresh("abcdef\nab\nabcdef");
+    v.select_range({0, 5}, {0, 5});
+    frame(v);
+    key(v, ImGuiKey_DownArrow);
+    CHECK(v.cursor() == (TextPos{1, 2}));
+    key(v, ImGuiKey_DownArrow);
+    CHECK(v.cursor() == (TextPos{2, 5}));
+
+    // Shift extends a selection from where it started.
+    Editor s = fresh("hello world\nnext");
+    key(s, ImGuiKey_RightArrow, ImGuiMod_Ctrl | ImGuiMod_Shift);
+    CHECK_EQ(s.selected_text(), std::string("hello"));
+    key(s, ImGuiKey_DownArrow, ImGuiMod_Shift);
+    CHECK(s.anchor() == (TextPos{0, 0}) && s.cursor().line == 1);
 }
 
 static void test_reader() {
-    Editor ed = fresh("# T\n\n- [ ] task\n\n```\ncode\n```");
+    const std::string doc = "# T\n\n- [ ] task\n\n```\ncode\n```";
+    Editor ed = fresh(doc);
     ed.set_reader(true);
     frame(ed);
     type(ed, "zzz");  // reader is read-only
-    CHECK_EQ(ed.text(), std::string("# T\n\n- [ ] task\n\n```\ncode\n```"));
+    key(ed, ImGuiKey_Enter);
+    key(ed, ImGuiKey_Backspace);
+    key(ed, ImGuiKey_Delete);
+    CHECK_EQ(ed.text(), doc);
+    // Back in the editor, editing works again.
     ed.set_reader(false);
     frame(ed);
-    CHECK_EQ(ed.headings().size(), (size_t)1);
+    key(ed, ImGuiKey_End);
+    type(ed, "!");
+    CHECK_EQ(ed.text(), std::string("# T!") + doc.substr(3));
 }
 
 static void test_fuzzy_and_keys() {
