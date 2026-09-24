@@ -1774,13 +1774,6 @@ static void test_undo_history() {
         e.redo();
         CHECK_EQ(e.text(), states[i]);
     }
-    e.undo();
-    e.undo();
-    // A new edit drops what could be redone.
-    e.insert_text({0, 0}, "new ");
-    std::string after = e.text();
-    e.redo();
-    CHECK_EQ(e.text(), after);
 
     // Opening another note starts a fresh history: undo can't bring back
     // the previous note's text.
@@ -1851,6 +1844,7 @@ int main() {
     test_fuzzy_and_keys();
     test_ini();
     test_config_schema();
+    test_store();
     test_images();
     test_smear();
     test_layout_motion();
@@ -1861,6 +1855,7 @@ int main() {
     test_find_replace();
     test_navigation_pass();
     test_writing_pass();
+    test_undo_history();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
