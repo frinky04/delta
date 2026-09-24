@@ -101,16 +101,67 @@ void to_utf8(std::string& aff, std::string& dic) {
     aff = std::string("SET UTF-8\n") + (has_flag ? "" : "FLAG UTF-8\n") + out;
 }
 
+// What an accented Latin letter is without its accent ("" if it isn't one).
+const char* unaccent(unsigned cp) {
+    if (cp >= 0xC0 && cp <= 0xC5) return "A";
+    if (cp >= 0xE0 && cp <= 0xE5) return "a";
+    if (cp >= 0xC8 && cp <= 0xCB) return "E";
+    if (cp >= 0xE8 && cp <= 0xEB) return "e";
+    if (cp >= 0xCC && cp <= 0xCF) return "I";
+    if (cp >= 0xEC && cp <= 0xEF) return "i";
+    if ((cp >= 0xD2 && cp <= 0xD6) || cp == 0xD8) return "O";
+    if ((cp >= 0xF2 && cp <= 0xF6) || cp == 0xF8) return "o";
+    if (cp >= 0xD9 && cp <= 0xDC) return "U";
+    if (cp >= 0xF9 && cp <= 0xFC) return "u";
+    switch (cp) {
+        case 0xC6: return "AE";
+        case 0xE6: return "ae";
+        case 0xC7: return "C";
+        case 0xE7: return "c";
+        case 0xD1: return "N";
+        case 0xF1: return "n";
+        case 0xDD: return "Y";
+        case 0xFD: case 0xFF: return "y";
+        case 0x152: return "OE";
+        case 0x153: return "oe";
+    }
+    return "";
+}
+
+// A word without its accents (café -> cafe), for dictionaries that keep
+// words that way (the built-in English ones do); "" if it has none.
+std::string unaccented(const std::string& w) {
+    std::string out;
+    bool changed = false;
+    for (int i = 0; i < (int)w.size();) {
+        int len;
+        unsigned cp = utf8::decode(w.data() + i, w.data() + w.size(), &len);
+        const char* plain = cp >= 0xC0 ? unaccent(cp) : "";
+        if (*plain) { out += plain; changed = true; }
+        else out.append(w, i, len);
+        i += len;
+    }
+    return changed ? out : std::string();
+}
+
 // Caches are dropped whole when they grow past these: cheap, and a note's
 // words come straight back.
 const size_t max_words = 200000, max_lines = 50000, max_suggestions = 2000;
 
 }  // namespace
 
-Speller::Speller() = default;
+Speller::Speller() {
+    suggester_ = std::thread([this] { suggest_worker(); });
+}
 
 Speller::~Speller() {
-    if (worker_.joinable()) worker_.join();
+    {
+        std::lock_guard<std::mutex> lock(sug_mu_);
+        sug_stop_ = true;
+    }
+    sug_cv_.notify_all();
+    suggester_.join();
+    if (loader_.joinable()) loader_.join();
 }
 
 std::vector<std::string> Speller::builtin() {
@@ -129,12 +180,17 @@ std::vector<std::string> Speller::available(const fs::path& dir) {
 void Speller::forget() {
     words_.clear();
     lines_.clear();
+    std::lock_guard<std::mutex> lock(sug_mu_);
     suggestions_.clear();
+    sug_gen_++;  // what the worker is finding now is for what's gone
 }
 
 void Speller::unload() {
-    if (worker_.joinable()) worker_.join();
-    dicts_.clear();
+    if (loader_.joinable()) loader_.join();
+    {
+        std::lock_guard<std::mutex> lock(dict_mu_);  // waits out a suggestion in progress
+        dicts_.clear();
+    }
     forget();
     missing_.clear();
     errors_.clear();
@@ -162,7 +218,7 @@ void Speller::load(const std::vector<std::string>& langs, const fs::path& dir, c
         if (j.builtin || !j.aff.empty()) jobs.push_back(j);
         else missing_.push_back(l);
     }
-    worker_ = std::thread([this, jobs] {
+    loader_ = std::thread([this, jobs] {
         std::vector<std::unique_ptr<Hunspell>> made;
         std::vector<std::string> errors;
         for (auto& j : jobs) {
@@ -194,7 +250,7 @@ void Speller::load(const std::vector<std::string>& langs, const fs::path& dir, c
             hunspell_forget_memory_file(aff_name);
             hunspell_forget_memory_file(dic_name);
         }
-        std::lock_guard<std::mutex> lock(mu_);
+        std::lock_guard<std::mutex> lock(load_mu_);
         loaded_ = std::move(made);
         load_errors_ = std::move(errors);
         done_ = true;
@@ -204,13 +260,14 @@ void Speller::load(const std::vector<std::string>& langs, const fs::path& dir, c
 bool Speller::ready() {
     if (ready_) return true;
     {
-        std::lock_guard<std::mutex> lock(mu_);
+        std::lock_guard<std::mutex> lock(load_mu_);
         if (!done_) return false;
+        std::lock_guard<std::mutex> dicts(dict_mu_);
         dicts_ = std::move(loaded_);
         errors_ = std::move(load_errors_);
+        for (auto& d : dicts_)
+            for (auto& w : words_extra_) d->add(w);
     }
-    for (auto& d : dicts_)
-        for (auto& w : words_extra_) d->add(w);
     forget();
     ready_ = true;
     gen_++;
@@ -220,12 +277,20 @@ bool Speller::ready() {
 void Speller::add_word(const std::string& word) {
     if (word.empty()) return;
     words_extra_.push_back(word);
-    for (auto& d : dicts_) d->add(word);
+    {
+        std::lock_guard<std::mutex> lock(dict_mu_);
+        for (auto& d : dicts_) d->add(word);
+    }
     forget();
     gen_++;
 }
 
 bool Speller::correct(const std::string& word) {
+    std::lock_guard<std::mutex> lock(dict_mu_);
+    return correct_locked(word);
+}
+
+bool Speller::correct_locked(const std::string& word) {
     if (!ready_ || dicts_.empty()) return true;  // nothing to check against
     auto it = words_.find(word);
     if (it != words_.end()) return it->second;
@@ -233,14 +298,65 @@ bool Speller::correct(const std::string& word) {
     bool ok = false;
     for (auto& d : dicts_)
         if ((ok = d->spell(word))) break;
+    // Accents the dictionary doesn't keep: café is right if cafe is.
+    if (std::string plain; !ok && !(plain = unaccented(word)).empty())
+        for (auto& d : dicts_)
+            if ((ok = d->spell(plain))) break;
     words_[word] = ok;
     return ok;
 }
 
-const std::vector<std::string>& Speller::suggest(const std::string& word) {
-    auto it = suggestions_.find(word);
-    if (it != suggestions_.end()) return it->second;
+std::vector<std::string> Speller::suggest(const std::string& word) {
+    {
+        std::lock_guard<std::mutex> lock(sug_mu_);
+        if (auto it = suggestions_.find(word); it != suggestions_.end()) return it->second;
+    }
+    std::lock_guard<std::mutex> dicts(dict_mu_);
+    std::vector<std::string> found = find_suggestions(word);
+    std::lock_guard<std::mutex> lock(sug_mu_);
     if (suggestions_.size() > max_suggestions) suggestions_.clear();
+    suggestions_[word] = found;
+    return found;
+}
+
+std::optional<std::vector<std::string>> Speller::suggest_later(const std::string& word) {
+    std::lock_guard<std::mutex> lock(sug_mu_);
+    if (auto it = suggestions_.find(word); it != suggestions_.end()) return it->second;
+    if (word != sug_doing_ && !(sug_has_want_ && sug_want_ == word)) {
+        sug_want_ = word;
+        sug_has_want_ = true;
+        busy_ = true;
+        sug_cv_.notify_one();
+    }
+    return std::nullopt;
+}
+
+void Speller::suggest_worker() {
+    std::unique_lock<std::mutex> lock(sug_mu_);
+    for (;;) {
+        sug_cv_.wait(lock, [&] { return sug_stop_ || sug_has_want_; });
+        if (sug_stop_) return;
+        std::string word = std::move(sug_want_);
+        sug_has_want_ = false;
+        sug_doing_ = word;
+        uint64_t gen = sug_gen_;
+        lock.unlock();
+        std::vector<std::string> found;
+        {
+            std::lock_guard<std::mutex> dicts(dict_mu_);
+            found = find_suggestions(word);
+        }
+        lock.lock();
+        sug_doing_.clear();
+        if (gen == sug_gen_) {
+            if (suggestions_.size() > max_suggestions) suggestions_.clear();
+            suggestions_[word] = std::move(found);
+        }
+        busy_ = sug_has_want_;
+    }
+}
+
+std::vector<std::string> Speller::find_suggestions(const std::string& word) {
     std::vector<std::string> out;
     auto add = [&](std::string s) {
         if (out.size() < 8 && std::find(out.begin(), out.end(), s) == out.end()) out.push_back(std::move(s));
@@ -249,7 +365,7 @@ const std::vector<std::string>& Speller::suggest(const std::string& word) {
     // lower-case self: hunspell offers "Te" for "Teh", but "the" for "teh".
     bool capitalised = !word.empty() && word[0] >= 'A' && word[0] <= 'Z' &&
                        std::none_of(word.begin() + 1, word.end(), [](char c) { return c >= 'A' && c <= 'Z'; });
-    if (ready_ && capitalised) {
+    if (capitalised) {
         std::string low = word;
         low[0] = (char)(low[0] - 'A' + 'a');
         for (auto& d : dicts_)
@@ -258,10 +374,9 @@ const std::vector<std::string>& Speller::suggest(const std::string& word) {
                 add(std::move(s));
             }
     }
-    if (ready_)
-        for (auto& d : dicts_)
-            for (auto& s : d->suggest(word)) add(s);
-    return suggestions_[word] = std::move(out);
+    for (auto& d : dicts_)
+        for (auto& s : d->suggest(word)) add(s);
+    return out;
 }
 
 const std::vector<WordSpan>& Speller::misspelt(const std::string& line) {
@@ -270,24 +385,31 @@ const std::vector<WordSpan>& Speller::misspelt(const std::string& line) {
     if (lines_.size() > max_lines) lines_.clear();
     std::vector<WordSpan> bad;
     for (auto& w : spell_words(line))
-        if (!correct(spell_form(line, w))) bad.push_back(w);
+        if (!correct_locked(spell_form(line, w))) bad.push_back(w);
     return lines_[line] = std::move(bad);
 }
 
 bool Speller::check(const std::vector<std::string>& lines, std::vector<Diagnostic>& out, double budget) {
     using clock = std::chrono::steady_clock;
     auto until = clock::now() + std::chrono::duration<double>(budget);
+    // The dictionaries are only needed for lines not seen before, and then
+    // only if the suggestion worker isn't using them: never wait for it.
+    std::unique_lock<std::mutex> dicts(dict_mu_, std::defer_lock);
     bool checked_one = false, complete = true;
-    out.clear();
+    std::vector<Diagnostic> marks;
     std::vector<bool> skip = spell_skipped(lines);
     for (int i = 0; i < (int)lines.size(); i++) {
         if (skip[i]) continue;
         const std::string& s = lines[i];
         if (!lines_.count(s)) {
-            if (checked_one && clock::now() >= until) { complete = false; continue; }
+            if ((checked_one && clock::now() >= until) || (!dicts.owns_lock() && !dicts.try_lock())) {
+                complete = false;
+                continue;
+            }
             checked_one = true;
         }
-        for (auto& w : misspelt(s)) out.push_back({i, w.begin, w.end, "", Diagnostic::Kind::Spelling});
+        for (auto& w : misspelt(s)) marks.push_back({i, w.begin, w.end, "", Diagnostic::Kind::Spelling});
     }
+    out = std::move(marks);
     return complete;
 }

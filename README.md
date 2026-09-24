@@ -88,7 +88,7 @@ Expand selection grows word, sentence, line, paragraph, section (under its headi
 
 Misspelt words get a dotted underline as you write (`spelling` in `[colors]`). The word you're typing isn't marked until you've moved on from it. Only prose is checked: code, links' targets, URLs, paths, emails, `#tags`, `snake_case` and `camelCase` names, ALL CAPS, words with digits and front matter are left alone. The status bar counts the misspelt words apart from problems: click the count or press `alt+F8` / `alt+shift+F8` to go through them. With the caret on one, its likeliest fix shows in the middle of the status line ("Disempower?"). `alt+.` puts it in without opening anything: it fixes the misspelt word at the caret, or the nearest one before it in the paragraph, and leaves the caret where it was, so you can fix a typo a few words back and keep typing. Press it again for the next guess (the last one is the word as you wrote it); one `ctrl+z` undoes it whichever guess it is on. Clicking the guess in the status line does the same, and clicking `ctrl+. more` (or right-clicking a misspelt word) opens the fix tool in the status line, then the rest of the note one word at a time (see the status-line tools under Editing).
 
-English (`en_US`, and `en_GB` with -ise spellings) is built in. `[spell]` in the config picks the dictionaries, and a space can have its own:
+English (`en_US`, and `en_GB` with -ise spellings) is built in. Its word lists have no accents, so an accented spelling (café, naïve) counts as right when the word without them is. `[spell]` in the config picks the dictionaries, and a space can have its own:
 
 ```ini
 [spell]
