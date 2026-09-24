@@ -164,9 +164,7 @@ void App::load_settings() {
     cfg_ = c;
     cfg_mtime_ = mtime_of(cfg_path_);
 
-    build_theme(cfg_, issues);
-    apply_imgui_style();
-    style_native_window(win_, col_rgb(T.bg), col_rgb(T.dim), T.dark);
+    show_theme(cfg_.theme);
     anim::enabled = cfg_.animations;
     anim::speed = cfg_.animation_speed;
     apply_bindings();
@@ -826,14 +824,19 @@ void App::choose_font(bool mono) {
     font_picker_gen_ = palette_.generation();
 }
 
-// Writes the font picker's choice into the config: into the editor as one
-// undoable edit when the config is open there, else into the file. Either
-// way it's saved, and the reload that follows loads the font.
+// Writes the font picker's choice into the config; the reload that follows
+// loads the font.
 void App::set_font(bool mono, const std::string& value) {
-    const char* key = mono ? "mono_font" : "font";
     status(std::string(mono ? "mono font: " : "font: ") + value);
+    set_setting("editor", mono ? "mono_font" : "font", value);
+}
+
+// Writes one setting into the config: into the editor as one undoable edit
+// when the config is open there, else into the file. Either way it's saved
+// and reloaded.
+void App::set_setting(const std::string& section, const std::string& key, const std::string& value) {
     if (is_config()) {
-        ConfigEdit e = config_set(editor_.lines(), "editor", key, value);
+        ConfigEdit e = config_set(editor_.lines(), section, key, value);
         editor_.replace_range({e.line, e.col0}, {e.line, e.col1}, e.text);
         save();
         return;
@@ -848,7 +851,7 @@ void App::set_font(bool mono, const std::string& value) {
         lines.push_back(line);
     }
     if (text.empty() || text.back() == '\n') lines.emplace_back();  // the empty last line after a final newline
-    apply_edit(lines, config_set(lines, "editor", key, value));
+    apply_edit(lines, config_set(lines, section, key, value));
     std::string out;
     for (size_t i = 0; i < lines.size(); i++) out += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
     std::string err;
@@ -857,6 +860,37 @@ void App::set_font(bool mono, const std::string& value) {
         return;
     }
     load_settings();
+}
+
+// Picks a theme, showing each as the selection lands on it. Enter keeps it
+// (into the config); leaving any other way puts the config's back.
+void App::choose_theme() {
+    std::vector<PaletteItem> items;
+    for (auto& t : all_themes()) {
+        PaletteItem it;
+        it.label = t.name;
+        it.current = t.name == cfg_.theme;
+        it.meta = std::string(t.dark() ? "dark" : "light") + (it.current ? ", current" : "");
+        it.action = [this, name = t.name] {
+            status("theme: " + name);
+            set_setting("appearance", "theme", name);
+        };
+        items.push_back(std::move(it));
+    }
+    Palette::PickOptions opts;
+    opts.select = [this](const PaletteItem* sel) {
+        if (sel && sel->label != theme_shown_) show_theme(sel->label);
+    };
+    palette_.pick("theme: ", std::move(items), std::move(opts));
+    theme_picker_gen_ = palette_.generation();
+}
+
+void App::show_theme(const std::string& name) {
+    theme_shown_ = name;
+    build_theme(cfg_, &name);
+    apply_imgui_style();
+    style_native_window(win_, col_rgb(T.bg), col_rgb(T.dim), T.dark);
+    anim::active = true;  // drawn in it next frame
 }
 
 std::vector<BindingDoc> App::binding_docs() const {
@@ -975,6 +1009,7 @@ void App::register_commands() {
     add("config.add_setting", "add setting", "", [this] { add_setting(); });
     add("font.choose", "choose font", "", [this] { choose_font(false); });
     add("font.choose_mono", "choose mono font", "", [this] { choose_font(true); });
+    add("theme.choose", "choose theme", "", [this] { choose_theme(); });
     add("config.open_external", "open config in another app", "", [this] {
         if (!open_with_default_app(cfg_path_)) status("couldn't open " + path_u8(cfg_path_), true);
     });
@@ -2676,6 +2711,8 @@ void App::frame() {
         preview_want_.clear();
     }
     if (preview_want_ != preview_loaded_) anim::active = true;
+    // The theme picker left without a pick: the config's theme again.
+    if (!theme_picker_open() && theme_shown_ != cfg_.theme) show_theme(cfg_.theme);
     draw_viewer();
     if (palette_.is_open() && note_) {
         std::string t = palette_.text();

@@ -70,6 +70,16 @@ note.daily = ctrl+shift+d
 
 For other languages, put a hunspell dictionary (`de_DE.aff` and `de_DE.dic`) in the `dictionaries` folder next to the config.
 
+"choose theme" lists the built-in themes and shows each one as you move over it. Enter keeps it, escape goes back. Besides delta's own dark and light, there are ports of monkeytype's serika dark, serika, carbon, 8008, olivia, bento and moonlight, and of nord, dracula, gruvbox, catppuccin, rosé pine, tokyo night and everforest. Any colour in `[colors]` goes on top of the theme:
+
+```ini
+[appearance]
+theme = nord
+
+[colors]
+accent = #ebcb8b
+```
+
 ## Building
 
 ```

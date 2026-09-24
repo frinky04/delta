@@ -541,6 +541,59 @@ static void test_ini() {
     CHECK(!ini_section("key = [x]", name));
 }
 
+static float contrast(unsigned a, unsigned b) {
+    auto lum = [](unsigned rgb) {
+        float out = 0;
+        for (auto [shift, w] : {std::pair{16, 0.2126f}, {8, 0.7152f}, {0, 0.0722f}}) {
+            float c = ((rgb >> shift) & 0xFF) / 255.0f;
+            out += w * (c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f));
+        }
+        return out;
+    };
+    float x = lum(a), y = lum(b);
+    return (std::max(x, y) + 0.05f) / (std::min(x, y) + 0.05f);
+}
+
+static void test_themes() {
+    std::set<std::string> names;
+    for (auto& t : all_themes()) {
+        // Names are written in the config as they are: lowercase, no spaces.
+        CHECK(names.insert(t.name).second);
+        CHECK(std::all_of(t.name.begin(), t.name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }));
+        Config c;
+        std::vector<ConfigIssue> is;
+        parse_config("[appearance]\ntheme = " + t.name + "\n", c, is);
+        CHECK(is.empty() && c.theme == t.name);
+
+        // Readable: text clearly, secondary text and the caret enough to find.
+        unsigned bg = t.colours[0], dim = t.colours[4], text = t.colours[5], accent = t.colours[7];
+        if (contrast(text, bg) < 4.5f || contrast(dim, bg) < 2.5f || contrast(accent, bg) < 2.5f)
+            { CHECK(!"theme contrast"); std::printf("   %s: text %.1f dim %.1f accent %.1f\n", t.name.c_str(), contrast(text, bg), contrast(dim, bg), contrast(accent, bg)); }
+    }
+    CHECK(find_theme("dark") == &all_themes()[0] && find_theme("light") && !find_theme("Dark") && !find_theme(""));
+    CHECK_EQ(theme_colour("light", "accent"), std::string("#c96f0e"));
+    CHECK_EQ(theme_colour("nope", "background"), std::string("#0c0c0c"));  // delta's dark
+    CHECK_EQ(theme_colour("dark", "nope"), std::string());
+    CHECK_EQ(find_setting("colors", "text")->default_for("light"), std::string("#2e2e2e"));
+
+    // A mistyped theme names the nearest one rather than all of them.
+    Config c;
+    std::vector<ConfigIssue> is;
+    parse_config("[appearance]\ntheme = serika dark\n", c, is);
+    CHECK(c.theme == "dark" && is.size() == 1);
+    if (!is.empty()) CHECK_EQ(is[0].msg, std::string("no theme with this name; did you mean serika_dark? using dark"));
+
+    // [colors] goes on top of any theme, and dark follows the background.
+    parse_config("[appearance]\ntheme = nord\n[colors]\naccent = #123456\nbackground = #ffffff\n", c, is);
+    build_theme(c);
+    CHECK(col_rgb(T.accent) == 0x123456u);
+    CHECK(col_rgb(T.text) == find_theme("nord")->colours[5]);
+    CHECK(!T.dark);
+    std::string light = "light";
+    build_theme(c, &light);  // the picker's preview
+    CHECK(col_rgb(T.text) == 0x2e2e2eu);
+}
+
 static void test_config_schema() {
     const Config def = [] {
         Config c;
@@ -554,11 +607,11 @@ static void test_config_schema() {
     // shows errors the user never made.
     std::string rejected;  // settings whose default is flagged
     for (auto& s : all_settings())
-        for (const char* theme : {"dark", "light"}) {
+        for (auto& t : all_themes()) {
             Config c;
             std::vector<ConfigIssue> is;
-            parse_config(std::string("[") + s.section + "]\n" + s.key + " = " + s.default_for(theme) + "\n", c, is);
-            if (!is.empty()) rejected += std::string(s.key) + "/" + theme + " ";
+            parse_config(std::string("[") + s.section + "]\n" + s.key + " = " + s.default_for(t.name) + "\n", c, is);
+            if (!is.empty()) rejected += std::string(s.key) + "/" + t.name + " ";
         }
     CHECK_EQ(rejected, std::string());
     {
@@ -2618,6 +2671,7 @@ int main() {
     test_spell_config();
     test_fonts();
     test_ui_voice();
+    test_themes();
     test_manual();
     test_natural_sort();
     test_command_search();

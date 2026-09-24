@@ -512,6 +512,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     }
     dl->PopClipRect();
     ImGui::End();
+    if (open_ && opts_.select) opts_.select(n > 0 ? &items_[std::clamp(sel_, 0, n - 1)] : nullptr);
     return chosen;
 }
 

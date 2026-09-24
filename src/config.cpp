@@ -7,6 +7,7 @@
 #include <sstream>
 #include <tuple>
 
+#include "theme.h"
 #include "util.h"
 
 using K = Setting::Kind;
@@ -28,55 +29,65 @@ std::vector<std::string> split_list(const std::string& v) {
 }
 
 const std::vector<Setting>& all_settings() {
+    static const std::string themes = [] {
+        std::string s;
+        for (auto& t : all_themes()) s += (s.empty() ? "" : "|") + t.name;
+        return s;
+    }();
+    // Colours have no default of their own: it's the theme's (default_for).
     static const std::vector<Setting> table = {
-        // section, key, kind, default, light default, lo, hi, choices, description
+        // section, key, kind, default, lo, hi, choices, description
         // (descriptions only where the name doesn't say it all)
-        {"general", "notes_dir", K::Path, "~/Documents/delta", nullptr, 0, 0, nullptr, "~ is home"},
-        {"general", "default_space", K::Text, "default", nullptr, 0, 0, nullptr, ""},
-        {"general", "daily_space", K::Text, "daily", nullptr, 0, 0, nullptr, ""},
-        {"general", "daily_format", K::Text, "%Y-%m-%d", nullptr, 0, 0, nullptr, "strftime codes"},
-        {"general", "new_note_heading", K::Bool, "true", nullptr, 0, 0, nullptr, "name as first heading"},
+        {"general", "notes_dir", K::Path, "~/Documents/delta", 0, 0, nullptr, "~ is home"},
+        {"general", "default_space", K::Text, "default", 0, 0, nullptr, ""},
+        {"general", "daily_space", K::Text, "daily", 0, 0, nullptr, ""},
+        {"general", "daily_format", K::Text, "%Y-%m-%d", 0, 0, nullptr, "strftime codes"},
+        {"general", "new_note_heading", K::Bool, "true", 0, 0, nullptr, "name as first heading"},
 
-        {"editor", "font", K::Text, "Noto Sans", nullptr, 0, 0, nullptr, "an installed font's name, or a font file"},
-        {"editor", "mono_font", K::Text, "Noto Sans Mono", nullptr, 0, 0, nullptr, "for code; a name or a file"},
-        {"editor", "font_size", K::Float, "14", nullptr, 8, 48, nullptr, "px"},
-        {"editor", "line_height", K::Float, "1.5", nullptr, 1, 3, nullptr, "x font size"},
-        {"editor", "code_size", K::Float, "0.9", nullptr, 0.5f, 1.5f, nullptr, "x font size; code"},
-        {"editor", "small_size", K::Float, "0.8", nullptr, 0.5f, 1.5f, nullptr, "x font size; line numbers, image labels"},
-        {"editor", "column_width", K::Int, "72", nullptr, 20, 400, nullptr, "characters"},
-        {"editor", "line_numbers", K::Bool, "false", nullptr, 0, 0, nullptr, ""},
-        {"editor", "tab_size", K::Int, "4", nullptr, 1, 8, nullptr, "spaces"},
-        {"editor", "autosave_delay", K::Float, "0.6", nullptr, 0.1f, 60, nullptr, "seconds idle"},
-        {"editor", "cursor_blink", K::Bool, "true", nullptr, 0, 0, nullptr, ""},
-        {"editor", "caret_style", K::Choice, "thick", nullptr, 0, 0, "bar|thick|block", "bar, thick or block"},
-        {"editor", "caret_trail", K::Bool, "false", nullptr, 0, 0, nullptr, "smears as it moves"},
-        {"editor", "fade_syntax", K::Bool, "true", nullptr, 0, 0, nullptr, "dim markdown away from the caret"},
-        {"editor", "blank_line_height", K::Float, "0.6", nullptr, 0.2f, 1, nullptr, "x line height"},
-        {"editor", "scroll_past_end", K::Bool, "true", nullptr, 0, 0, nullptr, ""},
+        {"editor", "font", K::Text, "Noto Sans", 0, 0, nullptr, "an installed font's name, or a font file"},
+        {"editor", "mono_font", K::Text, "Noto Sans Mono", 0, 0, nullptr, "for code; a name or a file"},
+        {"editor", "font_size", K::Float, "14", 8, 48, nullptr, "px"},
+        {"editor", "line_height", K::Float, "1.5", 1, 3, nullptr, "x font size"},
+        {"editor", "code_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; code"},
+        {"editor", "small_size", K::Float, "0.8", 0.5f, 1.5f, nullptr, "x font size; line numbers, image labels"},
+        {"editor", "column_width", K::Int, "72", 20, 400, nullptr, "characters"},
+        {"editor", "line_numbers", K::Bool, "false", 0, 0, nullptr, ""},
+        {"editor", "tab_size", K::Int, "4", 1, 8, nullptr, "spaces"},
+        {"editor", "autosave_delay", K::Float, "0.6", 0.1f, 60, nullptr, "seconds idle"},
+        {"editor", "cursor_blink", K::Bool, "true", 0, 0, nullptr, ""},
+        {"editor", "caret_style", K::Choice, "thick", 0, 0, "bar|thick|block", "bar, thick or block"},
+        {"editor", "caret_trail", K::Bool, "false", 0, 0, nullptr, "smears as it moves"},
+        {"editor", "fade_syntax", K::Bool, "true", 0, 0, nullptr, "dim markdown away from the caret"},
+        {"editor", "blank_line_height", K::Float, "0.6", 0.2f, 1, nullptr, "x line height"},
+        {"editor", "scroll_past_end", K::Bool, "true", 0, 0, nullptr, ""},
 
-        {"appearance", "theme", K::Choice, "dark", nullptr, 0, 0, "dark|light", "dark or light"},
-        {"appearance", "animations", K::Bool, "true", nullptr, 0, 0, nullptr, ""},
-        {"appearance", "ui_size", K::Float, "0.9", nullptr, 0.5f, 1.5f, nullptr, "x font size; palette, status line, notes"},
-        {"appearance", "animation_speed", K::Float, "1", nullptr, 0.1f, 10, nullptr, "2 is twice as fast"},
-        {"appearance", "palette_selection", K::Choice, "marker", nullptr, 0, 0, "marker|invert", "marker or invert"},
+        {"appearance", "theme", K::Choice, "dark", 0, 0, themes.c_str(), "run \"choose theme\" to see them"},
+        {"appearance", "animations", K::Bool, "true", 0, 0, nullptr, ""},
+        {"appearance", "ui_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; palette, status line, notes"},
+        {"appearance", "animation_speed", K::Float, "1", 0.1f, 10, nullptr, "2 is twice as fast"},
+        {"appearance", "palette_selection", K::Choice, "marker", 0, 0, "marker|invert", "marker or invert"},
 
-        {"spell", "enabled", K::Bool, "true", nullptr, 0, 0, nullptr, "underline misspelt words"},
-        {"spell", "languages", K::Text, "en_US", nullptr, 0, 0, nullptr, "dictionaries, comma-separated"},
+        {"spell", "enabled", K::Bool, "true", 0, 0, nullptr, "underline misspelt words"},
+        {"spell", "languages", K::Text, "en_US", 0, 0, nullptr, "dictionaries, comma-separated"},
 
-        {"colors", "accent", K::Colour, "#e0851e", "#c96f0e", 0, 0, nullptr, "caret, selection"},
-        {"colors", "background", K::Colour, "#0c0c0c", "#f4f4f4", 0, 0, nullptr, ""},
-        {"colors", "surface", K::Colour, "#151515", "#ffffff", 0, 0, nullptr, "raised panels"},
-        {"colors", "border", K::Colour, "#242424", "#dedede", 0, 0, nullptr, ""},
-        {"colors", "faint", K::Colour, "#383838", "#bdbdbd", 0, 0, nullptr, "quietest text"},
-        {"colors", "dim", K::Colour, "#6b6b6b", "#8c8c8c", 0, 0, nullptr, "symbols, secondary text"},
-        {"colors", "text", K::Colour, "#bdbdbd", "#2e2e2e", 0, 0, nullptr, ""},
-        {"colors", "bright", K::Colour, "#f0f0f0", "#0a0a0a", 0, 0, nullptr, "headings, bold"},
-        {"colors", "code", K::Colour, "#9e9e9e", "#4a4a4a", 0, 0, nullptr, ""},
-        {"colors", "code_background", K::Colour, "#161616", "#e9e9e9", 0, 0, nullptr, ""},
-        {"colors", "error", K::Colour, "#d0564a", "#b8412f", 0, 0, nullptr, "problem marks"},
-        {"colors", "spelling", K::Colour, "#ac5d55", "#a95b50", 0, 0, nullptr, "misspelt word marks"},
+        {"colors", "accent", K::Colour, "", 0, 0, nullptr, "caret, selection"},
+        {"colors", "background", K::Colour, "", 0, 0, nullptr, ""},
+        {"colors", "surface", K::Colour, "", 0, 0, nullptr, "raised panels"},
+        {"colors", "border", K::Colour, "", 0, 0, nullptr, ""},
+        {"colors", "faint", K::Colour, "", 0, 0, nullptr, "quietest text"},
+        {"colors", "dim", K::Colour, "", 0, 0, nullptr, "symbols, secondary text"},
+        {"colors", "text", K::Colour, "", 0, 0, nullptr, ""},
+        {"colors", "bright", K::Colour, "", 0, 0, nullptr, "headings, bold"},
+        {"colors", "code", K::Colour, "", 0, 0, nullptr, ""},
+        {"colors", "code_background", K::Colour, "", 0, 0, nullptr, ""},
+        {"colors", "error", K::Colour, "", 0, 0, nullptr, "problem marks"},
+        {"colors", "spelling", K::Colour, "", 0, 0, nullptr, "misspelt word marks"},
     };
     return table;
+}
+
+std::string Setting::default_for(const std::string& theme) const {
+    return kind == Kind::Colour ? theme_colour(theme, key) : def;
 }
 
 const Setting* find_setting(const std::string& section, const std::string& key) {
@@ -179,6 +190,11 @@ static std::string check(const Setting& s, const std::string& v, std::string& us
             }
             if (std::find(list.begin(), list.end(), l) != list.end()) { use = l; return {}; }
             use = s.def;
+            if (list.size() > 4) {  // too many to list: the nearest one
+                std::string near = suggest(l, list);
+                return std::string("no ") + s.key + " with this name; " + (near.empty() ? "" : "did you mean " + near + "? ") +
+                       "using " + s.def;
+            }
             std::string msg = "use ";
             for (size_t i = 0; i < list.size(); i++) msg += (i ? (i + 1 == list.size() ? " or " : ", ") : "") + list[i];
             return msg + ", using " + s.def;

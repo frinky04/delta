@@ -16,7 +16,26 @@ struct Theme {
 
 extern Theme T;
 
-void build_theme(const Config& cfg, std::vector<ConfigIssue>& issues);
+// A built-in colour scheme: the twelve colours [colors] can override, as
+// 0xRRGGBB, in the order kColourSlots names them.
+struct ThemeDef {
+    std::string name;
+    unsigned colours[12];
+    bool dark() const;  // by its background
+};
+extern const char* const kColourSlots[12];  // background, surface, ...
+
+// Delta's own two first, then the rest in the order the picker lists them.
+const std::vector<ThemeDef>& all_themes();
+// The theme called `name`, or null.
+const ThemeDef* find_theme(const std::string& name);
+// A theme's colour for a [colors] slot, as "#rrggbb" ("" if no such slot).
+// An unknown theme is delta's dark.
+std::string theme_colour(const std::string& theme, const std::string& slot);
+
+// Builds T from the config's theme and [colors]; `theme`, if given, stands
+// in for the config's (the theme picker's preview).
+void build_theme(const Config& cfg, const std::string* theme = nullptr);
 void apply_imgui_style();
 
 ImU32 col_alpha(ImU32 c, float a);          // multiply alpha

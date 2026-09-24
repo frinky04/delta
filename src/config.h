@@ -80,14 +80,12 @@ struct Setting {
     const char* section;
     const char* key;
     Kind kind;
-    const char* def;        // default, as written in the file
-    const char* def_light;  // colours: the light theme's default (else null)
+    const char* def;        // default, as written in the file ("" for colours)
     float lo, hi;           // Float and Int: allowed range
     const char* choices;    // Choice: "bar|thick|block"
     const char* desc;       // one short line, lowercase
-    std::string default_for(const std::string& theme) const {
-        return theme == "light" && def_light ? def_light : def;
-    }
+    // The default under a theme: a colour's is the theme's own.
+    std::string default_for(const std::string& theme) const;
 };
 const std::vector<Setting>& all_settings();
 const Setting* find_setting(const std::string& section, const std::string& key);

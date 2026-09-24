@@ -50,6 +50,9 @@ public:
         // nothing is), `h` high at `pos` and `w` wide. Every frame the
         // palette shows.
         std::function<void(const PaletteItem* sel, ImDrawList* dl, ImVec2 pos, float w, float h, float alpha)> preview;
+        // Told the selected row (null when nothing is) at the end of every
+        // frame the pick is open.
+        std::function<void(const PaletteItem* sel)> select;
     };
 
     // `wide`: a scoped mode starts on every space.

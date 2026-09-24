@@ -86,6 +86,10 @@ private:
     bool font_picker_open() const { return font_picker_ && palette_.visible() && palette_.generation() == font_picker_gen_; }
     void choose_font(bool mono);
     void set_font(bool mono, const std::string& value);
+    void set_setting(const std::string& section, const std::string& key, const std::string& value);
+    bool theme_picker_open() const { return palette_.is_open() && palette_.generation() == theme_picker_gen_; }
+    void choose_theme();
+    void show_theme(const std::string& name);
     bool is_config() const { return note_ && note_->path == cfg_path_; }
     // The README, built in and read only: always in reader mode, never saved.
     // Its path is one no file can have.
@@ -271,6 +275,9 @@ private:
     FontBytes preview_bytes_;
     std::string preview_sel_;
     double preview_since_ = 0;
+    // The theme on screen: the config's, or the one the theme picker is on.
+    std::string theme_shown_;
+    int theme_picker_gen_ = -1;
     float dpi_ = 1, zoom_ = 1;
 
     std::string space_;
