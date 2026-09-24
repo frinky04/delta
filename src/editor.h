@@ -239,7 +239,9 @@ private:
     struct Snap {
         std::vector<std::string> lines;
         TextPos cur, anchor;
+        size_t bytes = 0;  // roughly what it holds in memory
     };
+    Snap snapshot() const;
     enum class Edit { None, Type, Delete, Other };
 
     // layout
@@ -320,6 +322,7 @@ private:
     void draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::string& s,
                         const std::vector<uint16_t>& st, float y, int index, float x0, float shown_h);
     void sync_edits();               // pair lines before/after an edit
+    void carry_layout(size_t p, size_t s);  // cached layout follows lines that moved
     void animate_layout(float dt);   // displayed heights chase real ones
     void resolve_pending();          // conserve space across the last structural edit
     void draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m, const std::string& s,
@@ -380,6 +383,7 @@ private:
     uint64_t version_ = 1;
 
     std::vector<Line> lay_[2];
+    uint64_t laid_version_[2] = {0, 0};  // text each layout was last checked against
     float total_h_[2] = {0, 0};
     EditorParams P_;
     float col_x_ = 0, origin_y_ = 0, view_h_ = 600;

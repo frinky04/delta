@@ -125,9 +125,16 @@ std::string Editor::selected_text() const {
 }
 
 int Editor::selection_length() const {
-    int n = 0;
-    for (unsigned char c : selected_text())
-        if (!utf8::is_cont(c)) n++;
+    // Counted in place (the status bar asks every frame): characters, plus
+    // one for each line break.
+    TextPos a = std::min(cur_, anchor_), b = std::max(cur_, anchor_);
+    int n = b.line - a.line;
+    for (int l = a.line; l <= b.line; l++) {
+        const std::string& s = lines_[l];
+        int from = l == a.line ? a.col : 0, to = l == b.line ? b.col : (int)s.size();
+        for (int i = from; i < to; i++)
+            if (!utf8::is_cont((unsigned char)s[i])) n++;
+    }
     return n;
 }
 
@@ -188,13 +195,27 @@ std::pair<int, int> Editor::selected_lines() const {
 // ---------------------------------------------------------------------------
 // Edit primitives
 
+Editor::Snap Editor::snapshot() const {
+    Snap s{lines_, cur_, anchor_};
+    s.bytes = lines_.size() * sizeof(std::string);
+    for (auto& l : lines_) s.bytes += l.size();
+    return s;
+}
+
 void Editor::begin_edit(Edit kind) {
     double now = ImGui::GetTime();
     bool merge = kind != Edit::Other && kind == last_edit_ && now - last_edit_time_ < 1.2 &&
                  cur_ == last_edit_pos_ && !has_selection();
     if (!merge) {
-        undo_.push_back({lines_, cur_, anchor_});
-        if (undo_.size() > 500) undo_.erase(undo_.begin());
+        // Every step is a whole copy of the note, so a big note keeps fewer
+        // of them: at most 500 steps, and at most kUndoBytes in all.
+        const size_t kUndoBytes = (size_t)128 << 20;
+        undo_.push_back(snapshot());
+        size_t total = 0;
+        for (auto& s : undo_) total += s.bytes;
+        size_t drop = 0;
+        while (undo_.size() - drop > 1 && (undo_.size() - drop > 500 || total > kUndoBytes)) total -= undo_[drop++].bytes;
+        undo_.erase(undo_.begin(), undo_.begin() + drop);
     }
     redo_.clear();
     last_edit_ = kind;
@@ -253,7 +274,7 @@ void Editor::replace_selection(const std::string& text) {
 
 void Editor::undo() {
     if (undo_.empty()) return;
-    redo_.push_back({lines_, cur_, anchor_});
+    redo_.push_back(snapshot());
     Snap s = std::move(undo_.back());
     undo_.pop_back();
     std::vector<std::string> before = std::move(lines_);
@@ -267,7 +288,7 @@ void Editor::undo() {
 
 void Editor::redo() {
     if (redo_.empty()) return;
-    undo_.push_back({lines_, cur_, anchor_});
+    undo_.push_back(snapshot());
     Snap s = std::move(redo_.back());
     redo_.pop_back();
     std::vector<std::string> before = std::move(lines_);
@@ -787,23 +808,33 @@ bool Editor::link_at_caret(LinkSpan& out) const {
 void Editor::renumber_lists(int l0, int l1) {
     if (syntax_ != Syntax::Markdown) return;
     const int n = (int)lines_.size();
-    std::vector<LineInfo> info(n);
-    std::vector<uint16_t> st;
-    bool code = false;
-    for (int k = 0; k < n; k++) {
-        md_analyze(lines_[k], code, info[k], st);
-        if (info[k].kind == LineKind::Fence) code = !code;
+    // Only the lists near l0..l1 are looked at, so lines are analyzed as the
+    // walk reaches them; which lines are inside code comes from the fences.
+    std::vector<char> code(n, 0);
+    for (int k = 0, in = 0; k < n; k++) {
+        code[k] = (char)in;
+        if (md_is_fence(lines_[k])) in = !in;
     }
+    std::vector<LineInfo> infos(n);
+    std::vector<char> have(n, 0);
+    std::vector<uint16_t> st;
+    auto info = [&](int k) -> const LineInfo& {
+        if (!have[k]) {
+            md_analyze(lines_[k], code[k], infos[k], st);
+            have[k] = 1;
+        }
+        return infos[k];
+    };
     auto item = [&](int k, int indent) {
-        return info[k].kind == LineKind::Para && info[k].ordered && info[k].marker_begin == indent;
+        return info(k).kind == LineKind::Para && info(k).ordered && info(k).marker_begin == indent;
     };
     auto nested = [&](int k, int indent) {  // deeper lines that belong to an item
-        return info[k].kind == LineKind::Para && info[k].marker_begin > indent;
+        return info(k).kind == LineKind::Para && info(k).marker_begin > indent;
     };
     std::vector<char> done(n, 0);
     for (int l = std::max(0, l0 - 1); l <= std::min(n - 1, l1 + 1); l++) {
-        if (done[l] || info[l].kind != LineKind::Para || !info[l].ordered) continue;
-        int indent = info[l].marker_begin;
+        if (done[l] || info(l).kind != LineKind::Para || !info(l).ordered) continue;
+        int indent = info(l).marker_begin;
         int s = l, e = l;
         while (s > 0 && (item(s - 1, indent) || nested(s - 1, indent))) s--;
         while (e + 1 < n && (item(e + 1, indent) || nested(e + 1, indent))) e++;
@@ -1129,16 +1160,18 @@ float Editor::measure(const std::string& s, const std::vector<uint16_t>& st, int
 
 void Editor::layout(int mode) {
     auto& V = lay_[mode];
+    // Same text as last time: no need to hash every line again to find out.
+    bool same_text = laid_version_[mode] == version_ && V.size() == lines_.size();
+    laid_version_[mode] = version_;
     V.resize(lines_.size());
     bool in_code = false;
     float y = 0;
     for (int i = 0; i < (int)lines_.size(); i++) {
         Line& L = V[i];
         const std::string& s = lines_[i];
-        uint64_t h = fnv(s);
-        if (L.hash != h || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
+        if ((!same_text && L.hash != fnv(s)) || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
             L.lh != P_.line_height || L.tab != P_.tab_size || L.blank != P_.blank_line) {
-            L.hash = h;
+            L.hash = fnv(s);
             L.in_code = in_code;
             L.wrap = P_.column;
             L.base = P_.size;
@@ -1378,13 +1411,6 @@ void Editor::sync_edits() {
     diff_version_ = version_;
     const std::vector<std::string>& O = prev_lines_;
     const std::vector<std::string>& N = lines_;
-    auto finish = [&] { prev_lines_ = lines_; };
-    if (snap_heights_ || reader_ || lay_[0].size() != O.size() || dh_.size() != O.size()) {
-        snap_heights_ = true;
-        ghosts_.clear();
-        finish();
-        return;
-    }
 
     // Unchanged lines at the top and bottom; the edit is in between.
     size_t p = 0;
@@ -1392,6 +1418,17 @@ void Editor::sync_edits() {
     size_t s = 0;
     while (s < O.size() - p && s < N.size() - p && O[O.size() - 1 - s] == N[N.size() - 1 - s]) s++;
     size_t o_end = O.size() - s, n_end = N.size() - s;
+
+    auto finish = [&] {
+        carry_layout(p, s);
+        prev_lines_ = lines_;
+    };
+    if (snap_heights_ || reader_ || lay_[0].size() != O.size() || dh_.size() != O.size()) {
+        snap_heights_ = true;
+        ghosts_.clear();
+        finish();
+        return;
+    }
     if (o_end - p > 200 || n_end - p > 200) {  // a wholesale change: don't animate it
         snap_heights_ = true;
         ghosts_.clear();
@@ -1473,6 +1510,21 @@ void Editor::sync_edits() {
         if (n2o[j] >= 0) dh[j] = dh_[n2o[j]];
     dh_ = std::move(dh);
     finish();
+}
+
+// Layout is cached per line index, so lines added or removed would shift
+// every line below them onto another line's cache and all of them would be
+// laid out again. The unchanged top (p lines) and bottom (s lines) keep
+// their own; the edited middle starts empty. Must run before layout(), while
+// the layouts still match prev_lines_ (any that don't are left alone).
+void Editor::carry_layout(size_t p, size_t s) {
+    const size_t o = prev_lines_.size(), n = lines_.size();
+    if (o == n) return;  // nothing shifted
+    for (auto& V : lay_) {
+        if (V.size() != o) continue;
+        V.erase(V.begin() + p, V.begin() + (o - s));
+        V.insert(V.begin() + p, n - s - p, Line{});
+    }
 }
 
 // Settle the space of the last structural edit, now that layout has the new
