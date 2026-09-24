@@ -74,6 +74,7 @@ add_library(delta_core STATIC
   src/palette.cpp
   src/problems.cpp
   src/spell.cpp
+  src/speller.cpp
   src/store.cpp
   src/config.cpp
   src/keys.cpp
