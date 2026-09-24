@@ -690,6 +690,7 @@ static void test_config_schema() {
 
 #include "problems.h"
 #include "spell.h"
+#include "spell_fix.h"
 #include "speller.h"
 #include "store.h"
 
@@ -1973,6 +1974,25 @@ static void test_speller() {
     CHECK(!sp.suggest("Teh").empty() && sp.suggest("Teh")[0] == "The");
     CHECK(!sp.suggest("Thier").empty() && sp.suggest("Thier")[0] == "Their");
 
+    // Without waiting: nothing yet, the worker finds them, then they're there.
+    CHECK(!sp.suggest_later("Seperately"));
+    for (int i = 0; i < 500 && sp.suggesting(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    auto later = sp.suggest_later("Seperately");
+    CHECK(later && !later->empty() && (*later)[0] == "Separately");
+    // Checking never waits for it: new lines come through, if not at once.
+    sp.suggest_later("Acommodate");
+    std::vector<Diagnostic> marks;
+    int tries = 0;
+    while (!sp.check({"a fresh line with a wurd"}, marks, 1.0) && tries < 500) {
+        tries++;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(marks.size() == 1);
+
+    // Accents the dictionary leaves off.
+    CHECK(sp.correct("caf\xC3\xA9") && sp.correct("na\xC3\xAFve") && sp.correct("r\xC3\xA9sum\xC3\xA9") && sp.correct("Caf\xC3\xA9"));
+    CHECK(!sp.correct("cafz\xC3\xA9"));
+
     // British, and both at once.
     sp.load({"en_GB"}, {}, {});
     CHECK(wait_ready(sp));
@@ -2014,6 +2034,53 @@ static void test_speller() {
     CHECK(sp.correct("caf\xC3\xA9") && sp.correct("recaf\xC3\xA9") && sp.correct("word") && !sp.correct("wurd"));
     CHECK(sp.errors().size() == 1 && sp.errors()[0].find("KOI8-R") != std::string::npos);
     fs::remove_all(dir);
+}
+
+static void test_spell_fix() {
+    using K = Diagnostic::Kind;
+    auto mark = [](int line, int a, int b) { return Diagnostic{line, a, b, "", K::Spelling}; };
+
+    // Which word a fix is about: the one at the caret (either end counts),
+    // else the nearest before it in its paragraph.
+    std::vector<std::string> lines = {"one teh two", "", "para recieve and wrongg here", "more"};
+    std::vector<Diagnostic> marks = {mark(0, 4, 7), mark(2, 5, 12), mark(2, 17, 23)};
+    CHECK_EQ(misspelling_at(marks, {2, 5}), 1);
+    CHECK_EQ(misspelling_at(marks, {2, 12}), 1);
+    CHECK_EQ(misspelling_at(marks, {2, 13}), -1);
+    CHECK_EQ(misspelling_near(marks, lines, {2, 28}), 2);   // end of the line: wrongg
+    CHECK_EQ(misspelling_near(marks, lines, {2, 14}), 1);   // between: the one behind
+    CHECK_EQ(misspelling_near(marks, lines, {3, 2}), 2);    // next line, same paragraph
+    CHECK_EQ(misspelling_near(marks, lines, {2, 0}), -1);   // not back into the paragraph above
+    CHECK_EQ(misspelling_near(marks, lines, {1, 0}), 0);    // a blank line: the paragraph above
+
+    // A fix pass: on from where it is to the end, then from the top back to
+    // where it began, then over.
+    std::vector<Diagnostic> pass = {mark(0, 0, 3), mark(0, 10, 14), mark(2, 3, 8), mark(4, 1, 5)};
+    bool wrapped = false;
+    TextPos origin{2, 3};
+    CHECK_EQ(fix_pass_next(pass, origin, origin, wrapped), 2);
+    CHECK_EQ(fix_pass_next(pass, {2, 8}, origin, wrapped), 3);
+    CHECK_EQ(fix_pass_next(pass, {4, 5}, origin, wrapped), 0);
+    CHECK(wrapped);
+    CHECK_EQ(fix_pass_next(pass, {0, 3}, origin, wrapped), 1);
+    CHECK_EQ(fix_pass_next(pass, {0, 14}, origin, wrapped), -1);  // skipped ones aren't gone back to
+
+    // Where positions land when a word changes length.
+    CHECK(after_replace({0, 20}, 0, 4, 3, 5) == (TextPos{0, 22}));  // after it: moved along
+    CHECK(after_replace({0, 7}, 0, 4, 3, 5) == (TextPos{0, 9}));    // at its end: still at its end
+    CHECK(after_replace({0, 5}, 0, 4, 3, 5) == (TextPos{0, 9}));    // inside: at the new end
+    CHECK(after_replace({0, 4}, 0, 4, 3, 5) == (TextPos{0, 4}));    // at its start: stays
+    CHECK(after_replace({1, 20}, 0, 4, 3, 5) == (TextPos{1, 20}));  // another line: stays
+
+    // The quick fix's cycle: each guess undoes the last first, so one undo
+    // gets the word back whichever guess is in.
+    Editor e = fresh("and teh rest");
+    e.replace_range({0, 4}, {0, 7}, "the");
+    e.undo();
+    e.replace_range({0, 4}, {0, 7}, "tech");
+    CHECK_EQ(e.text(), std::string("and tech rest"));
+    e.undo();
+    CHECK_EQ(e.text(), std::string("and teh rest"));
 }
 
 static void test_spell_config() {
@@ -2085,6 +2152,7 @@ int main() {
     test_link_problems();
     test_spell_words();
     test_speller();
+    test_spell_fix();
     test_spell_config();
 
     ImGui::DestroyContext();

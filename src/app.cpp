@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "problems.h"
+#include "spell_fix.h"
 #include "theme.h"
 #include "util.h"
 
@@ -344,10 +345,8 @@ void App::show_problems(double now) {
 }
 
 const Diagnostic* App::misspelt_at_caret() const {
-    TextPos c = editor_.cursor();
-    for (auto& d : spelling_)
-        if (d.line == c.line && d.col0 <= c.col && c.col <= d.col1) return &d;
-    return nullptr;
+    int i = misspelling_at(spelling_, editor_.cursor());
+    return i >= 0 ? &spelling_[i] : nullptr;
 }
 
 // What the status line echoes about the caret's spot: a misspelt word's
@@ -360,8 +359,12 @@ void App::update_echo() {
     if (const Diagnostic* d = misspelt_at_caret(); d && !(shown_held_.line == d->line && shown_held_.col == d->col0)) {
         // Only the best guess ("Disempower?"); the key for the rest (and for
         // keeping the word) is an aside.
+        // Found in the background (they can take tens of milliseconds): the
+        // echo shows once they're in.
         const std::string& s = editor_.lines()[d->line];
-        const auto& sug = speller_.suggest(spell_form(s, {d->col0, d->col1}));
+        auto found = speller_.suggest_later(spell_form(s, {d->col0, d->col1}));
+        if (!found) return;
+        const auto& sug = *found;
         using Act = Echo::Act;
         if (sug.empty()) {
             echo_.push_back({"no suggestions", Tone::Plain});
@@ -423,13 +426,8 @@ void App::quick_fix() {
     quick_.line = -1;
     TextPos c = editor_.cursor();
     const auto& lines = editor_.lines();
-    const Diagnostic* d = misspelt_at_caret();
-    if (!d) {
-        int top = c.line;
-        while (top > 0 && !trim(lines[top - 1]).empty()) top--;
-        for (auto it = spelling_.rbegin(); it != spelling_.rend() && !d; ++it)
-            if (it->line >= top && TextPos{it->line, it->col0} < c) d = &*it;
-    }
+    int near = misspelling_near(spelling_, lines, c);
+    const Diagnostic* d = near >= 0 ? &spelling_[near] : nullptr;
     if (!d || d->col1 > (int)lines[d->line].size()) { status(cfg_.spell ? "No misspelt word here" : "Spellcheck is off"); return; }
     std::string word = lines[d->line].substr(d->col0, d->col1 - d->col0);
     const auto& sugg = speller_.suggest(spell_form(lines[d->line], {d->col0, d->col1}));
@@ -450,13 +448,12 @@ void App::quick_apply() {
     const std::string& to = quick_.options[quick_.pick];
     int end = quick_.col0 + (int)quick_.word.size();
     editor_.replace_range({quick_.line, quick_.col0}, {quick_.line, end}, to);
-    TextPos back = quick_.from;
-    if (back.line == quick_.line && back.col >= end) back.col += (int)to.size() - (int)quick_.word.size();
-    else if (back.line == quick_.line && back.col > quick_.col0) back.col = quick_.col0 + (int)to.size();  // was in the word
+    TextPos back = after_replace(quick_.from, quick_.line, quick_.col0, (int)quick_.word.size(), (int)to.size());
     editor_.jump_to(back);
     quick_.caret = back;
     quick_.version = editor_.version();
-    status(to == quick_.word ? "Back to " + to : quick_.word + " \xE2\x86\x92 " + to);  // "recieve → receive"
+    // No message: the change pulses where it happened, and a message would
+    // cover the echo for the next word.
 }
 
 // Fixing spelling happens in the status line, a word at a time. The field
@@ -1288,6 +1285,7 @@ double App::next_wake(double now) {
     if (note_ && next_problem_check_ > now) t = std::min(t, next_problem_check_);
     if (spell_pending_ || (bar_ == Bar::Fix && fix_advance_)) t = now;  // more lines to check, or a fix to move on from
     else if (speller_.loading()) t = std::min(t, now + 0.05);        // marks as soon as it's loaded
+    if (speller_.suggesting()) t = std::min(t, now + 0.016);         // the echo as soon as its suggestions are in
     return t;
 }
 
@@ -1600,21 +1598,13 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     if (fix_advance_) {
         if (!speller_.ready() || spell_version_ != editor_.version() || spell_gen_ != speller_.generation() || spell_pending_) return;
         fix_advance_ = false;
-        auto pos = [](const Diagnostic& d) { return TextPos{d.line, d.col0}; };
-        const Diagnostic* next = nullptr;
-        for (auto& d : spelling_)
-            if (!(pos(d) < fix_from_) && (!fix_wrapped_ || pos(d) < fix_origin_)) { next = &d; break; }
-        if (!next && !fix_wrapped_) {
-            fix_wrapped_ = true;
-            for (auto& d : spelling_)
-                if (pos(d) < fix_origin_) { next = &d; break; }
-        }
-        if (!next) {
+        int next = fix_pass_next(spelling_, fix_from_, fix_origin_, fix_wrapped_);
+        if (next < 0) {
             close_bar();
             status(spelling_.empty() ? "No misspelt words left" : "Back where you started");
             return;
         }
-        fix_load(*next);
+        fix_load(spelling_[next]);
     }
 
     // The word must still be where it was (an undo, a reload...).
@@ -1630,10 +1620,10 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
         TextPos after{fix_.line, fix_.col1};
         if (!v.empty() && v != fix_.word) {
             editor_.replace_range({fix_.line, fix_.col0}, {fix_.line, fix_.col1}, v);
-            // Where the pass began moves with the text before it.
-            int delta = (int)v.size() - (int)fix_.word.size();
-            if (fix_.line == fix_origin_.line && fix_.col0 < fix_origin_.col) fix_origin_.col += delta;
-            after.col = fix_.col0 + (int)v.size();
+            // The pass goes on after the fix; where it began moves with the text.
+            int old_len = (int)fix_.word.size(), new_len = (int)v.size();
+            after = after_replace(after, fix_.line, fix_.col0, old_len, new_len);
+            fix_origin_ = after_replace(fix_origin_, fix_.line, fix_.col0, old_len, new_len);
         }
         fix_next(after);
     };
