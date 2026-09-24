@@ -351,6 +351,11 @@ void Speller::suggest_worker() {
         if (gen == sug_gen_) {
             if (suggestions_.size() > max_suggestions) suggestions_.clear();
             suggestions_[word] = std::move(found);
+        } else if (!sug_has_want_) {
+            // Found for dictionaries since changed: find it again, or the
+            // echo waiting on it would never come.
+            sug_want_ = word;
+            sug_has_want_ = true;
         }
         busy_ = sug_has_want_;
     }

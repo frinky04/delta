@@ -3453,7 +3453,6 @@ void Editor::draw(const EditorParams& p) {
         }
     }
 
-
     }  // !morphing
 
     // Scroll position hint: a thin bar at the right edge that shows while

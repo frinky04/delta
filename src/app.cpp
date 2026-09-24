@@ -226,10 +226,12 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
     Store notes;
     notes.set_root(expand_user(c.notes_dir));
     std::vector<std::string> spaces = notes.spaces();
+    std::error_code ec;
+    bool have_notes = fs::is_directory(notes.root(), ec);  // else notes_dir says what's wrong
     for (auto& [space, v] : c.spell_spaces) {
         std::string key = "spell.space." + space;
         check_langs(key, v);
-        if (std::any_of(spaces.begin(), spaces.end(), [&](const std::string& s) { return iequals(s, space); })) continue;
+        if (!have_notes || std::any_of(spaces.begin(), spaces.end(), [&](const std::string& s) { return iequals(s, space); })) continue;
         std::vector<std::string> lowered;
         for (auto& s : spaces) lowered.push_back(lower(s));
         std::string near = suggest(space, lowered);
@@ -279,11 +281,15 @@ void App::apply_spelling(bool force) {
     if (auto it = cfg_.spell_spaces.find(lower(space_)); it != cfg_.spell_spaces.end()) langs = it->second;
     std::string key = cfg_.spell ? langs : "";
     if (!force && key == spell_key_) return;
+    // The same dictionaries again (words.txt changed): the marks stay up
+    // until the reload is in, rather than blinking out.
+    if (key != spell_key_) {
+        spelling_.clear();
+        diag_gen_++;
+    }
     spell_key_ = key;
-    spelling_.clear();
     spell_version_ = UINT64_MAX;
     spell_pending_ = false;
-    diag_gen_++;
     words_mtime_ = mtime_of(words_path_);
     if (!cfg_.spell) { speller_.unload(); return; }
     std::vector<std::string> words = read_words(words_path_);
@@ -417,6 +423,7 @@ void App::goto_misspelling(int dir) {
 // whichever it's on.
 void App::quick_fix() {
     if (!note_ || is_config() || editor_.reader()) return;
+    check_spelling();  // marks for the text as it is now, not last frame's
     if (quick_.line >= 0 && editor_.version() == quick_.version && editor_.cursor() == quick_.caret) {
         quick_.pick = (quick_.pick + 1) % (int)quick_.options.size();
         editor_.undo();  // back to the word as written, then the next guess
@@ -464,6 +471,7 @@ void App::quick_apply() {
 void App::fix_spelling() {
     if (!note_ || is_config()) return;
     if (editor_.reader()) editor_.set_reader(false);
+    check_spelling();  // marks for the text as it is now, not last frame's
     const Diagnostic* d = misspelt_at_caret();
     if (!d) {
         goto_misspelling(1);  // says why not, if there's nowhere to go
@@ -969,6 +977,7 @@ void App::move_note() {
             views_.erase(old);
             note_ = n;
             space_ = sp;
+            apply_spelling();  // this space may want other dictionaries
             disk_mtime_ = mtime_of(n.path);
             status("Moved to " + sp);
         };
@@ -1018,6 +1027,7 @@ void App::rename_space() {
         std::string from = space_, to = trim(v);
         if (auto e = store_.rename_space(from, to); !e.empty()) { status(e, true); return; }
         space_ = to;
+        apply_spelling();
         views_.clear();
         for (auto& h : history_)
             if (h.space == from) h = store_.ref(to, h.name);
@@ -2138,6 +2148,7 @@ void App::frame() {
         // Right-click a misspelt word to fix it: the status-line fix tool,
         // on that word (where other apps put their suggestions menu).
         if (p.mouse && editing() && !is_config() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            check_spelling();  // this frame's typing may have moved things
             TextPos at = editor_.position_at(io.MousePos);
             for (auto& d : spelling_)
                 if (d.line == at.line && d.col0 <= at.col && at.col <= d.col1) {
