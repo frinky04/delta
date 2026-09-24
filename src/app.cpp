@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstring>
 #include <set>
+#include <sstream>
 
+#include "problems.h"
 #include "theme.h"
 #include "util.h"
 
@@ -59,6 +61,8 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     images_.start();
     cfg_path_ = opts.config_path.empty() ? config_dir() / "delta.ini" : opts.config_path;
     state_path_ = cfg_path_.parent_path() / "state.ini";
+    dict_dir_ = cfg_path_.parent_path() / "dictionaries";
+    words_path_ = cfg_path_.parent_path() / "words.txt";
     pending_run_ = opts.run;
 
     ImGuiIO& io = ImGui::GetIO();
@@ -156,6 +160,7 @@ void App::load_settings() {
     image_store_.set_root(root);
     if (!Store::check_name(cfg_.default_space, "space").empty()) cfg_.default_space = "default";
     if (!Store::check_name(cfg_.daily_space, "space").empty()) cfg_.daily_space = "daily";
+    apply_spelling();
 
     // Problems show on their lines when the config is open in delta;
     // otherwise the first one goes to the status bar.
@@ -198,56 +203,271 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
         issues.push_back(issue_at(c, "general.default_space", true, "not a valid folder name, using default"));
     if (!Store::check_name(c.daily_space, "space").empty())
         issues.push_back(issue_at(c, "general.daily_space", true, "not a valid folder name, using daily"));
+
+    // Dictionaries: built in, or a pair of files in <config dir>/dictionaries.
+    std::vector<std::string> dicts = Speller::available(dict_dir_);
+    auto check_langs = [&](const std::string& key, const std::string& v) {
+        for (auto& l : split_list(v)) {
+            if (std::any_of(dicts.begin(), dicts.end(), [&](const std::string& d) { return iequals(d, l); })) continue;
+            std::string near = iequals(l, "en_UK") ? "en_GB" : suggest(l, dicts);  // en_US is nearer by letters
+            ConfigIssue is = issue_at(c, key, true, near.empty() ? "no dictionary with this name; add " + l + ".aff and " + l + ".dic to " + path_u8(dict_dir_)
+                                                                 : "no dictionary with this name; did you mean " + near + "?");
+            // Underline just that name.
+            auto w = c.where.find(key);
+            if (w != c.where.end() && is.line >= 0) {
+                size_t at = v.find(l);
+                if (at != std::string::npos) { is.col0 = w->second.val0 + (int)at; is.col1 = is.col0 + (int)l.size(); }
+            }
+            issues.push_back(is);
+        }
+    };
+    check_langs("spell.languages", c.spell_languages);
+    Store notes;
+    notes.set_root(expand_user(c.notes_dir));
+    std::vector<std::string> spaces = notes.spaces();
+    for (auto& [space, v] : c.spell_spaces) {
+        std::string key = "spell.space." + space;
+        check_langs(key, v);
+        if (std::any_of(spaces.begin(), spaces.end(), [&](const std::string& s) { return iequals(s, space); })) continue;
+        std::vector<std::string> lowered;
+        for (auto& s : spaces) lowered.push_back(lower(s));
+        std::string near = suggest(space, lowered);
+        issues.push_back(issue_at(c, key, false, near.empty() ? "no space with this name" : "no space with this name; did you mean space." + near + "?"));
+    }
 }
 
-// Keeps the problems in line order, for the count and F8.
 void App::set_problems(std::vector<ConfigIssue> issues) {
-    std::stable_sort(issues.begin(), issues.end(), [](const ConfigIssue& a, const ConfigIssue& b) {
+    config_problems_ = std::move(issues);
+    if (is_config()) refresh_problems();
+}
+
+// Gathers the open document's problems from the checks that apply to it:
+// the config's own, or those found in a note. Kept in line order, for the
+// count and F8.
+void App::refresh_problems() {
+    problems_.clear();
+    if (is_config()) {
+        for (auto& is : config_problems_)
+            if (is.line >= 0) problems_.push_back({is.line, is.col0, is.col1, is.msg});
+    } else if (note_) {
+        problems_ = link_problems(editor_.lines(), note_index_);
+    }
+    std::stable_sort(problems_.begin(), problems_.end(), [](const Diagnostic& a, const Diagnostic& b) {
         return a.line != b.line ? a.line < b.line : a.col0 < b.col0;
     });
-    config_problems_ = std::move(issues);
+    diag_gen_++;
 }
 
-// Hands the problems to the editor. Those on the line being typed on wait
-// for a pause, so a half-typed value doesn't flash an error at you.
+// The words in words.txt, one a line ("#" starts a comment line).
+static std::vector<std::string> read_words(const fs::path& path) {
+    std::vector<std::string> out;
+    std::string text;
+    if (!read_file(path, text)) return out;
+    std::istringstream in(text);
+    for (std::string line; std::getline(in, line);) {
+        line = trim(line);
+        if (!line.empty() && line[0] != '#') out.push_back(line);
+    }
+    return out;
+}
+
+// Loads the dictionaries the open space asks for, if they aren't what's
+// loaded already (or `force`: words.txt changed).
+void App::apply_spelling(bool force) {
+    std::string langs = cfg_.spell_languages;
+    if (auto it = cfg_.spell_spaces.find(lower(space_)); it != cfg_.spell_spaces.end()) langs = it->second;
+    std::string key = cfg_.spell ? langs : "";
+    if (!force && key == spell_key_) return;
+    spell_key_ = key;
+    spelling_.clear();
+    spell_version_ = UINT64_MAX;
+    spell_pending_ = false;
+    diag_gen_++;
+    words_mtime_ = mtime_of(words_path_);
+    if (!cfg_.spell) { speller_.unload(); return; }
+    std::vector<std::string> words = read_words(words_path_);
+    words.insert(words.end(), session_words_.begin(), session_words_.end());
+    speller_.load(split_list(langs), dict_dir_, words);
+    spell_report_ = true;
+}
+
+// Spelling marks for the open note. New lines are checked a few
+// milliseconds' worth a frame, so a long note never stalls one.
+void App::check_spelling() {
+    if (!note_ || is_config() || !cfg_.spell || !speller_.ready()) return;
+    if (spell_report_) {
+        spell_report_ = false;
+        if (!speller_.errors().empty()) status("Dictionary " + speller_.errors().front(), true);
+    }
+    if (editor_.version() == spell_version_ && speller_.generation() == spell_gen_ && !spell_pending_) return;
+    spell_version_ = editor_.version();
+    spell_gen_ = speller_.generation();
+    spell_pending_ = !speller_.check(editor_.lines(), spelling_, 0.004);
+    diag_gen_++;
+}
+
+// The misspelt word being typed isn't marked until the caret leaves it.
+// Returns its start (line -1: none).
+TextPos App::spell_held() {
+    if (editor_.version() != edit_version_) {
+        edit_version_ = editor_.version();
+        spell_hold_ = editor_.cursor();
+    }
+    if (spell_hold_.line < 0) return {-1, 0};
+    TextPos c = editor_.cursor();
+    for (auto& d : spelling_)
+        if (d.line == spell_hold_.line && d.col0 <= spell_hold_.col && spell_hold_.col <= d.col1) {
+            if (c.line == d.line && d.col0 <= c.col && c.col <= d.col1) return {d.line, d.col0};
+            break;
+        }
+    if (c != spell_hold_) spell_hold_.line = -1;  // moved on
+    return {-1, 0};
+}
+
+// Hands the problems and spelling marks to the editor, when they've changed.
+// Problems on the line being typed on wait for a pause, so a half-typed
+// value or [[link]] doesn't flash at you; a word waits for you to finish it.
 void App::show_problems(double now) {
     bool typing = now - last_change_ < 0.9;
     if (typing) next_problem_check_ = last_change_ + 0.9;
+    int hold = typing ? editor_.cursor().line : -1;
+    TextPos held = spell_held();
+    if (diag_gen_ == shown_gen_ && hold == shown_hold_ && held == shown_held_) return;
+    shown_gen_ = diag_gen_;
+    shown_hold_ = hold;
+    shown_held_ = held;
     std::vector<Diagnostic> d;
-    std::set<int> seen;
-    for (auto& is : config_problems_) {
-        if (is.line < 0 || seen.count(is.line)) continue;  // one per line: the first
-        if (typing && is.line == editor_.cursor().line) continue;
-        seen.insert(is.line);
-        d.push_back({is.line, is.col0, is.col1, is.msg});
-    }
+    for (auto& p : problems_)
+        if (p.line != hold) d.push_back(p);
+    for (auto& p : spelling_)
+        if (p.line != held.line || p.col0 != held.col) d.push_back(p);
     editor_.set_diagnostics(d);
 }
 
-void App::goto_problem(int dir) {
-    std::vector<const ConfigIssue*> list;
-    for (auto& is : config_problems_)
-        if (is.line >= 0) list.push_back(&is);
-    if (list.empty()) { status("No problems in the config"); return; }
-    const ConfigIssue* to = nullptr;
-    if (!is_config()) {
-        open_config();
-        to = dir > 0 ? list.front() : list.back();
-    } else {
-        TextPos a = editor_.cursor(), b = editor_.anchor();
-        TextPos from = dir > 0 ? std::max(a, b) : std::min(a, b);
-        auto pos = [](const ConfigIssue* is) { return TextPos{is->line, std::max(0, is->col0)}; };
-        if (dir > 0) {
-            for (auto* is : list)
-                if (from < pos(is)) { to = is; break; }
-            if (!to) to = list.front();  // wrap
+const Diagnostic* App::misspelt_at_caret() const {
+    TextPos c = editor_.cursor();
+    for (auto& d : spelling_)
+        if (d.line == c.line && d.col0 <= c.col && c.col <= d.col1) return &d;
+    return nullptr;
+}
+
+// With the caret on a misspelt word (one that's marked), its suggestions
+// show at the end of the line.
+void App::show_suggestions() {
+    std::string text;
+    int line = -1;
+    const Diagnostic* d = misspelt_at_caret();
+    if (d &&!(shown_held_.line == d->line && shown_held_.col == d->col0)) {
+        const std::string& s = editor_.lines()[d->line];
+        const auto& sug = speller_.suggest(spell_form(s, {d->col0, d->col1}));
+        line = d->line;
+        if (sug.empty()) {
+            text = "no suggestions";
         } else {
-            for (auto it = list.rbegin(); it != list.rend(); ++it)
-                if (pos(*it) < from) { to = *it; break; }
-            if (!to) to = list.back();
+            text = "did you mean " + sug[0];
+            for (size_t i = 1; i < sug.size() && i < 3; i++) text += (i + 1 == std::min<size_t>(sug.size(), 3) ? " or " : ", ") + sug[i];
+            text += "?";
         }
     }
-    if (!is_config()) return;
+    std::string key = std::to_string(line) + ":" + text;
+    if (key == shown_hint_) return;
+    shown_hint_ = key;
+    editor_.set_suggestion(line, text);
+}
+
+void App::goto_misspelling(int dir) {
+    if (spelling_.empty()) {
+        status(!cfg_.spell ? "Spellcheck is off" : speller_.loading() || spell_pending_ ? "Still checking the spelling" : "No misspelt words in this note");
+        return;
+    }
+    TextPos a = editor_.cursor(), b = editor_.anchor();
+    TextPos from = dir > 0 ? std::max(a, b) : std::min(a, b);
+    const Diagnostic* to = nullptr;
+    if (dir > 0) {
+        for (auto& d : spelling_)
+            if (from < TextPos{d.line, d.col0}) { to = &d; break; }
+        if (!to) to = &spelling_.front();  // wrap
+    } else {
+        for (auto it = spelling_.rbegin(); it != spelling_.rend(); ++it)
+            if (TextPos{it->line, it->col0} < from) { to = &*it; break; }
+        if (!to) to = &spelling_.back();
+    }
+    editor_.select_range({to->line, to->col0}, {to->line, to->col1});
+}
+
+// Offers the misspelt word at the caret's suggestions, and keeping it.
+void App::fix_spelling() {
+    const Diagnostic* d = misspelt_at_caret();
+    if (!d) { status("No misspelt word at the caret"); return; }
+    int line = d->line, c0 = d->col0, c1 = d->col1;
+    std::string word = editor_.lines()[line].substr(c0, c1 - c0);
+    std::string form = spell_form(editor_.lines()[line], {c0, c1});
+    // The word must still be there when a row is picked.
+    auto still = [this, line, c0, c1, word] {
+        return line < (int)editor_.lines().size() && editor_.lines()[line].compare(c0, c1 - c0, word) == 0;
+    };
+    std::vector<PaletteItem> items;
+    for (auto& s : speller_.suggest(form)) {
+        PaletteItem it;
+        it.label = s;
+        it.action = [this, still, line, c0, c1, s] {
+            if (still()) editor_.replace_range({line, c0}, {line, c1}, s);
+        };
+        items.push_back(std::move(it));
+    }
+    PaletteItem add;
+    add.label = "add \"" + form + "\" to your dictionary";
+    add.meta = "words.txt";
+    add.action = [this, form] { add_to_dictionary(form); };
+    items.push_back(std::move(add));
+    PaletteItem ignore;
+    ignore.label = "ignore \"" + form + "\" until delta closes";
+    ignore.action = [this, form] {
+        session_words_.push_back(form);
+        speller_.add_word(form);
+    };
+    items.push_back(std::move(ignore));
+    palette_.pick("fix: " + word + " ", std::move(items));
+}
+
+void App::add_to_dictionary(const std::string& word) {
+    std::string text, err;
+    read_file(words_path_, text);
+    if (!text.empty() && text.back() != '\n') text += '\n';
+    text += word + "\n";
+    std::error_code ec;
+    fs::create_directories(words_path_.parent_path(), ec);
+    if (!atomic_write(words_path_, text, &err)) { status("Couldn't save words.txt: " + err, true); return; }
+    words_mtime_ = mtime_of(words_path_);  // already applied below: no reload
+    speller_.add_word(word);
+    status("Added \"" + word + "\" to your dictionary");
+}
+
+// Steps through the open document's problems. From a note that has none, the
+// config's are next door.
+void App::goto_problem(int dir) {
+    const Diagnostic* to = nullptr;
+    if (problems_.empty()) {
+        bool config_has = std::any_of(config_problems_.begin(), config_problems_.end(), [](const ConfigIssue& is) { return is.line >= 0; });
+        if (is_config() || !config_has) { status(is_config() ? "No problems in the config" : "No problems in this note"); return; }
+        open_config();
+        if (!is_config() || problems_.empty()) return;
+        to = dir > 0 ? &problems_.front() : &problems_.back();
+    }
+    TextPos a = editor_.cursor(), b = editor_.anchor();
+    TextPos from = dir > 0 ? std::max(a, b) : std::min(a, b);
+    auto pos = [](const Diagnostic& d) { return TextPos{d.line, std::max(0, d.col0)}; };
+    if (to) {
+        // just opened: the first (or last) one
+    } else if (dir > 0) {
+        for (auto& d : problems_)
+            if (from < pos(d)) { to = &d; break; }
+        if (!to) to = &problems_.front();  // wrap
+    } else {
+        for (auto it = problems_.rbegin(); it != problems_.rend(); ++it)
+            if (pos(*it) < from) { to = &*it; break; }
+        if (!to) to = &problems_.back();
+    }
     // The part it's about comes selected, ready to retype.
     TextPos s{to->line, std::max(0, to->col0)}, e{to->line, to->col0 >= 0 ? to->col1 : 0};
     editor_.select_range(s, e);
@@ -407,8 +627,16 @@ void App::register_commands() {
     add("config.open_external", "Open config in another app", "", [this] {
         if (!open_with_default_app(cfg_path_)) status("Couldn't open " + path_u8(cfg_path_), true);
     });
-    add("config.next_problem", "Go to the next config problem", "f8", [this] { goto_problem(1); }, true);
-    add("config.prev_problem", "Go to the previous config problem", "shift+f8", [this] { goto_problem(-1); }, true);
+    add("nav.next_problem", "Go to the next problem", "f8", [this] { goto_problem(1); }, true);
+    add("nav.prev_problem", "Go to the previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
+    add("nav.next_misspelling", "Go to the next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
+    add("nav.prev_misspelling", "Go to the previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
+    add("edit.fix_spelling", "Fix the misspelt word at the caret", "ctrl+.", [this] { fix_spelling(); });
+    add("view.spelling", "Toggle spellcheck", "", [this] {
+        cfg_.spell = !cfg_.spell;
+        apply_spelling();
+        status(cfg_.spell ? "Spellcheck on" : "Spellcheck off");
+    });
     add("config.reload", "Reload config", "", [this] { load_settings(); status("Config reloaded"); });
     add("app.open_folder", "Show this space's folder", "", [this] { open_with_default_app(store_.root() / u8path(space_)); });
     add("app.quit", "Quit", "ctrl+q", [this] { quit_ = true; }, false, true);
@@ -511,8 +739,20 @@ void App::open_note(const NoteRef& n, bool push_history) {
     images_.set_note_dir(n.path.parent_path());  // images are found from the note's folder
     editor_.set_text(text);
     note_ = n;
-    if (config) show_problems(ImGui::GetTime());
-    else space_ = n.space;
+    if (!config) {
+        space_ = n.space;
+        note_index_ = store_.index();  // a note just made by following a link counts at once
+    }
+    refresh_problems();
+    spelling_.clear();
+    spell_version_ = UINT64_MAX;
+    spell_pending_ = false;
+    edit_version_ = editor_.version();  // opening isn't typing
+    spell_hold_.line = -1;
+    shown_hint_ = "-";                   // set_text dropped the suggestion
+    apply_spelling();                    // this space may want other dictionaries
+    check_spelling();
+    show_problems(ImGui::GetTime());
     hints_version_ = UINT64_MAX;
     saved_version_ = seen_version_ = editor_.version();
     disk_mtime_ = mtime_of(n.path);
@@ -534,6 +774,9 @@ void App::close_note() {
     save();
     remember_view();
     note_.reset();
+    problems_.clear();
+    spelling_.clear();
+    diag_gen_++;
     editor_.set_text("");
     fade_start_ = anim::clock;
     set_title();
@@ -607,14 +850,8 @@ void App::open_link(const LinkSpan& link) {
 }
 
 void App::open_by_name(std::string target) {
-    target = trim(target);
-    if (auto h = target.find('#'); h != std::string::npos) target = trim(target.substr(0, h));
-    if (target.empty()) return;
-    std::string space, name = target;
-    if (auto slash = target.find('/'); slash != std::string::npos) {
-        space = trim(target.substr(0, slash));
-        name = trim(target.substr(slash + 1));
-    }
+    std::string space, name;
+    if (!Store::split_target(target, space, name) && space.empty()) return;
     auto find_in = [&](const std::string& sp) -> std::optional<NoteRef> {
         for (auto& n : store_.notes(sp))
             if (iequals(n.name, name)) return n;
@@ -971,7 +1208,9 @@ double App::next_wake(double now) {
     if (note_ && editor_.version() != saved_version_) t = std::min(t, last_change_ + cfg_.autosave_delay);
     double status_end = status_time_ + 3.4;
     if (status_end > now) t = std::min(t, status_end);
-    if (is_config() && next_problem_check_ > now) t = std::min(t, next_problem_check_);
+    if (note_ && next_problem_check_ > now) t = std::min(t, next_problem_check_);
+    if (spell_pending_) t = now;                                     // more lines to check
+    else if (speller_.loading()) t = std::min(t, now + 0.05);        // marks as soon as it's loaded
     return t;
 }
 
@@ -983,7 +1222,17 @@ void App::poll_files(double now) {
         load_settings();
         if (status_.empty() || !status_error_) status("Config reloaded");
     }
+    // words.txt edited (here or elsewhere): its words, and no longer those taken out.
+    if (auto wm = mtime_of(words_path_); wm != words_mtime_) apply_spelling(true);
     if (!note_) return;
+    // Notes made, renamed or removed (here or elsewhere) change which links lead somewhere.
+    if (!is_config()) {
+        NoteIndex ix = store_.index();
+        if (!(ix == note_index_)) {
+            note_index_ = std::move(ix);
+            hints_version_ = UINT64_MAX;
+        }
+    }
     auto nm = mtime_of(note_->path);
     if (nm == fs::file_time_type{} || nm == disk_mtime_) return;
     disk_mtime_ = nm;
@@ -1425,18 +1674,25 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
                 if (!utf8::is_cont((unsigned char)line[i])) col++;
             put_right(std::to_string(c.line + 1) + ":" + std::to_string(col), T.dim);
         }
-        if (is_config()) {
-            // The count is a mark like the ones on the lines; click it (or
-            // press F8) to go to the next problem.
-            int n = (int)config_problems_.size();
-            std::string t = n == 0 ? "no problems" : std::to_string(n) + (n == 1 ? " problem" : " problems");
+        // The problem count is a mark like the ones on the lines; click it
+        // (or press F8) to go to the next one. A note only shows it when
+        // there's something to count.
+        // Misspelt words are counted the same way, apart (alt+F8).
+        auto count = [&](const std::string& t, bool live, ImU32 col, const std::function<void()>& go) {
             float right = rx;
-            put_right(t, n ? T.error : T.dim);
+            put_right(t, live ? col : T.dim);
             ImVec2 mouse = ImGui::GetIO().MousePos;
-            bool over = n && mouse.x >= right - W(t) && mouse.x < right && mouse.y >= min.y && mouse.y < max.y;
+            bool over = live && mouse.x >= right - W(t) && mouse.x < right && mouse.y >= min.y && mouse.y < max.y;
             if (over) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !palette_.visible() && !viewer_.open) goto_problem(1);
-        } else {
+            if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !palette_.visible() && !viewer_.open) go();
+        };
+        int n = (int)problems_.size();
+        if (n || is_config())
+            count(n == 0 ? "no problems" : std::to_string(n) + (n == 1 ? " problem" : " problems"), n > 0, T.error, [this] { goto_problem(1); });
+        int m = (int)spelling_.size() - (shown_held_.line >= 0 ? 1 : 0);  // not the word being typed
+        if (m && !is_config())
+            count(std::to_string(m) + (m == 1 ? " misspelling" : " misspellings"), true, T.spelling, [this] { goto_misspelling(1); });
+        if (!is_config()) {
             int w = editor_.word_count();
             put_right(std::to_string(w) + (w == 1 ? " word" : " words"), T.dim);
         }
@@ -1603,9 +1859,9 @@ void App::frame() {
         }
         p.alpha = fade * page;
         if (fired) io.InputQueueCharacters.resize(0);
-        if (is_config()) {
-            if (editor_.version() != hints_version_) {
-                hints_version_ = editor_.version();
+        if (editor_.version() != hints_version_) {
+            hints_version_ = editor_.version();
+            if (is_config()) {
                 editor_.set_hints(config_hints(editor_.lines(), cfg_.theme, binding_docs()));
                 // Unsaved edits are checked as they're typed; once saved,
                 // load_settings has the file's own verdict.
@@ -1616,9 +1872,13 @@ void App::frame() {
                     check_settings(live, issues);
                     set_problems(std::move(issues));
                 }
+            } else {
+                refresh_problems();
             }
-            show_problems(now);
         }
+        check_spelling();
+        show_problems(now);
+        show_suggestions();
         editor_.draw(p);
         // Double-click an image to view it (in the reader, a click will do).
         int img_line = -1, img_tile = 0;

@@ -14,6 +14,7 @@
 #include "image_cache.h"
 #include "images.h"
 #include "palette.h"
+#include "speller.h"
 #include "store.h"
 
 struct GLFWwindow;
@@ -53,7 +54,16 @@ private:
     void apply_bindings();
     void check_settings(const Config& c, std::vector<ConfigIssue>& issues) const;
     void set_problems(std::vector<ConfigIssue> issues);
+    void refresh_problems();
+    void apply_spelling(bool force = false);
+    void check_spelling();
+    TextPos spell_held();
     void show_problems(double now);
+    void show_suggestions();
+    const Diagnostic* misspelt_at_caret() const;
+    void goto_misspelling(int dir);
+    void fix_spelling();
+    void add_to_dictionary(const std::string& word);
     void goto_problem(int dir);
     void open_config();
     void add_setting();
@@ -125,9 +135,29 @@ private:
     Config cfg_;
     fs::path cfg_path_, state_path_;
     fs::file_time_type cfg_mtime_{};
-    // The config's problems, in line order: from the file, or checked live
-    // from the text while it's open in delta.
+    // The config's problems: from the file, or checked live from the text
+    // while it's open in delta.
     std::vector<ConfigIssue> config_problems_;
+    // The open document's problems, in line order (see refresh_problems).
+    std::vector<Diagnostic> problems_;
+    Speller speller_;
+    fs::path dict_dir_, words_path_;          // <config dir>/dictionaries, <config dir>/words.txt
+    fs::file_time_type words_mtime_{};
+    std::vector<std::string> session_words_;  // ignored until delta closes
+    std::string spell_key_ = "-";             // the dictionaries asked for ("" none)
+    bool spell_report_ = false;               // say what didn't load, once it's loaded
+    std::vector<Diagnostic> spelling_;        // the open note's misspelt words
+    uint64_t spell_version_ = UINT64_MAX;     // editor version spelling_ matches
+    uint64_t spell_gen_ = UINT64_MAX;         // ...and speller generation
+    bool spell_pending_ = false;              // lines left to check next frame
+    uint64_t edit_version_ = 0;               // editor version at the last edit seen
+    TextPos spell_hold_{-1, 0};               // where the last edit left the caret (line -1: none)
+    uint64_t diag_gen_ = 0;                   // bumped when problems_ or spelling_ change
+    uint64_t shown_gen_ = UINT64_MAX;         // ...as last handed to the editor
+    int shown_hold_ = -2;                     // the line held back then
+    TextPos shown_held_{-2, 0};               // and the word
+    std::string shown_hint_ = "-";            // the suggestion showing, as line:text
+    NoteIndex note_index_;                    // where [[links]] can lead
     double next_problem_check_ = 0;           // a held-back problem shows then
     uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
     bool reader_pref_ = false;                // reader mode to restore after the config

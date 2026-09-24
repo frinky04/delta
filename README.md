@@ -35,7 +35,7 @@ Daily notes (`alt+d`) go in the `daily` space, named `YYYY-MM-DD` by default.
 
 ## Editing
 
-The markdown stays visible and its effect is applied in place: `**bold**` shows its asterisks, dimmed, and the word is bold. `ctrl+e` switches to reader mode, which hides the symbols. In reader mode, clicking a checkbox toggles it and clicking a link follows it. In the editor, ctrl+click a link. `[[note]]` and `[[space/note]]` link to notes, and following one to a missing note creates it.
+The markdown stays visible and its effect is applied in place: `**bold**` shows its asterisks, dimmed, and the word is bold. `ctrl+e` switches to reader mode, which hides the symbols. In reader mode, clicking a checkbox toggles it and clicking a link follows it. In the editor, ctrl+click a link. `[[note]]` and `[[space/note]]` link to notes, and following one to a missing note creates it. Until then, the link is marked as a problem ("no note with this name yet", with a suggestion if you likely mistyped one). The status bar counts a note's problems when it has any: click the count or press `F8` / `shift+F8` to go to the next or previous one. (Misspelt words are counted apart; see Spelling.) In a note without problems, `F8` takes you to the config's, if it has some.
 
 Notes autosave shortly after you stop typing (`autosave_delay`).
 
@@ -53,6 +53,9 @@ Default keys (all rebindable):
 | `ctrl+alt+↑` / `ctrl+alt+↓` | previous / next heading |
 | `alt+shift+→` / `alt+shift+←` | expand / shrink selection |
 | `alt+enter` | follow the link at the caret |
+| `f8` / `shift+f8` | next / previous problem |
+| `alt+f8` / `alt+shift+f8` | next / previous misspelt word |
+| `ctrl+.` | fix the misspelt word at the caret |
 | `ctrl+n` / `alt+d` / `f2` | new note / today's daily note / rename |
 | `alt+left` / `alt+right` | back / forward through opened notes |
 | `ctrl+e` | reader mode |
@@ -78,6 +81,23 @@ Tools that act on the note in view live in the status line, so the note stays in
 Choosing from a list stays in the palette, headings included (`ctrl+shift+o`, or `[sections]` in the config).
 
 Expand selection grows word, sentence, line, paragraph, section (under its heading), then the whole note.
+
+## Spelling
+
+Misspelt words get a dotted underline as you write (`spelling` in `[colors]`). The word you're typing isn't marked until you've moved on from it. Only prose is checked: code, links' targets, URLs, paths, emails, `#tags`, `snake_case` and `camelCase` names, ALL CAPS, words with digits and front matter are left alone. The status bar counts the misspelt words apart from problems: click the count or press `alt+F8` / `alt+shift+F8` to go through them. With the caret on one, its likeliest fixes show at the end of the line; `ctrl+.` lists them all, along with adding the word to your dictionary or ignoring it until delta closes.
+
+English (`en_US`, and `en_GB` with -ise spellings) is built in. `[spell]` in the config picks the dictionaries, and a space can have its own:
+
+```ini
+[spell]
+languages = en_GB            ; several: en_GB, de_DE (a word is right if any knows it)
+space.recipes = de_DE        ; this space checks German instead
+enabled = true
+```
+
+For other languages, put a hunspell dictionary (`de_DE.aff` and `de_DE.dic`, from LibreOffice's or Firefox's dictionaries, say) in the `dictionaries` folder next to the config and use its name. UTF-8 and ISO8859-1 dictionaries work. Your own words go in `words.txt` next to the config, one a line; edits to it apply within a second. "Toggle spellcheck" in the `/` palette turns it off until the config says otherwise.
+
+The dictionaries are SCOWL's (http://wordlist.aspell.net), see `assets/dict/README_SCOWL.txt`; spellchecking is Hunspell's, see `third_party/hunspell`.
 
 ## Images
 

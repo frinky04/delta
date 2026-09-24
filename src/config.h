@@ -36,6 +36,11 @@ struct Config {
     std::string palette_selection = "marker";  // marker (a > in the margin) or invert (a solid bar)
     float animation_speed = 1.0f;
 
+    // [spell]
+    bool spell = true;
+    std::string spell_languages = "en_US";             // comma-separated dictionary names
+    std::map<std::string, std::string> spell_spaces;   // space.<name>: that space's languages (lower-cased name)
+
     // [colors] name -> "#rrggbb" overrides on top of the theme
     std::map<std::string, std::string> colors;
 
@@ -81,7 +86,10 @@ struct Setting {
 };
 const std::vector<Setting>& all_settings();
 const Setting* find_setting(const std::string& section, const std::string& key);
-extern const char* const kSections[5];  // general, editor, appearance, colors, keys
+extern const char* const kSections[6];  // general, editor, appearance, spell, colors, keys
+
+// A list of names as written in a setting ("en_US, en_GB" or "en_US en_GB").
+std::vector<std::string> split_list(const std::string& v);
 
 // The closest known name to a mistyped one, or "" if nothing is close.
 std::string suggest(const std::string& typo, const std::vector<std::string>& names);

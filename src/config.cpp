@@ -11,7 +11,21 @@
 
 using K = Setting::Kind;
 
-const char* const kSections[5] = {"general", "editor", "appearance", "colors", "keys"};
+const char* const kSections[6] = {"general", "editor", "appearance", "spell", "colors", "keys"};
+
+std::vector<std::string> split_list(const std::string& v) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : v + ",") {
+        if (c == ',' || c == ' ' || c == '\t') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    return out;
+}
 
 const std::vector<Setting>& all_settings() {
     static const std::vector<Setting> table = {
@@ -40,6 +54,9 @@ const std::vector<Setting>& all_settings() {
         {"appearance", "animations", K::Bool, "true", nullptr, 0, 0, nullptr, ""},
         {"appearance", "animation_speed", K::Float, "1", nullptr, 0.1f, 10, nullptr, "2 is twice as fast"},
         {"appearance", "palette_selection", K::Choice, "marker", nullptr, 0, 0, "marker|invert", "marker or invert"},
+
+        {"spell", "enabled", K::Bool, "true", nullptr, 0, 0, nullptr, "underline misspelt words"},
+        {"spell", "languages", K::Text, "en_US", nullptr, 0, 0, nullptr, "dictionaries, comma-separated"},
 
         {"colors", "accent", K::Colour, "#e0851e", "#c96f0e", 0, 0, nullptr, "caret, selection"},
         {"colors", "background", K::Colour, "#0c0c0c", "#f4f4f4", 0, 0, nullptr, ""},
@@ -226,7 +243,7 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
             section = lower(trim(line.substr(1, line.size() - 2)));
             if (std::find(sections.begin(), sections.end(), section) == sections.end()) {
                 std::string near = suggest(section, sections);
-                issue(near.empty() ? "unknown section; use general, editor, appearance, colors or keys"
+                issue(near.empty() ? "unknown section; use general, editor, appearance, spell, colors or keys"
                                    : "unknown section; did you mean [" + near + "]?",
                       trim_span(raw, l0 + 1, l1 - 1));
             }
@@ -251,6 +268,12 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
         if (section.empty()) { issue("setting outside any [section]", key_span); continue; }
         c.where[section + "." + key] = w;
         if (section == "keys") { c.keys[key] = val; continue; }  // checked against the commands
+        if (section == "spell" && key.rfind("space.", 0) == 0) {  // checked against the spaces and dictionaries
+            std::string space = trim(key.substr(6));
+            if (space.empty()) issue("name a space after space.", key_span);
+            else c.spell_spaces[space] = val;
+            continue;
+        }
 
         const Setting* s = find_setting(section, key);
         if (!s) {
@@ -303,6 +326,8 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
     c.animations = flag("appearance.animations");
     c.animation_speed = num("appearance.animation_speed");
     c.palette_selection = get("appearance.palette_selection");
+    c.spell = flag("spell.enabled");
+    c.spell_languages = get("spell.languages");
     for (auto& s : all_settings())
         if (s.kind == K::Colour)
             if (auto it = vals.find(std::string("colors.") + s.key); it != vals.end()) c.colors[s.key] = it->second;
@@ -355,6 +380,10 @@ std::map<int, std::string> config_hints(const std::vector<std::string>& lines, c
                 if (b.id == e.key) hints[e.line] = hint("", chord_key(e.value) == chord_key(b.keys), b.keys);
             continue;
         }
+        if (e.section == "spell" && e.key.rfind("space.", 0) == 0) {
+            hints[e.line] = "dictionaries for this space";
+            continue;
+        }
         const Setting* s = find_setting(e.section, e.key);
         if (!s) continue;  // the problem shows instead
         std::string v = e.value;
@@ -395,6 +424,8 @@ std::string default_config_text() {
            "[editor]\n"
            "\n"
            "[appearance]\n"
+           "\n"
+           "[spell]\n"
            "\n"
            "[colors]\n"
            "\n"
