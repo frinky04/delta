@@ -432,194 +432,359 @@ static void test_reader() {
 }
 
 static void test_fuzzy_and_keys() {
+    // The palette filters with fuzzy_match and highlights the positions it
+    // returns: a subsequence (any case) matches, anything else doesn't, and
+    // the positions point at the matched characters, in order.
     int score;
-    std::vector<int> pos;
-    CHECK(fuzzy_match("drm", "delta roadmap", score, &pos));
+    CHECK(fuzzy_match("", "anything", score, nullptr));
     CHECK(!fuzzy_match("xyz", "delta roadmap", score, nullptr));
-    int s1, s2;
-    fuzzy_match("road", "delta roadmap", s1, nullptr);
-    fuzzy_match("road", "r o a d", s2, nullptr);
-    CHECK(s1 > s2);
+    CHECK(!fuzzy_match("pamdaor", "delta roadmap", score, nullptr));  // letters out of order
+    auto low = [](char ch) { return (char)std::tolower((unsigned char)ch); };
+    std::string wrong;  // patterns whose match or positions are wrong
+    for (const char* q : {"drm", "ROAD", "d r", "Delta Roadmap"}) {
+        std::string t = "delta roadmap";
+        std::vector<int> pos;
+        bool ok = fuzzy_match(q, t, score, &pos);
+        std::string want;
+        for (const char* p = q; *p; p++)
+            if (*p != ' ') want += low(*p);
+        if (std::string(q) == "Delta Roadmap") want = "delta roadmap";  // contiguous: spaces are matched too
+        ok = ok && pos.size() == want.size();
+        for (size_t i = 0; ok && i < pos.size(); i++)
+            ok = pos[i] >= 0 && pos[i] < (int)t.size() && (i == 0 || pos[i] > pos[i - 1]) && low(t[pos[i]]) == want[i];
+        if (!ok) wrong += std::string("[") + q + "] ";
+    }
+    CHECK_EQ(wrong, std::string());
+    // The obvious candidate ranks first.
+    auto best = [](const std::string& q, const std::vector<std::string>& labels) {
+        std::string top;
+        int top_s = 0;
+        bool any = false;
+        for (auto& l : labels) {
+            int s;
+            if (fuzzy_match(q, l, s, nullptr) && (!any || s > top_s)) { top = l; top_s = s; any = true; }
+        }
+        return top;
+    };
+    CHECK_EQ(best("road", {"r o a d", "delta roadmap"}), std::string("delta roadmap"));  // contiguous beats scattered
+    CHECK_EQ(best("note", {"denotes", "note taking"}), std::string("note taking"));      // word start beats mid-word
+    CHECK_EQ(best("map", {"bitmaps and heaps", "map"}), std::string("map"));             // exact name first
 
+    // Chords: what the parser reads is the key and modifiers meant...
     Chord c;
-    CHECK(parse_chord("ctrl+shift+p", c));
-    CHECK_EQ(chord_str(c), std::string("ctrl+shift+p"));
-    CHECK(parse_chord("ctrl+,", c));
-    CHECK(c.key == ImGuiKey_Comma);
-    CHECK(parse_chord("ctrl+=", c));
-    CHECK(parse_chord("alt+up", c));
-    CHECK(!parse_chord("hyper+q", c));
+    CHECK(parse_chord("ctrl+shift+p", c) && c.key == ImGuiKey_P && c.mods == (ImGuiMod_Ctrl | ImGuiMod_Shift));
+    CHECK(parse_chord("ctrl+,", c) && c.key == ImGuiKey_Comma && c.mods == ImGuiMod_Ctrl);
+    // ...however it's spelled...
+    auto same = [](const char* a, const char* b) {
+        Chord x, y;
+        return parse_chord(a, x) && parse_chord(b, y) && x.key == y.key && x.mods == y.mods;
+    };
+    CHECK(same("Ctrl+Shift+P", "ctrl+shift+p"));
+    CHECK(same("shift+ctrl+p", "ctrl+shift+p"));
+    CHECK(same("cmd+s", "ctrl+s"));
+    CHECK(same("ctrl++", "ctrl+="));
+    CHECK(same("  alt+up ", "alt+up"));
+    // ...and every chord delta writes out reads back as itself.
+    std::string no_round_trip;
+    for (const char* s : {"ctrl+shift+p", "alt+up", "ctrl+,", "ctrl+=", "f12", "super+0", "ctrl+shift+alt+z",
+                          "numpad+", "escape", "ctrl+[", "shift+tab", "ctrl+pagedown", "ctrl+\\", "ctrl+/"}) {
+        Chord a, b;
+        if (!(parse_chord(s, a) && parse_chord(chord_str(a), b) && a.key == b.key && a.mods == b.mods)) no_round_trip += std::string(s) + " ";
+    }
+    CHECK_EQ(no_round_trip, std::string());
+    // Nonsense is refused, not bound to something else.
+    std::string accepted;
+    for (const char* s : {"", "hyper+q", "ctrl+", "ctrl+nosuchkey", "f13", "ctrl+shift"})
+        if (parse_chord(s, c)) accepted += std::string("[") + s + "] ";
+    CHECK_EQ(accepted, std::string());
     std::vector<std::string> bad;
     auto list = parse_chords("ctrl+z  ctrl+shift+z nope+x", &bad);
     CHECK_EQ((int)list.size(), 2);
-    CHECK_EQ((int)bad.size(), 1);
+    CHECK(bad == std::vector<std::string>{"nope+x"});
 }
 
 static void test_ini() {
+    // The editor indexes the style vector by byte, so it must cover every
+    // byte of any line, however malformed, and set it all in mono.
     LineInfo info;
     std::vector<uint16_t> st;
-    ini_analyze("[editor]", info, st);
-    CHECK(st[0] & I_Bracket);
-    CHECK(st[1] & I_Section);
-    CHECK(st[0] & S_CodeBlock);  // everything is mono
+    std::string short_or_not_mono;
+    for (const char* s : {"", "   ", "[", "[x", "]", "=", "= ;", " ; c", "a=b ;c", "[editor] ; c", "k = #12345"}) {
+        ini_analyze(s, info, st);
+        bool mono = std::all_of(st.begin(), st.end(), [](uint16_t f) { return (f & S_CodeBlock) != 0; });
+        if (st.size() != std::string(s).size() || !mono) short_or_not_mono += std::string("[") + s + "] ";
+    }
+    CHECK_EQ(short_or_not_mono, std::string());
 
+    // It reads a line the way the config parser does: key, value, and a
+    // " ; comment" tail, but a ';' inside a value and a '#' colour are values.
     ini_analyze("font_size = 14 ; px", info, st);
-    CHECK(st[0] & I_Key);
-    CHECK(st[10] & I_Eq);
-    CHECK(st[12] & I_Value);
-    CHECK(st[15] & I_Comment);
-    CHECK(!(st[14] & I_Value));  // trailing space before the comment
-
+    CHECK((st[0] & I_Key) && (st[12] & I_Value) && (st[17] & I_Comment) && !(st[17] & I_Value));
+    ini_analyze("daily_format = %Y;%m", info, st);
+    CHECK((st[17] & I_Value) && !(st[17] & I_Comment));  // the ';'
     ini_analyze("accent = #e6e6e6", info, st);
-    CHECK(st[10] & I_Color);
+    CHECK((st[9] & I_Value) && (st[9] & I_Color) && !(st[9] & I_Comment));
     ini_analyze(";font_size = 14", info, st);
-    CHECK(st[5] & I_Comment);
-    CHECK(!(st[5] & I_Key));
+    CHECK((st[5] & I_Comment) && !(st[5] & I_Key));
 
+    // Section headers, for the outline.
     std::string name;
     CHECK(ini_section("  [keys]  ", name));
     CHECK_EQ(name, std::string("keys"));
     CHECK(!ini_section("key = [x]", name));
-
-    // Problems are tied to 0-based lines.
-    fs::path p = fs::temp_directory_path() / "delta_test_config.ini";
-    atomic_write(p,
-                 "; comment\n"
-                 "[editor]\n"
-                 "font_size = big\n"
-                 "line_numbers = maybe\n"
-                 "wat = 1\n"
-                 "tab_size = 99\n"
-                 "[colors]\n"
-                 "accent = #123456\n"
-                 "[nope]\n",
-                 nullptr);
-    Config cfg;
-    std::vector<ConfigIssue> issues;
-    CHECK(load_config(p, cfg, issues));
-    fs::remove(p);
-    auto at = [&](int line) {
-        for (auto& i : issues)
-            if (i.line == line) return i.msg;
-        return std::string();
-    };
-    CHECK_EQ(at(2), std::string("expected a number, 8 to 48, using 14"));
-    CHECK_EQ(at(3), std::string("expected true or false, using false"));
-    CHECK_EQ(at(4), std::string("unknown setting"));
-    CHECK(at(5).rfind("out of range", 0) == 0);
-    CHECK(at(8).rfind("unknown section", 0) == 0);
-    CHECK_EQ(cfg.tab_size, 8);
-    CHECK_EQ(cfg.line_of("colors.accent"), 7);
 }
 
 static void test_config_schema() {
-    // Every table entry has a default that passes its own check.
-    for (auto& s : all_settings()) {
-        CHECK(find_setting(s.section, s.key) == &s);
-        CHECK(same_value(s, s.def, s.def));
+    const Config def = [] {
+        Config c;
+        std::vector<ConfigIssue> is;
+        parse_config("", c, is);
+        return c;
+    }();
+
+    // Every setting accepts its own default in either theme, and the file
+    // written on first launch parses cleanly: otherwise a fresh install
+    // shows errors the user never made.
+    std::string rejected;  // settings whose default is flagged
+    for (auto& s : all_settings())
+        for (const char* theme : {"dark", "light"}) {
+            Config c;
+            std::vector<ConfigIssue> is;
+            parse_config(std::string("[") + s.section + "]\n" + s.key + " = " + s.default_for(theme) + "\n", c, is);
+            if (!is.empty()) rejected += std::string(s.key) + "/" + theme + " ";
+        }
+    CHECK_EQ(rejected, std::string());
+    {
+        Config c;
+        std::vector<ConfigIssue> is;
+        parse_config(default_config_text(), c, is);
+        CHECK(is.empty());
     }
 
-    CHECK_EQ(suggest("line_hieght", {"line_height", "line_numbers"}), std::string("line_height"));
-    CHECK_EQ(suggest("zzzzzz", {"line_height", "theme"}), std::string());
-    const Setting* fs_ = find_setting("editor", "font_size");
-    CHECK(same_value(*fs_, "14.0", "14"));
-    CHECK(!same_value(*fs_, "15", "14"));
-    CHECK(same_value(*find_setting("editor", "line_numbers"), "no", "false"));
-    CHECK(same_value(*find_setting("editor", "caret_style"), "THICK", "thick"));
-    CHECK_EQ(find_setting("colors", "accent")->default_for("light"), std::string("#c96f0e"));
-    CHECK_EQ(find_setting("colors", "accent")->default_for("dark"), std::string("#e0851e"));
-
-    fs::path p = fs::temp_directory_path() / "delta_test_schema.ini";
-    atomic_write(p,
-                 "[editr]\n"
-                 "[editor]\n"
-                 "line_hieght = 2\n"
-                 "theme = light\n"
-                 "caret_style = round\n"
-                 "[colors]\n"
-                 "accent = orange\n",
-                 nullptr);
+    // Good values apply; bad ones fall back (or clamp) without taking the
+    // rest of the file down, and each is reported on its own line.
     Config cfg;
     std::vector<ConfigIssue> issues;
-    CHECK(load_config(p, cfg, issues));
-    fs::remove(p);
-    auto at = [&](int line) {
+    parse_config("; comment\n"                    // 0
+                 "[editor]\n"                     // 1
+                 "font_size = 18 ; px\n"          // 2  inline comment isn't part of the value
+                 "tab_size = 99\n"                // 3  out of range: clamped
+                 "line_numbers = maybe\n"         // 4  unusable: default
+                 "line_hieght = 2\n"              // 5  typo
+                 "caret_style = BLOCK\r\n"        // 6  any case, CRLF line ending
+                 "[Appearance]\n"                 // 7
+                 "theme = light\n"                // 8
+                 "column_width = 90\n"            // 9  wrong section: not applied
+                 "[colors]\n"                     // 10
+                 "accent = #123456\n"             // 11 '#' starts a colour, not a comment
+                 "text = orange\n"                // 12 not a colour: no override
+                 "[keys]\n"                       // 13
+                 "edit.undo = ctrl+u\n"           // 14
+                 "[general]\n"                    // 15
+                 "daily_space = \"my journal\"\n" // 16 quotes are stripped
+                 "daily_format = %Y;%m\n",        // 17 ';' without a space is kept
+                 cfg, issues);
+    CHECK(cfg.font_size == 18.0f);
+    CHECK_EQ(cfg.tab_size, (int)find_setting("editor", "tab_size")->hi);
+    CHECK_EQ(cfg.line_numbers, def.line_numbers);
+    CHECK_EQ(cfg.caret_style, std::string("block"));
+    CHECK_EQ(cfg.theme, std::string("light"));
+    CHECK_EQ(cfg.column_width, def.column_width);
+    CHECK_EQ(cfg.colors["accent"], std::string("#123456"));
+    CHECK(!cfg.colors.count("text"));
+    CHECK_EQ(cfg.keys["edit.undo"], std::string("ctrl+u"));
+    CHECK_EQ(cfg.daily_space, std::string("my journal"));
+    CHECK_EQ(cfg.daily_format, std::string("%Y;%m"));
+    std::vector<int> lines;
+    for (auto& i : issues) lines.push_back(i.line);
+    CHECK(lines == (std::vector<int>{3, 4, 5, 9, 12}));
+    auto msg = [&](int line) {
         for (auto& i : issues)
             if (i.line == line) return i.msg;
         return std::string();
     };
-    CHECK_EQ(at(0), std::string("unknown section; did you mean [editor]?"));
-    CHECK_EQ(at(2), std::string("unknown setting; did you mean line_height?"));
-    CHECK_EQ(at(3), std::string("belongs in [appearance]"));
-    CHECK_EQ(at(4), std::string("use bar, thick or block, using thick"));
-    CHECK_EQ(at(6), std::string("expected a colour like #e0851e, using the default"));
-    CHECK_EQ(cfg.caret_style, std::string("thick"));
-    CHECK(cfg.colors.empty());
+    CHECK(msg(5).find("line_height") != std::string::npos);  // points at the fix
+    CHECK(msg(9).find("[editor]") != std::string::npos);
 
-    // Each problem points at the part it's about: the section name, the key
-    // for names, the value for values (inline comments and blanks left out).
-    Config live;
-    std::vector<ConfigIssue> li;
-    parse_config("  [editr]\n[editor]\nline_hieght = 2\ncaret_style =  round   ; comment\nfont_size =\n", live, li);
-    auto span = [&](int line) {
-        for (auto& i : li)
-            if (i.line == line) return std::make_pair(i.col0, i.col1);
-        return std::make_pair(-2, -2);
+    // The live config: deleting a setting reverts it to its default.
+    parse_config("[keys]\n", cfg, issues);
+    CHECK(cfg.font_size == def.font_size && cfg.theme == def.theme && cfg.colors.empty() && cfg.keys.empty());
+
+    // Garbage never crashes and never leaves a number outside its range.
+    std::string junk = "[editor]\n=\n= 5\nfont_size\nfont_size =\nline_height = 1e999\ncolumn_width = 99999999999999999999\n"
+                       "tab_size = -3\n[\n]\n[editor\nautosave_delay = inf\n";
+    junk += std::string("font_size = \0\x01\xff", 15) + "\n" + std::string(100000, 'x') + " = 1\n";
+    Config g;
+    std::vector<ConfigIssue> gi;
+    parse_config(junk, g, gi);
+    CHECK(!gi.empty());
+    std::string out_of_range;
+    for (auto& s : all_settings()) {
+        if (s.kind != Setting::Kind::Float && s.kind != Setting::Kind::Int) continue;
+        float v = std::string(s.key) == "font_size" ? g.font_size
+                : std::string(s.key) == "line_height" ? g.line_height
+                : std::string(s.key) == "column_width" ? (float)g.column_width
+                : std::string(s.key) == "tab_size" ? (float)g.tab_size
+                : std::string(s.key) == "autosave_delay" ? g.autosave_delay
+                : std::string(s.key) == "blank_line_height" ? g.blank_line_height
+                : std::string(s.key) == "animation_speed" ? g.animation_speed : s.lo;
+        if (!(v >= s.lo && v <= s.hi)) out_of_range += std::string(s.key) + " ";
+    }
+    CHECK_EQ(out_of_range, std::string());
+
+    // From disk: a missing file is reported and changes nothing; a real one
+    // (CRLF, as Windows editors save it) loads.
+    fs::path p = fs::temp_directory_path() / "delta_test_config.ini";
+    fs::remove(p);
+    Config keep;
+    keep.font_size = 21;
+    CHECK(!load_config(p, keep, issues));
+    CHECK(keep.font_size == 21.0f);
+    atomic_write(p, "[editor]\r\nfont_size = 20\r\n[appearance]\r\ntheme = light\r\n", nullptr);
+    Config disk;
+    std::vector<ConfigIssue> di;
+    CHECK(load_config(p, disk, di));
+    CHECK(di.empty() && disk.font_size == 20.0f && disk.theme == "light");
+    fs::remove(p);
+
+    // "Add a setting": wherever config_insert_line puts a new line, it must
+    // land in its own section, so the value takes effect.
+    struct Add { const char *section, *key, *value; };
+    const Add adds[] = {{"general", "daily_space", "journal"}, {"editor", "tab_size", "2"}, {"appearance", "theme", "light"},
+                        {"colors", "accent", "#123456"}, {"keys", "edit.undo", "ctrl+u"}};
+    auto split = [](const std::string& t) {
+        std::vector<std::string> out(1);
+        for (char ch : t)
+            if (ch == '\n') out.emplace_back();
+            else out.back().push_back(ch);
+        return out;
     };
-    CHECK(span(0) == std::make_pair(3, 8));    // editr
-    CHECK(span(2) == std::make_pair(0, 11));   // line_hieght
-    CHECK(span(3) == std::make_pair(15, 20));  // round
-    CHECK(span(4) == std::make_pair(0, 9));    // empty value: the key
-    CHECK_EQ(live.where["editor.caret_style"].val0, 15);
-    ConfigIssue ia = issue_at(live, "editor.caret_style", true, "x");
-    CHECK(ia.line == 3 && ia.col0 == 15 && ia.col1 == 20);
-    CHECK_EQ(issue_at(live, "nope.nope", true, "x").line, -1);
+    for (auto doc : {split(default_config_text()), std::vector<std::string>{""},
+                     std::vector<std::string>{"[keys]", "", "; note", "[editor]", "font_size = 15", "; tabs", "", "[general]"}}) {
+        for (auto& a : adds) {
+            bool header = false;
+            int at = config_insert_line(doc, a.section, header);
+            std::vector<std::string> ins;
+            if (header) ins.push_back(std::string("[") + a.section + "]");
+            ins.push_back(std::string(a.key) + " = " + a.value);
+            doc.insert(doc.begin() + at, ins.begin(), ins.end());
+        }
+        std::string text;
+        for (auto& l : doc) text += l + "\n";
+        Config c;
+        std::vector<ConfigIssue> is;
+        parse_config(text, c, is);
+        CHECK(is.empty());
+        CHECK(c.daily_space == "journal" && c.tab_size == 2 && c.theme == "light" && c.colors["accent"] == "#123456" &&
+              c.keys["edit.undo"] == "ctrl+u");
+    }
 
-    // A fresh config is just the sections.
-    std::string tpl = default_config_text();
-    for (const char* s : kSections) CHECK(tpl.find(std::string("[") + s + "]") != std::string::npos);
-    CHECK(tpl.find('=') == std::string::npos);
+    // App state (last note, window size) survives a save and load.
+    fs::path kvp = fs::temp_directory_path() / "delta_test_state" / "state.txt";
+    fs::remove_all(kvp.parent_path());
+    std::map<std::string, std::string> kv = {{"last_note", "C:/My Notes/a = b.md"}, {"window", "1280 800"}, {"empty", ""}};
+    save_kv(kvp, kv);  // creates the folder
+    CHECK(load_kv(kvp) == kv);
+    fs::remove_all(kvp.parent_path());
+}
 
-    // Hints: what each setting does and its default, for this theme.
-    std::vector<std::string> lines = {
-        "; hi",
-        "[editor]",
-        "font_size = 14",
-        "font_size = 16",
-        "[colors]",
-        "accent = #c96f0e",
-        "[keys]",
-        "edit.undo = ctrl+z",
-        "edit.redo = ctrl+shift+z ctrl+y",
-        "note.move = ctrl+m",
-        "edit.cut = ctrl+k",
+#include "store.h"
+
+// Notes are the user's documents: every store operation must keep their
+// bytes intact and refuse anything that would overwrite or orphan one.
+static void test_store() {
+    fs::path root = fs::temp_directory_path() / "delta_test_store";
+    fs::remove_all(root);
+    Store st;
+    st.set_root(root);
+    auto body = [](const NoteRef& n) {
+        std::string s;
+        return read_file(n.path, s) ? s : std::string("<unreadable>");
     };
-    std::vector<BindingDoc> docs = {{"edit.undo", "Undo", "ctrl+z"}, {"edit.redo", "Redo", "ctrl+y ctrl+shift+z"},
-                                    {"note.move", "Move note", ""}, {"edit.cut", "Cut", "ctrl+x"}};
-    auto hints = config_hints(lines, "light", docs);
-    CHECK(hints.count(0) == 0 && hints.count(1) == 0);
-    CHECK_EQ(hints[2], std::string("px (default)"));
-    CHECK_EQ(hints[3], std::string("px, default 14"));
-    CHECK(hints[5].find("(default)") != std::string::npos);  // light theme's accent
-    CHECK_EQ(hints[7], std::string("(default)"));
-    CHECK_EQ(hints[8], std::string("(default)"));    // same chords, any order
-    CHECK_EQ(hints[9], std::string("unbound by default"));
-    CHECK_EQ(hints[10], std::string("default ctrl+x"));
-    CHECK(config_hints(lines, "dark", docs)[5].find("default #e0851e") != std::string::npos);
-    // Self-explanatory settings show only their default.
-    CHECK_EQ(config_hints({"[editor]", "line_numbers = true"}, "dark", {})[1], std::string("default false"));
 
-    // New settings go after the last one in their section, or in a new
-    // section at the end.
-    bool header = false;
-    std::vector<std::string> doc = {"[general]", "", "[editor]", "font_size = 15", "; tabs", "", "[keys]", ""};
-    CHECK_EQ(config_insert_line(doc, "general", header), 1);
-    CHECK(!header);
-    CHECK_EQ(config_insert_line(doc, "editor", header), 4);
-    CHECK(!header);
-    CHECK_EQ(config_insert_line(doc, "keys", header), 7);
-    CHECK_EQ(config_insert_line(doc, "colors", header), 8);
-    CHECK(header);
+    // Content round-trips byte for byte: UTF-8, CRLF, no final newline.
+    const std::string text = "# Caf\xC3\xA9 \xE2\x98\x95\r\n\r\n- [ ] item\n\ttab\n\n\nlast line";
+    NoteRef a;
+    CHECK_EQ(st.create_note("work", "Caf\xC3\xA9 notes", text, a), std::string());
+    CHECK_EQ(body(a), text);
+    CHECK(st.exists("work", "Caf\xC3\xA9 notes"));
+    auto listed = st.notes("work");
+    CHECK(listed.size() == 1 && listed[0].name == "Caf\xC3\xA9 notes" && listed[0].path == a.path);
+
+    // Saving again replaces the content and leaves nothing else behind.
+    std::string err;
+    CHECK(atomic_write(a.path, "v2", &err));
+    CHECK_EQ(body(a), std::string("v2"));
+    int files = 0;
+    for (auto& e : fs::directory_iterator(root / "work")) files += e.is_regular_file();
+    CHECK_EQ(files, 1);
+    CHECK(atomic_write(a.path, "", &err) && body(a).empty());  // an emptied note stays a file
+    CHECK(atomic_write(a.path, text, &err));
+
+    // Nothing overwrites an existing note.
+    NoteRef b, dup;
+    CHECK_EQ(st.create_note("work", "plan", "plan text", b), std::string());
+    CHECK(!st.create_note("work", "  plan ", "other", dup).empty());
+    CHECK_EQ(body(b), std::string("plan text"));
+    NoteRef a2 = a;
+    CHECK(!st.rename_note(a2, "plan").empty());
+    CHECK(body(a) == text && body(b) == "plan text");
+    NoteRef c;
+    CHECK_EQ(st.create_note("home", "plan", "home plan", c), std::string());
+    NoteRef b2 = b;
+    CHECK(!st.move_note(b2, "home").empty());
+    CHECK(body(b) == "plan text" && body(c) == "home plan");
+    CHECK(!st.rename_space("home", "work").empty());
+    CHECK(body(b) == "plan text" && body(c) == "home plan");
+    CHECK(!st.delete_space("work").empty());  // not empty
+    CHECK(body(a) == text && body(b) == "plan text");
+
+    // Names can't reach outside the notes folder or hide from the listing.
+    NoteRef bad;
+    std::string accepted;
+    for (const char* n : {"", "   ", "../escape", "..\\escape", "a/b", ".hidden", "trailing.", "c:x", "tab\there"})
+        if (st.create_note("work", n, "x", bad).empty()) accepted += std::string("[") + n + "] ";
+    CHECK_EQ(accepted, std::string());
+    CHECK(!st.ensure_space("../outside").empty());
+    CHECK(!fs::exists(root.parent_path() / "escape.md") && !fs::exists(root / "escape.md"));
+
+    // Renames and moves carry the content with them.
+    CHECK_EQ(st.rename_note(b, "roadmap"), std::string());
+    CHECK(b.name == "roadmap" && body(b) == "plan text" && !st.exists("work", "plan"));
+    CHECK_EQ(st.rename_note(b, "Roadmap"), std::string());  // case only
+    CHECK(b.name == "Roadmap" && body(b) == "plan text");
+    CHECK_EQ(st.move_note(b, "home"), std::string());
+    CHECK(b.space == "home" && body(b) == "plan text" && !st.exists("work", "Roadmap"));
+    CHECK_EQ(st.rename_space("home", "house"), std::string());
+    CHECK(body(st.ref("house", "Roadmap")) == "plan text" && body(st.ref("house", "plan")) == "home plan");
+
+    // Deleting goes to the trash, and two deleted notes with the same name
+    // both survive there. The trash isn't a space.
+    NoteRef t1, t2;
+    CHECK_EQ(st.create_note("work", "draft", "first draft", t1), std::string());
+    CHECK_EQ(st.trash_note(t1), std::string());
+    CHECK_EQ(st.create_note("work", "draft", "second draft", t2), std::string());
+    CHECK_EQ(st.trash_note(t2), std::string());
+    CHECK(!st.exists("work", "draft"));
+    std::vector<std::string> trashed;
+    for (auto& e : fs::directory_iterator(root / ".trash" / "work")) {
+        std::string s;
+        read_file(e.path(), s);
+        trashed.push_back(s);
+    }
+    std::sort(trashed.begin(), trashed.end());
+    CHECK(trashed == (std::vector<std::string>{"first draft", "second draft"}));
+    CHECK(st.spaces() == (std::vector<std::string>{"house", "work"}));
+    CHECK_EQ((int)st.all_notes().size(), 3);  // Café notes, Roadmap, plan
+
+    // Only .md files are notes; an empty space can go.
+    atomic_write(root / "work" / "scratch.txt", "x", nullptr);
+    CHECK_EQ(st.note_count("work"), 1);
+    CHECK_EQ(st.ensure_space("empty"), std::string());
+    CHECK_EQ(st.delete_space("empty"), std::string());
+    CHECK(!fs::exists(root / "empty"));
+
+    fs::remove_all(root);
 }
 
 // Every image is 800x400 except those named "missing".
