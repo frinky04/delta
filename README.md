@@ -15,7 +15,7 @@ Notes save as you type. Deleted notes go to the trash; "restore a deleted note" 
 
 `ctrl+p` lists every command, with its shortcut.
 
-`ctrl+o` finds a note in the current space; `tab` widens it to every space, and `ctrl+alt+o` starts there. `work/plan` looks in one space. Type a name that doesn't exist to create it. `ctrl+tab` flips back to the note before.
+`ctrl+o` finds a note in the current space; `tab` widens it to every space, and `ctrl+alt+o` starts there. `work/plan` looks in one space. Notes are listed by name; `ctrl+r` switches to most recent first. Type a name that doesn't exist to create it. `ctrl+tab` flips back to the note before.
 
 A leading character switches what the palette searches, and backspace goes back to commands:
 

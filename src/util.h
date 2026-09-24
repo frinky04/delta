@@ -125,6 +125,31 @@ inline std::string lower(std::string s) {
 
 inline bool iequals(const std::string& a, const std::string& b) { return lower(a) == lower(b); }
 
+// Name order as people read it: case aside, and runs of digits by value,
+// so "note 2" comes before "note 10".
+inline bool natural_less(std::string_view a, std::string_view b) {
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        unsigned char x = (unsigned char)a[i], y = (unsigned char)b[j];
+        if (std::isdigit(x) && std::isdigit(y)) {
+            size_t i0 = i, j0 = j;
+            while (i0 < a.size() && a[i0] == '0') i0++;
+            while (j0 < b.size() && b[j0] == '0') j0++;
+            size_t i1 = i0, j1 = j0;
+            while (i1 < a.size() && std::isdigit((unsigned char)a[i1])) i1++;
+            while (j1 < b.size() && std::isdigit((unsigned char)b[j1])) j1++;
+            if (i1 - i0 != j1 - j0) return i1 - i0 < j1 - j0;  // more digits, bigger number
+            if (int c = a.substr(i0, i1 - i0).compare(b.substr(j0, j1 - j0)); c != 0) return c < 0;
+            i = i1, j = j1;
+            continue;
+        }
+        x = (unsigned char)std::tolower(x), y = (unsigned char)std::tolower(y);
+        if (x != y) return x < y;
+        i++, j++;
+    }
+    return a.size() - i < b.size() - j;
+}
+
 // Text from elsewhere (the OS's "Access is denied.") in delta's voice:
 // lower case, no full stop. An acronym at the start ("OS ...") keeps its case.
 inline std::string plain_msg(std::string_view s) {

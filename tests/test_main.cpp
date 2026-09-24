@@ -2336,6 +2336,16 @@ static void test_palette_modes() {
 extern const unsigned char g_manual[];
 extern const std::size_t g_manual_size;
 
+// The note list's name order: case aside, numbers by value.
+static void test_natural_sort() {
+    std::vector<std::string> v = {"note 10", "Note 2", "note 1", "apple", "Banana", "2026-09-25", "2026-09-03", "a", "note 02b", "note 2a"};
+    std::sort(v.begin(), v.end(), [](const std::string& a, const std::string& b) { return natural_less(a, b); });
+    std::string got;
+    for (auto& s : v) got += (got.empty() ? "" : "|") + s;
+    CHECK_EQ(got, std::string("2026-09-03|2026-09-25|a|apple|Banana|note 1|Note 2|note 2a|note 02b|note 10"));
+    CHECK(!natural_less("x", "x") && natural_less("x", "xy") && !natural_less("xy", "x"));
+}
+
 static void test_manual() {
     std::string readme = read_src("../README.md");
     CHECK(!readme.empty());
@@ -2553,6 +2563,7 @@ int main() {
     test_fonts();
     test_ui_voice();
     test_manual();
+    test_natural_sort();
     test_palette_modes();
     test_sandbox();
     test_config_set();

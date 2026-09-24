@@ -227,6 +227,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         items_.clear();
         total_ = -1;
         if (kind_ == Kind::Query) {
+            tag_.clear();
             build(text(), items_, total_);
         } else if (kind_ == Kind::Pick) {
             std::string q = trim(buf_);
@@ -313,6 +314,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     int matches = (int)std::count_if(items_.begin(), items_.end(), [](const PaletteItem& it) { return !it.emphasis && it.action; });
     if (kind_ != Kind::Prompt && total_ != -2)
         count = total_ >= 0 ? std::to_string(matches) + "/" + std::to_string(total_) : std::to_string(matches);
+    if (kind_ == Kind::Query && !tag_.empty()) count = tag_ + (count.empty() ? "" : "  " + count);
     float count_w = count.empty() ? 0 : W(mono, count);
     if (!count.empty())
         dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - count_w), text_y), col_alpha(T.faint, vis), count.c_str());

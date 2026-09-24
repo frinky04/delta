@@ -203,6 +203,7 @@ private:
     double next_problem_check_ = 0;           // a held-back problem shows then
     uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
     bool reader_pref_ = false;                // reader mode to restore after the config or manual
+    bool sort_recent_ = false;                // the note list by recent, not by name (kept in state)
     Store store_;
     Editor editor_;
     Palette palette_;

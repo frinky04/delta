@@ -72,6 +72,11 @@ public:
     // Every space rather than this one (see kScoped).
     bool wide() const { return wide_ && scoped(); }
     void set_wide(bool w);
+    // A word beside the count about how the list is shown ("by name"),
+    // set by the builder; empty for none.
+    void set_tag(std::string t) { tag_ = std::move(t); }
+    // Builds the list again next frame (something it's built from changed).
+    void rebuild() { built_for_ = "\x01"; }
 
     enum class Selection { Marker, Invert };
 
@@ -112,7 +117,7 @@ private:
     std::string pending_text_;
     bool apply_text_ = false;
     bool focus_ = false;
-    std::string title_, action_label_;
+    std::string title_, action_label_, tag_;
     std::vector<PaletteItem> fixed_, items_;
     PickOptions opts_;
     int generation_ = 0;

@@ -114,6 +114,7 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
         }
     }
     if (state["reader"] == "1") editor_.set_reader(true, false);
+    sort_recent_ = state["sort"] == "recent";
     // Carets and scroll from last time ("view:<path> = line col scroll").
     for (auto& [key, value] : state) {
         if (key.rfind("view:", 0) != 0) continue;
@@ -895,6 +896,11 @@ void App::register_commands() {
     // Navigation
     add("palette.notes", "find a note in this space", "ctrl+o", [this] { open_palette("."); }, false, true);
     add("palette.all", "find a note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, true);
+    add("palette.sort", "sort notes by name or recent", "ctrl+r", [this] {
+        sort_recent_ = !sort_recent_;
+        if (palette_.in_mode('.')) palette_.rebuild();
+        else status(sort_recent_ ? "notes sorted by recent" : "notes sorted by name");
+    }, false, true);
     add("palette.commands", "show all commands", "ctrl+p", [this] { open_palette(""); }, false, true);
     add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, true);
     add("palette.headings", "jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
@@ -1470,21 +1476,36 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         }
         bool all = palette_.wide() || !only.empty();
         if (all && cache_all_.empty()) cache_all_ = store_.all_notes();
-        // Notes you've had open come first, the latest first, so the one
-        // before this is at the top. The rest follow by when they were changed.
-        std::map<std::string, int> rank;
-        for (auto& n : recent_.list()) rank.emplace(path_u8(n.path), (int)rank.size());
-        auto rank_of = [&](const NoteRef& n) {
-            auto it = rank.find(path_u8(n.path));
-            return it == rank.end() ? INT_MAX : it->second;
-        };
         std::vector<NoteRef> notes;
         for (auto& n : all ? cache_all_ : cache_notes_)
-            if ((!note_ || n.path != note_->path) && (only.empty() || iequals(n.space, only))) notes.push_back(n);
-        std::stable_sort(notes.begin(), notes.end(), [&](const NoteRef& a, const NoteRef& b) { return rank_of(a) < rank_of(b); });
+            if (only.empty() || iequals(n.space, only)) notes.push_back(n);
+        // By name (as listed, so every space's are grouped by space), or by
+        // recent: the notes you've had open, latest first, then the rest by
+        // when they were changed. Matches keep this order among equals.
+        if (sort_recent_) {
+            std::map<std::string, int> rank;
+            for (auto& n : recent_.list()) rank.emplace(path_u8(n.path), (int)rank.size());
+            auto rank_of = [&](const NoteRef& n) {
+                auto it = rank.find(path_u8(n.path));
+                return it == rank.end() ? INT_MAX : it->second;
+            };
+            std::stable_sort(notes.begin(), notes.end(), [&](const NoteRef& a, const NoteRef& b) {
+                int ra = rank_of(a), rb = rank_of(b);
+                return ra != rb ? ra < rb : a.mtime > b.mtime;
+            });
+        } else {
+            auto label = [&](const NoteRef& n) { return all ? n.space + "/" + n.name : n.name; };
+            std::sort(notes.begin(), notes.end(), [&](const NoteRef& a, const NoteRef& b) { return natural_less(label(a), label(b)); });
+        }
+        palette_.set_tag(sort_recent_ ? "by recent" : "by name");
         total = (int)notes.size();
+        // With nothing typed, by name the open note starts selected (you are
+        // here); by recent it's at the top and the one before it is, so
+        // enter flips back.
+        bool pick_next = sort_recent_ && name.empty();
         for (auto& n : notes) {
             PaletteItem it;
+            bool open = note_ && note_->path == n.path;
             std::string where = all ? n.space + "/" : "";
             it.label = where + n.name;
             // Past a "space/", only the name is matched.
@@ -1494,7 +1515,9 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
                 if (!fuzzy_match(name, n.name, it.score, &it.hl)) continue;
                 for (int& h : it.hl) h += (int)where.size();
             }
-            it.meta = ago(n.mtime);
+            it.meta = open ? "open" : ago(n.mtime);
+            if (pick_next && !open) it.current = true, pick_next = false;
+            else if (!sort_recent_ && name.empty() && open) it.current = true;
             it.action = [this, n] { open_note(n); };
             out.push_back(std::move(it));
             if (out.size() > 300) break;
@@ -2660,6 +2683,7 @@ void App::shutdown() {
     kv["note"] = is_note() ? note_->name : "";
     kv["zoom"] = std::to_string(zoom_);
     kv["reader"] = (is_note() ? editor_.reader() : reader_pref_) ? "1" : "0";
+    kv["sort"] = sort_recent_ ? "recent" : "name";
     // Where each note's caret and scroll were, so notes reopen where you left
     // them. Paths are relative to the notes folder.
     remember_view();
