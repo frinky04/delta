@@ -1169,6 +1169,7 @@ Editor::Metrics Editor::metrics(float size) const {
     m.sans_b = P_.sans_bold ? P_.sans_bold->GetFontBaked(size) : nullptr;
     m.mono_b = P_.mono_bold ? P_.mono_bold->GetFontBaked(m.msize) : nullptr;
     m.tabw = m.sans->GetCharAdvance(' ') * P_.tab_size;
+    m.mono_dy = m.sans->Ascent - m.mono->Ascent;
     return m;
 }
 
@@ -3452,7 +3453,7 @@ void Editor::draw(const EditorParams& p) {
                 ImFont* font = bold && bold_font ? bold_font : (mono ? p.mono : p.sans);
                 float size = mono ? m.msize : m.size;
                 float row_top = origin_y_ + c.y + yoff_[cur_.line];
-                float text_y = row_top + (L.row_h - L.size) * 0.5f + (mono ? (L.size - m.msize) * 0.78f : 0.0f);
+                float text_y = row_top + (L.row_h - L.size) * 0.5f + (mono ? m.mono_dy : 0.0f);
                 int end = utf8::next(line, cur_.col);
                 dl->AddText(font, size, ImVec2(std::round(col_x_ + tx), std::round(text_y)), fade(T.bg),
                             line.data() + cur_.col, line.data() + end);
@@ -4025,7 +4026,7 @@ void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m,
                       const std::vector<uint16_t>& st, int a, int b, float x0, float ry) {
     const char* p = s.data();
     float ty = ry + (L.row_h - L.size) * 0.5f;
-    float mono_ty = ty + (L.size - m.msize) * 0.78f;
+    float mono_ty = ty + m.mono_dy;
     float dpi = P_.dpi;
 
     // Pass 1: inline code / highlight pills.

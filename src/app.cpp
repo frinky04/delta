@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include "commands.h"
+#include "imgui_freetype.h"
 #include "problems.h"
 #include "spell_fix.h"
 #include "theme.h"
@@ -226,6 +227,9 @@ ImFont* App::load_font(const FontBytes& bytes, int index, const unsigned char* n
         c.FontNo = (ImU32)face;
         c.MergeMode = font != nullptr;
         c.DstFont = font;
+        // Light hinting snaps glyphs to the pixel grid vertically only, so
+        // stems and edges are crisp without bending the letter shapes.
+        c.FontLoaderFlags = ImGuiFreeTypeLoaderFlags_LightHinting | ImGuiFreeTypeLoaderFlags_LoadColor;
         ImFont* f = atlas->AddFontFromMemoryTTF(const_cast<void*>(data), (int)size, 17.0f, &c);
         if (!font) font = f;
     };

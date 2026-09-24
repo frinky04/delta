@@ -76,3 +76,5 @@ cmake --build build
 ```
 
 Dictionaries from SCOWL (http://wordlist.aspell.net). Spellchecking by Hunspell.
+
+Portions of this software are copyright © 2024 The FreeType Project (https://freetype.org). All rights reserved.

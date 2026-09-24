@@ -15,6 +15,15 @@ set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/glfw EXCLUDE_FROM_ALL)
 find_package(OpenGL REQUIRED)
 
+# --- freetype (vendored, see third_party/freetype/DELTA.md) -------------------
+# Rasterizes glyphs for ImGui, hinted to the pixel grid. Plain outlines only:
+# no compressed, PNG-bitmap or shaped fonts.
+foreach(dep ZLIB BZIP2 PNG HARFBUZZ BROTLI)
+  set(FT_DISABLE_${dep} ON CACHE BOOL "" FORCE)
+endforeach()
+set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/freetype EXCLUDE_FROM_ALL)
+
 # --- dear imgui (vendored) ---------------------------------------------------
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 add_library(imgui STATIC
@@ -22,11 +31,12 @@ add_library(imgui STATIC
   ${IMGUI_DIR}/imgui_draw.cpp
   ${IMGUI_DIR}/imgui_tables.cpp
   ${IMGUI_DIR}/imgui_widgets.cpp
+  ${IMGUI_DIR}/misc/freetype/imgui_freetype.cpp
   ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
   ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
-target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
-target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USE_WCHAR32)
-target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends ${IMGUI_DIR}/misc/freetype)
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USE_WCHAR32 IMGUI_ENABLE_FREETYPE)
+target_link_libraries(imgui PUBLIC glfw OpenGL::GL freetype)
 
 # --- hunspell (vendored, see third_party/hunspell/DELTA.md) -------------------
 set(HUNSPELL_DIR ${CMAKE_SOURCE_DIR}/third_party/hunspell/src)

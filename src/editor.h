@@ -245,6 +245,7 @@ private:
         ImFontBaked* sans_b;  // may be null
         ImFontBaked* mono_b;
         float size, msize, tabw;
+        float mono_dy;  // mono's offset down from sans's top, to share its baseline
     };
     struct Snap {
         std::vector<std::string> lines;
