@@ -424,7 +424,7 @@ void App::register_commands() {
         int tile = 0;
         int line = editor_.image_for_caret(&tile);
         if (line >= 0) open_viewer(line, tile);
-        else status("Put the caret beside an image to view it");
+        else status("Pick an image to view it");
     });
     add("edit.select_all", "Select all", "ctrl+a", ed(&Editor::select_all));
     add("edit.select_line", "Select line", "ctrl+l", ed(&Editor::select_line), true);
@@ -1440,7 +1440,8 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
             int w = editor_.word_count();
             put_right(std::to_string(w) + (w == 1 ? " word" : " words"), T.dim);
         }
-        if (editor_.has_selection()) put_right(std::to_string(editor_.selection_length()) + " selected", T.dim);
+        // (Not for a picked image: its markdown's length means nothing.)
+        if (editor_.has_selection() && editor_.image_for_caret() < 0) put_right(std::to_string(editor_.selection_length()) + " selected", T.dim);
     }
 
     // Transient message, between the two.
@@ -1580,8 +1581,8 @@ void App::frame() {
         p.scroll_past_end = cfg_.scroll_past_end;
         p.keyboard = !palette_.is_open() && bar_ == Bar::None && !fired && !viewer_.open;
         p.mouse = !palette_.visible() && !viewer_.open;
-        // Space beside an image opens it (no text goes there anyway).
-        if (p.keyboard && editing() && !editor_.has_selection() && editor_.image_for_caret() >= 0 &&
+        // Space on a picked image opens it (no text goes there anyway).
+        if (p.keyboard && editing() && editor_.image_for_caret() >= 0 &&
             !io.KeyCtrl && !io.KeyAlt && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
             int tile = 0;
             int line = editor_.image_for_caret(&tile);

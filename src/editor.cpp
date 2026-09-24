@@ -340,7 +340,7 @@ void Editor::paste() {
     // A URL pasted over selected text (on one line) makes a link of it.
     bool url = (text.rfind("http://", 0) == 0 || text.rfind("https://", 0) == 0) &&
                text.find_first_of(" \t\n") == std::string::npos;
-    if (url && has_selection() && cur_.line == anchor_.line && syntax_ == Syntax::Markdown) {
+    if (url && has_selection() && cur_.line == anchor_.line && !is_img(cur_.line) && syntax_ == Syntax::Markdown) {
         replace_selection("[" + selected_text() + "](" + text + ")");
     } else if (!has_selection() && !line_clip_.empty() && text == line_clip_) {
         // A whole-line copy pastes as a line above, like an IDE.
@@ -371,6 +371,7 @@ void Editor::insert_lines(const std::vector<std::string>& block) {
     if (block.empty()) return;
     std::vector<std::string> before = lines_;
     begin_edit(Edit::Other);
+    unpick();  // they go after a picked image, not over it
     delete_selection();
     step_off_image();
     int l = cur_.line;
@@ -965,6 +966,7 @@ void Editor::toggle_task() {
 }
 
 void Editor::wrap_selection(const std::string& m) {
+    if (is_img(cur_.line)) return;  // marks would turn the image back into text
     int ml = (int)m.size();
     begin_edit(Edit::Other);
     if (!has_selection()) {
@@ -1357,6 +1359,110 @@ int Editor::stop_col(const Line& L, int k, int len) {
     return L.tiles[k].b0;
 }
 
+int Editor::picked(int* tile) const {
+    if (reader_ || !has_selection() || cur_.line != anchor_.line || !is_img(cur_.line)) return -1;
+    int a = std::min(cur_.col, anchor_.col), b = std::max(cur_.col, anchor_.col);
+    const Line& L = lay_[0][cur_.line];
+    for (int k = 0; k < (int)L.tiles.size(); k++)
+        if (L.tiles[k].b0 == a && L.tiles[k].b1 == b) {
+            if (tile) *tile = k;
+            return cur_.line;
+        }
+    return -1;
+}
+
+// From the text rather than the layout, so it works right after an edit.
+void Editor::pick(int line, int tile, bool reveal) {
+    std::vector<ImageRef> refs;
+    if (line < 0 || line >= (int)lines_.size() || !md_image_row(lines_[line], &refs) || refs.empty()) return;
+    const ImageRef& r = refs[std::clamp(tile, 0, (int)refs.size() - 1)];
+    anchor_ = {line, r.begin};
+    cur_ = {line, r.end};
+    if (reveal) { reveal_ = true; reveal_mode_ = 0; }
+    activity_ = ImGui::GetTime();
+}
+
+bool Editor::unpick() {
+    if (picked() < 0) return false;
+    cur_ = anchor_ = std::max(cur_, anchor_);
+    return true;
+}
+
+// A caret left on an image line (a click beside one, an undo, a jump)
+// picks the image before it, or the first.
+void Editor::settle_on_images() {
+    if (reader_ || has_selection() || !is_img(cur_.line) || img_drag_ || resize_line_ >= 0) return;
+    const Line& L = lay_[0][cur_.line];
+    const Line::Tile& t = L.tiles[img_tile(L, cur_.col)];
+    anchor_ = {cur_.line, t.b0};
+    cur_ = {cur_.line, t.b1};
+}
+
+// Left/right from a picked image: the next image in its row, or off the
+// line (onto the next line's first image or text).
+void Editor::step_picked(int line, int tile, int dir) {
+    want_x_ = -1;
+    if (tile + dir >= 0 && tile + dir < (int)lay_[0][line].tiles.size()) { pick(line, tile + dir); return; }
+    int to = line + dir;
+    if (to < 0 || to >= (int)lines_.size()) return;
+    if (is_img(to)) pick(to, dir > 0 ? 0 : (int)lay_[0][to].tiles.size() - 1);
+    else move_to({to, dir > 0 ? 0 : (int)lines_[to].size()}, false);
+}
+
+// Up/down from a picked image: the nearest image in the row above or below
+// (rows of more than four wrap), else off the line.
+void Editor::vertical_picked(int line, int tile, int dir) {
+    const Line& L = lay_[0][line];
+    const Line::Tile& t = L.tiles[tile];
+    if (want_x_ < 0) want_x_ = t.x + t.w * 0.5f;
+    float keep = want_x_;
+    int best = -1;
+    for (int k = 0; k < (int)L.tiles.size(); k++) {
+        float y = L.tiles[k].y;
+        if (dir > 0 ? y <= t.y : y >= t.y) continue;
+        if (best < 0 || (dir > 0 ? y < L.tiles[best].y : y > L.tiles[best].y)) best = k;
+    }
+    if (best >= 0) {
+        float row_y = L.tiles[best].y, dist = 1e9f;
+        for (int k = 0; k < (int)L.tiles.size(); k++) {
+            const Line::Tile& o = L.tiles[k];
+            float dx = std::fabs(o.x + o.w * 0.5f - keep);
+            if (o.y == row_y && dx < dist) { dist = dx; best = k; }
+        }
+        pick(line, best);
+    } else {
+        int to = line + dir;
+        if (to < 0 || to >= (int)lines_.size()) return;
+        if (is_img(to)) pick(to, nearest_tile(lay_[0][to], keep, dir < 0));
+        else move_to({to, col_at_x(0, to, dir > 0 ? 0 : (int)lay_[0][to].rows.size() - 1, keep)}, false);
+    }
+    want_x_ = keep;
+}
+
+// Backspace (dir < 0) or delete on a picked image takes it out. Left in its
+// row, the one before it (backspace) or the one that took its place
+// (delete) is picked; a line left empty keeps the caret, where it was.
+void Editor::remove_picked(int line, int tile, int dir) {
+    begin_edit(Edit::Other);
+    delete_tile(line, tile);
+    std::vector<ImageRef> refs;
+    if (md_image_row(lines_[line], &refs) && !refs.empty())
+        pick(line, dir < 0 ? std::max(0, tile - 1) : std::min(tile, (int)refs.size() - 1));
+    end_edit();
+}
+
+// The image in a line's first (or last) row nearest x.
+int Editor::nearest_tile(const Line& L, float x, bool last_row) {
+    float row_y = last_row ? L.tiles.back().y : L.tiles.front().y, dist = 1e9f;
+    int best = 0;
+    for (int k = 0; k < (int)L.tiles.size(); k++) {
+        const Line::Tile& t = L.tiles[k];
+        float dx = std::fabs(t.x + t.w * 0.5f - x);
+        if (t.y == row_y && dx < dist) { dist = dx; best = k; }
+    }
+    return best;
+}
+
 // Where the caret stands at `col` in an image line: just clear of the edge
 // of the image it's beside, as tall as that image (relative to the line).
 void Editor::img_caret(const Line& L, int col, float& x, float& y, float& h) const {
@@ -1435,6 +1541,7 @@ void Editor::sync_edits() {
         finish();
         return;
     }
+    shoot_tiles();  // (the layout still matches the old lines)
 
     std::vector<int> o2n(O.size(), -1), n2o(N.size(), -1);
     for (size_t i = 0; i < p; i++) o2n[i] = (int)i, n2o[i] = (int)i;
@@ -1485,6 +1592,7 @@ void Editor::sync_edits() {
         g.show_text = !O[i].empty();
         for (size_t j = p; j < n_end && g.show_text; j++)
             if (n2o[j] >= 0 && N[j].find(O[i]) != std::string::npos && N[j] != O[i]) g.show_text = false;
+        if (lay_[0][i].img) g.show_text = false;  // its images morph or fade on their own
         g.a = g.show_text ? 1.0f : 0.0f;  // merged lines have no text to fade: close at once
         g.fresh = true;                   // part of this edit's space accounting
         ghosts_.push_back(std::move(g));
@@ -1586,11 +1694,39 @@ void Editor::animate_layout(float dt) {
         dh_.resize(V.size());
         for (size_t i = 0; i < V.size(); i++) dh_[i] = V[i].h;
         ghosts_.clear();
+        tile_shots_.clear();
+        tile_shots_new_ = false;
+        tile_morphs_.clear();
+        tile_gone_.clear();
         snap_heights_ = false;
         if (prev_lines_.size() != lines_.size() || diff_version_ != version_) {
             prev_lines_ = lines_;
             diff_version_ = version_;
         }
+    }
+    // Where every line (and ghost) sits, from the heights as they are now.
+    auto place = [&] {
+        float y = 0;
+        size_t gi = 0;
+        for (size_t i = 0; i <= V.size(); i++) {
+            while (gi < ghosts_.size() && ghosts_[gi].before <= (int)i) {
+                ghosts_[gi].dy = y;
+                y += ghosts_[gi].h;
+                gi++;
+            }
+            if (i == V.size()) break;
+            V[i].dy = y;
+            V[i].dh = dh_[i];
+            y += dh_[i];
+        }
+    };
+    // Images an edit moved start from where they were, measured before the
+    // heights take this frame's step: the lines' easing is their own, so
+    // an image the edit didn't move doesn't trail the text around it.
+    if (tile_shots_new_) {
+        std::stable_sort(ghosts_.begin(), ghosts_.end(), [](const Ghost& a, const Ghost& b) { return a.before < b.before; });
+        place();
+        morph_tiles();
     }
     const float rate = 30.0f;
     for (size_t i = 0; i < V.size(); i++) {
@@ -1604,20 +1740,104 @@ void Editor::animate_layout(float dt) {
     }
     ghosts_.erase(std::remove_if(ghosts_.begin(), ghosts_.end(), [](const Ghost& g) { return g.h <= 0.0f; }), ghosts_.end());
     std::stable_sort(ghosts_.begin(), ghosts_.end(), [](const Ghost& a, const Ghost& b) { return a.before < b.before; });
+    place();
+    step_tile_morphs(dt);
+}
 
-    float y = 0;
-    size_t gi = 0;
-    for (size_t i = 0; i <= V.size(); i++) {
-        while (gi < ghosts_.size() && ghosts_[gi].before <= (int)i) {
-            ghosts_[gi].dy = y;
-            y += ghosts_[gi].h;
-            gi++;
+// Where each image is drawn now, before an edit changes the lines. A key
+// is its path and which use of that path it is, in document order.
+void Editor::shoot_tiles() {
+    if (tile_shots_new_) return;  // a second edit this frame: what was drawn is already noted
+    tile_shots_.clear();
+    if (reader_ || !anim::enabled) return;
+    std::unordered_map<std::string, int> seen;
+    for (int i = 0; i < (int)lay_[0].size(); i++) {
+        const Line& L = lay_[0][i];
+        if (!L.img) continue;
+        for (int k = 0; k < (int)L.tiles.size(); k++) {
+            ImVec2 a, b;
+            if (!tile_rect(i, k, a, b)) continue;
+            float alpha = 1.0f;
+            if (const TileMorph* m = tile_morph(i, k)) {
+                a = ImVec2(a.x + m->da.x, a.y + m->da.y);
+                b = ImVec2(b.x + m->db.x, b.y + m->db.y);
+                alpha = m->alpha;
+            }
+            const std::string& src = L.tiles[k].src;
+            tile_shots_.push_back({src + '\n' + std::to_string(seen[src]++), src, a, b, alpha});
         }
-        if (i == V.size()) break;
-        V[i].dy = y;
-        V[i].dh = dh_[i];
-        y += dh_[i];
     }
+    // Those still going carry on from where they are (they're in the shots).
+    tile_morphs_.clear();
+    tile_shots_new_ = true;
+}
+
+// The new layout is in place: each image eases from its shot to there.
+void Editor::morph_tiles() {
+    tile_shots_new_ = false;
+    std::unordered_map<std::string, int> seen;
+    std::unordered_map<std::string, const TileShot*> from;
+    for (auto& s : tile_shots_) from[s.key] = &s;
+    for (int i = 0; i < (int)lay_[0].size(); i++) {
+        const Line& L = lay_[0][i];
+        if (!L.img) continue;
+        for (int k = 0; k < (int)L.tiles.size(); k++) {
+            const std::string& src = L.tiles[k].src;
+            auto it = from.find(src + '\n' + std::to_string(seen[src]++));
+            ImVec2 a, b;
+            if (!tile_rect(i, k, a, b)) continue;
+            if (it == from.end()) {  // new here: it fades in
+                tile_morphs_.push_back({i, k, ImVec2(0, 0), ImVec2(0, 0), 0.0f});
+                continue;
+            }
+            const TileShot& s = *it->second;
+            from.erase(it);
+            if (i == land_line_ && k == land_tile_) continue;  // it has its own flight
+            TileMorph m{i, k, ImVec2(s.a.x - a.x, s.a.y - a.y), ImVec2(s.b.x - b.x, s.b.y - b.y), s.alpha};
+            if (std::fabs(m.da.x) + std::fabs(m.da.y) + std::fabs(m.db.x) + std::fabs(m.db.y) > 0.5f || m.alpha < 1.0f)
+                tile_morphs_.push_back(m);
+        }
+    }
+    for (auto& [key, s] : from) tile_gone_.push_back({s->src, s->a, s->b, s->alpha});  // taken out
+    tile_shots_.clear();
+}
+
+void Editor::step_tile_morphs(float dt) {
+    const float rate = 24.0f;  // as the landing flight
+    for (auto& m : tile_morphs_) {
+        m.da.x = anim::approach(m.da.x, 0.0f, rate, dt, 0.3f);
+        m.da.y = anim::approach(m.da.y, 0.0f, rate, dt, 0.3f);
+        m.db.x = anim::approach(m.db.x, 0.0f, rate, dt, 0.3f);
+        m.db.y = anim::approach(m.db.y, 0.0f, rate, dt, 0.3f);
+        m.alpha = anim::approach(m.alpha, 1.0f, rate, dt, 0.01f);
+    }
+    tile_morphs_.erase(std::remove_if(tile_morphs_.begin(), tile_morphs_.end(), [](const TileMorph& m) {
+        return m.da.x == 0 && m.da.y == 0 && m.db.x == 0 && m.db.y == 0 && m.alpha >= 1.0f;
+    }), tile_morphs_.end());
+    for (auto& g : tile_gone_) g.alpha = anim::approach(g.alpha, 0.0f, 30.0f, dt, 0.01f);
+    tile_gone_.erase(std::remove_if(tile_gone_.begin(), tile_gone_.end(), [](const TileGone& g) { return g.alpha <= 0.0f; }), tile_gone_.end());
+}
+
+// Images an edit took out: they fade where they were, settling a little.
+void Editor::draw_tiles_gone(ImDrawList* dl) {
+    float round = std::round(3 * P_.dpi);
+    for (auto& g : tile_gone_) {
+        float s = 0.06f * (1.0f - g.alpha);
+        ImVec2 in((g.b.x - g.a.x) * s, (g.b.y - g.a.y) * s);
+        ImVec2 a(std::round(col_x_ + g.a.x + in.x), std::round(origin_y_ + g.a.y + in.y));
+        ImVec2 b(std::round(col_x_ + g.b.x - in.x), std::round(origin_y_ + g.b.y - in.y));
+        if (b.y < P_.min.y || a.y > P_.max.y) continue;
+        float shown = 0;
+        ImTextureID tex = P_.images ? P_.images->texture(g.src, (int)std::ceil(g.b.x - g.a.x), shown) : ImTextureID{};
+        if (tex) dl->AddImageRounded(ImTextureRef(tex), a, b, ImVec2(0, 0), ImVec2(1, 1), fade(col_alpha(IM_COL32_WHITE, g.alpha * shown)), round);
+        else dl->AddRectFilled(a, b, fade(col_alpha(T.code_bg, g.alpha)), round);
+    }
+}
+
+const Editor::TileMorph* Editor::tile_morph(int line, int tile) const {
+    for (auto& m : tile_morphs_)
+        if (m.line == line && m.tile == tile) return &m;
+    return nullptr;
 }
 
 int Editor::row_of(const Line& L, int col) const {
@@ -1784,8 +2004,13 @@ void Editor::move_vertical(int n, bool select) {
             else { target = {0, 0}; break; }
         }
     }
-    if (target.line < 0) target = {line, col_at_x(0, line, r, want_x_)};
     float keep = want_x_;
+    if (target.line < 0 && !select && line != cur_.line && is_img(line)) {  // onto an image: the nearest one
+        pick(line, nearest_tile(V[line], want_x_, n < 0));
+        want_x_ = keep;
+        return;
+    }
+    if (target.line < 0) target = {line, col_at_x(0, line, r, want_x_)};
     move_to(target, select);
     want_x_ = keep;
 }
@@ -1837,8 +2062,10 @@ void Editor::type_char(unsigned c) {
 }
 
 // Typing or pasting with the caret beside an image starts a line of its own
-// on that side, so the image's line stays just the image. Call inside an edit.
+// on that side, so the image's line stays just the image; with an image
+// picked, after it. Call inside an edit.
 void Editor::step_off_image() {
+    unpick();
     if (has_selection() || !is_img(cur_.line)) return;
     int l = cur_.line;
     const Line& L = lay_[0][l];
@@ -1937,6 +2164,12 @@ bool Editor::image_delete() {
 }
 
 void Editor::newline() {
+    if (picked() >= 0) {  // a line of its own after the image
+        begin_edit(Edit::Other);
+        step_off_image();
+        end_edit();
+        return;
+    }
     begin_edit(Edit::Other);
     delete_selection();
     const std::string s = lines_[cur_.line];
@@ -1981,6 +2214,8 @@ void Editor::newline() {
 }
 
 void Editor::backspace(bool word) {
+    int tile = 0;
+    if (int line = picked(&tile); line >= 0) { remove_picked(line, tile, -1); return; }
     if (has_selection()) {
         begin_edit(Edit::Other);
         delete_selection();
@@ -2017,6 +2252,8 @@ void Editor::backspace(bool word) {
 }
 
 void Editor::del(bool word) {
+    int tile = 0;
+    if (int line = picked(&tile); line >= 0) { remove_picked(line, tile, 1); return; }
     if (has_selection()) {
         begin_edit(Edit::Other);
         delete_selection();
@@ -2033,6 +2270,7 @@ void Editor::del(bool word) {
 }
 
 void Editor::tab() {
+    if (picked() >= 0) return;  // (it would replace the image)
     LineInfo info;
     std::vector<uint16_t> st;
     md_analyze(lines_[cur_.line], in_code_before(cur_.line), info, st);
@@ -2058,21 +2296,27 @@ void Editor::handle_keys() {
         if (K(ImGuiKey_RightArrow)) nudge_image(1);
     }
     if (!alt) {
+        int pk_tile = 0;
+        int pk = shift ? -1 : picked(&pk_tile);  // arrows step image by image
         if (K(ImGuiKey_LeftArrow)) {
-            if (has_selection() && !shift) move_to(std::min(cur_, anchor_), false);
+            if (pk >= 0) step_picked(pk, pk_tile, -1);
+            else if (has_selection() && !shift) move_to(std::min(cur_, anchor_), false);
             else move_to(left_of(cur_, ctrl), shift);
         }
         if (K(ImGuiKey_RightArrow)) {
-            if (has_selection() && !shift) move_to(std::max(cur_, anchor_), false);
+            if (pk >= 0) step_picked(pk, pk_tile, 1);
+            else if (has_selection() && !shift) move_to(std::max(cur_, anchor_), false);
             else move_to(right_of(cur_, ctrl), shift);
         }
         float row = std::round(P_.size / kEm * P_.line_height);
         if (K(ImGuiKey_UpArrow)) {
             if (ctrl) { move_to(paragraph_move(-1), shift); want_x_ = -1; }  // previous paragraph
+            else if (pk >= 0) vertical_picked(pk, pk_tile, -1);
             else move_vertical(-1, shift);
         }
         if (K(ImGuiKey_DownArrow)) {
             if (ctrl) { move_to(paragraph_move(1), shift); want_x_ = -1; }  // next paragraph
+            else if (pk >= 0) vertical_picked(pk, pk_tile, 1);
             else move_vertical(1, shift);
         }
         int page = std::max(1, (int)(view_h_ / row) - 2);
@@ -2267,6 +2511,10 @@ bool Editor::handle_image_mouse(bool hovered, ImVec2 d) {
             press_img_line_ = hover_img_line_;
             press_img_tile_ = hover_tile;
             press_at_ = d;
+            pick(hover_img_line_, hover_tile, false);  // a click picks it (and holding on drags it)
+            drag_mode_ = 0;
+            want_x_ = -1;
+            return true;
         }
     }
     return false;  // the click still places the caret as usual
@@ -2705,6 +2953,7 @@ void Editor::draw(const EditorParams& p) {
         if (mode || morph_.active) layout(1);
         if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
     }
+    settle_on_images();
 
     animate_layout(dt);
 
@@ -2722,7 +2971,22 @@ void Editor::draw(const EditorParams& p) {
         ImVec2 c = pos_xy(cur_);
         const Line& L = lay_[0][cur_.line];
         float row_top = c.y + p.top_pad, row_bot = row_top + L.row_h;
-        if (reveal_mode_ == 1) {
+        if (L.img) {
+            // An image line: the picked image itself (or the one the caret's
+            // by), not the line's whole height.
+            int tile = 0;
+            if (picked(&tile) != cur_.line) tile = img_tile(L, cur_.col);
+            const Line::Tile& t = L.tiles[tile];
+            row_top = L.dy + L.pad + t.y + p.top_pad;
+            row_bot = row_top + t.h;
+        }
+        if (L.img && reveal_mode_ == 0) {
+            // A text line's margin (an image is tall enough as it is); bottom
+            // first, so one taller than the view shows its top.
+            float margin = std::round(p.size / kEm * p.line_height) * 1.5f;
+            if (row_bot + margin > scroll_target_ + view_h_) scroll_target_ = row_bot + margin - view_h_;
+            if (row_top - margin < scroll_target_) scroll_target_ = row_top - margin;
+        } else if (reveal_mode_ == 1) {
             scroll_target_ = L.y + p.top_pad - view_h_ * 0.22f;
         } else if (reveal_mode_ == 2) {
             scroll_target_ = row_top - view_h_ * 0.4f;
@@ -2881,6 +3145,8 @@ void Editor::draw(const EditorParams& p) {
         }
     }
 
+    if (!reader_) draw_tiles_gone(dl);  // under the images closing up over them
+
     int first = V.empty() ? 0 : line_at_y(mode, std::max(0.0f, scroll_ - p.top_pad - view_h_ * 0.5f));
     for (int i = first; i < (int)V.size(); i++) {
         if (origin_y_ + V[i].dy - view_h_ * 0.5f > p.max.y) break;
@@ -2923,12 +3189,6 @@ void Editor::draw(const EditorParams& p) {
         // character will appear, so starting to type never moves it.
         float full_row = L.info.kind == LineKind::Blank ? std::round(P_.size / kEm * P_.line_height) : L.row_h;
         float tx = c.x, ty = c.y + (full_row - ch) * 0.5f + yoff_[cur_.line];
-        // Beside an image the caret stands as tall as the image.
-        if (L.img) {
-            float ix, iy;
-            img_caret(L, cur_.col, ix, iy, ch);
-            ty = c.y + yoff_[cur_.line];
-        }
         // Block covers the character after the caret (a space's width at the
         // end of a line); bars sit in the gap before it.
         const std::string& line = lines_[cur_.line];
@@ -2959,6 +3219,12 @@ void Editor::draw(const EditorParams& p) {
         bool carrying = img_drag_ || (land_line_ >= 0 && land_drag_);
         caret_shown_ = anim::approach(caret_shown_, carrying ? 0.0f : 1.0f, 24.0f, dt, 0.01f);
         bool on = (!p.blink || !p.keyboard || std::fmod(now - activity_, 1.1) < 0.6) && caret_shown_ > 0.0f;
+        // On an image line there's no caret (an image is picked, or a
+        // selection ends there); leaving, it appears where it lands.
+        if (L.img) {
+            on = false;
+            caret_snap_ = true;
+        }
         if (on) {
             ImU32 col = col_alpha(p.keyboard ? T.accent : col_alpha(T.accent, 0.4f), caret_shown_);
             caret_.draw(dl, ImVec2(col_x_, origin_y_), fade(col), block ? std::round(p.dpi) : 0.0f);
@@ -3224,15 +3490,23 @@ void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float a
     float round = std::round(3 * P_.dpi);
     bool editing = index >= 0 && !reader_;
     TextPos s0 = std::min(cur_, anchor_), s1 = std::max(cur_, anchor_);
-    int on = editing && !has_selection() && cur_.line == index ? img_tile(L, cur_.col) : -1;
+    int on = -1;
+    if (editing && picked(&on) != index) on = -1;
     for (int k = 0; k < (int)L.tiles.size(); k++) {
         const Line::Tile& t = L.tiles[k];
-        ImVec2 a(std::round(x + t.x), std::round(y + t.y));
-        ImVec2 b(a.x + t.w, a.y + t.h);
+        ImVec2 a(x + t.x, y + t.y), b(a.x + t.w, a.y + t.h);
+        const TileMorph* m = editing ? tile_morph(index, k) : nullptr;
+        if (m) {  // on its way from where an edit moved it
+            a = ImVec2(a.x + m->da.x, a.y + m->da.y);
+            b = ImVec2(b.x + m->db.x, b.y + m->db.y);
+        }
+        a = ImVec2(std::round(a.x), std::round(a.y));
+        b = ImVec2(std::round(b.x), std::round(b.y));
         if (b.y < P_.min.y || a.y > P_.max.y) continue;
         if (editing && land_line_ == index && land_tile_ == k) continue;  // in flight (draw_image_drag)
         // Carried elsewhere: what's left behind is a faint trace of it.
-        float tile_alpha = editing && img_drag_ && press_img_line_ == index && press_img_tile_ == k ? alpha * 0.22f : alpha;
+        bool trace = editing && img_drag_ && press_img_line_ == index && press_img_tile_ == k;
+        float tile_alpha = (trace ? alpha * 0.22f : alpha) * (m ? m->alpha : 1.0f);
         float shown = 0.0f;
         ImTextureID tex = P_.images ? P_.images->texture(t.src, (int)std::ceil(t.w), shown) : ImTextureID{};
         if (!tex) shown = 0.0f;
@@ -3249,18 +3523,19 @@ void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float a
             }
         }
         if (tex) dl->AddImageRounded(ImTextureRef(tex), a, b, ImVec2(0, 0), ImVec2(1, 1), col_alpha(IM_COL32_WHITE, tile_alpha * shown), round);
-        if (!editing || tile_alpha < alpha) continue;
+        if (!editing || trace) continue;
         // Under the pointer (and free to pick up): a faint lift.
         if (index == hover_img_line_ && k == hover_tile_ && !img_drag_ && resize_line_ < 0) {
             hover_glow_ = anim::approach(hover_glow_, 1.0f, 20.0f, ImGui::GetIO().DeltaTime, 0.01f);
             dl->AddRectFilled(a, b, col_alpha(T.bright, alpha * 0.07f * hover_glow_), round);
         }
         bool selected = has_selection() && !(TextPos{index, t.b0} < s0) && !(s1 < TextPos{index, t.b1});
-        if (selected) {
+        if (k == on) {  // picked: a ring just clear of it (steps back while an image is carried)
+            float th = std::max(1.0f, std::round(2 * P_.dpi)), off = th + std::max(1.0f, std::round(P_.dpi));
+            dl->AddRect(ImVec2(a.x - off, a.y - off), ImVec2(b.x + off, b.y + off),
+                        col_alpha(T.accent, alpha * (P_.keyboard ? 1.0f : 0.4f) * caret_shown_), round + off, th);
+        } else if (selected) {
             dl->AddRectFilled(a, b, col_alpha(T.selection, alpha), round);
-        } else if (k == on && caret_shown_ > 0.0f) {  // (steps back with the caret while an image is carried)
-            float th = std::max(1.0f, std::round(1.5f * P_.dpi));
-            dl->AddRect(ImVec2(a.x - th, a.y - th), ImVec2(b.x + th, b.y + th), col_alpha(T.accent, alpha * 0.7f * caret_shown_), round + th, th);
         }
     }
 

@@ -575,53 +575,74 @@ static void test_images() {
     resample_rgba(half, 2, 1, 1, 1, out);
     CHECK(out[0] == 200 && out[1] == 0 && std::abs(out[3] - 128) <= 1);
 
-    // In the editor: an image is one object the caret steps over.
+    // In the editor: the caret never rests on an image; arrows pick it whole.
     FakeImages fake;
     g_images = &fake;
     Editor ed = fresh("para\n![](a.png)\nafter");
-    ed.select_range({1, 0}, {1, 0});
+    ed.select_range({0, 4}, {0, 4});
     frame(ed);
-    int len = (int)std::string("![](a.png)").size();
+    auto picked = [](Editor& e, int line) { return e.has_selection() && e.image_for_caret() == line; };
     key(ed, ImGuiKey_RightArrow);
-    CHECK(ed.cursor().line == 1 && ed.cursor().col == len);  // past it in one step
+    CHECK(picked(ed, 1));
     key(ed, ImGuiKey_RightArrow);
-    CHECK(ed.cursor().line == 2 && ed.cursor().col == 0);
+    CHECK(!ed.has_selection() && ed.cursor().line == 2 && ed.cursor().col == 0);
     key(ed, ImGuiKey_LeftArrow);
+    CHECK(picked(ed, 1));
     key(ed, ImGuiKey_LeftArrow);
-    CHECK(ed.cursor().line == 1 && ed.cursor().col == 0);
+    CHECK(!ed.has_selection() && ed.cursor().line == 0 && ed.cursor().col == 4);
+    key(ed, ImGuiKey_DownArrow);
+    CHECK(picked(ed, 1));
+    key(ed, ImGuiKey_DownArrow);
+    CHECK(!ed.has_selection() && ed.cursor().line == 2);
     CHECK_EQ(ed.word_count(), 2);  // the image isn't words
 
-    // Typing beside it starts a line of its own on that side.
+    // A caret put on its line (a click beside it, a jump) picks it.
+    ed.select_range({1, 0}, {1, 0});
+    frame(ed);
+    CHECK(picked(ed, 1));
+
+    // Typing or enter with it picked starts a line of its own after it; tab
+    // leaves it be.
+    key(ed, ImGuiKey_Tab);
+    CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nafter"));
     type(ed, "x");
-    CHECK_EQ(ed.text(), std::string("para\nx\n![](a.png)\nafter"));
-    ed.select_range({2, len}, {2, len});
+    CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
+    ed.select_range({1, 0}, {1, 0});
     frame(ed);
-    type(ed, "yz");
-    CHECK_EQ(ed.text(), std::string("para\nx\n![](a.png)\nyz\nafter"));
+    key(ed, ImGuiKey_Enter);
+    CHECK_EQ(ed.text(), std::string("para\n![](a.png)\n\nx\nafter"));
+    CHECK(!ed.has_selection() && ed.cursor().line == 2 && ed.cursor().col == 0);
 
-    // Backspace at the start of the line below steps onto the image; the
-    // next one removes it (its line is left empty); undo brings it back.
-    ed.select_range({3, 0}, {3, 0});
-    frame(ed);
+    // Backspace on an empty line below takes the line and picks the image;
+    // the next one removes it (its line is left empty); undo brings it back.
     key(ed, ImGuiKey_Backspace);
-    CHECK_EQ(ed.text(), std::string("para\nx\n![](a.png)\nyz\nafter"));
-    CHECK(ed.cursor().line == 2 && ed.cursor().col == len);
+    CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
+    CHECK(picked(ed, 1));
     key(ed, ImGuiKey_Backspace);
-    CHECK_EQ(ed.text(), std::string("para\nx\n\nyz\nafter"));
+    CHECK_EQ(ed.text(), std::string("para\n\nx\nafter"));
+    CHECK(!ed.has_selection() && ed.cursor().line == 1);
     ed.undo();
-    CHECK_EQ(ed.text(), std::string("para\nx\n![](a.png)\nyz\nafter"));
+    CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
+    // Below it on a line with text, backspace just picks it.
+    ed.select_range({2, 0}, {2, 0});
+    frame(ed);
+    key(ed, ImGuiKey_Backspace);
+    CHECK_EQ(ed.text(), std::string("para\n![](a.png)\nx\nafter"));
+    CHECK(picked(ed, 1));
 
-    // Delete before it removes it too; an empty line above it goes first.
+    // Delete on a picked image removes it too; from an empty line above,
+    // that line goes and the image is picked.
     Editor e2 = fresh("![](a.png)");
     e2.select_range({0, 0}, {0, 0});
     frame(e2);
     key(e2, ImGuiKey_Delete);
     CHECK_EQ(e2.text(), std::string(""));
     Editor e3 = fresh("\n![](a.png)");
-    e3.select_range({1, 0}, {1, 0});
+    e3.select_range({0, 0}, {0, 0});
     frame(e3);
-    key(e3, ImGuiKey_Backspace);
+    key(e3, ImGuiKey_Delete);
     CHECK_EQ(e3.text(), std::string("![](a.png)"));
+    CHECK(picked(e3, 0));
 
     // An image that can't be shown stays ordinary text.
     Editor e4 = fresh("![](missing.png)");
@@ -708,19 +729,46 @@ static void test_images() {
         CHECK(r5.image_rect(0, 0, p0, q0) && r5.image_rect(0, 4, p4, q4));
         CHECK(p4.y > q0.y);
 
-        // The caret steps image by image, and backspace takes the one before it.
-        std::string row = "![](a.png) ![](b.png) ![](c.png)";
+        // Arrows pick image by image; backspace takes the picked one out and
+        // picks the one before, delete the one that takes its place.
         r.select_range({0, 0}, {0, 0});
         frame(r);
-        key(r, ImGuiKey_RightArrow);
-        CHECK_EQ(r.cursor().col, 11);  // between a and b
         int t = -1;
         CHECK(r.image_for_caret(&t) == 0 && t == 0);
         key(r, ImGuiKey_RightArrow);
-        CHECK_EQ(r.cursor().col, 22);
+        CHECK(r.image_for_caret(&t) == 0 && t == 1);
+        key(r, ImGuiKey_RightArrow);
+        CHECK(r.image_for_caret(&t) == 0 && t == 2);
+        key(r, ImGuiKey_LeftArrow);
         key(r, ImGuiKey_Backspace);
         CHECK_EQ(r.text(), std::string("![](a.png) ![](c.png)"));
-        CHECK_EQ(r.cursor().col, 11);
+        CHECK(r.image_for_caret(&t) == 0 && t == 0);
+        Editor rd = fresh("![](a.png) ![](b.png) ![](c.png)");
+        rd.select_range({0, 11}, {0, 21});  // b
+        frame(rd);
+        key(rd, ImGuiKey_Delete);
+        CHECK_EQ(rd.text(), std::string("![](a.png) ![](c.png)"));
+        CHECK(rd.image_for_caret(&t) == 0 && t == 1);
+        // Up and down go between the rows a long row wraps into (3 + 2):
+        // the nearest image below.
+        r5.select_range({0, 0}, {0, 0});
+        frame(r5);
+        key(r5, ImGuiKey_DownArrow);
+        CHECK(r5.image_for_caret(&t) == 0 && t == 3);
+        key(r5, ImGuiKey_UpArrow);
+        CHECK(r5.image_for_caret(&t) == 0 && t == 0);
+        // Stepping along a row in view doesn't scroll: it keeps the picked
+        // image in view, not the line's whole height or the image after it.
+        std::string above;
+        for (int k = 0; k < 40; k++) above += "line\n";
+        Editor sv = fresh(above + "![](a.png) ![](b.png) ![](c.png) ![](d.png) ![](e.png)\nend");
+        sv.select_range({40, 0}, {40, 0});
+        frame(sv);
+        float s0 = sv.scroll();
+        key(sv, ImGuiKey_RightArrow);
+        key(sv, ImGuiKey_RightArrow);
+        CHECK(sv.image_for_caret(&t) == 40 && t == 2);
+        CHECK(std::fabs(sv.scroll() - s0) < 0.5f);
         // ctrl+alt+right swaps the image the caret is on with the next; at
         // the end of the row there's nowhere to go.
         Editor nr = fresh("![](a.png) ![](b.png) ![](c.png)");
@@ -758,6 +806,23 @@ static void test_images() {
         CHECK_EQ(dr.text(), std::string("\n![](b.png) ![](a.png)"));
         io.AddMousePosEvent(-1, -1);
         frame(dr);
+
+        // A click on an image picks it, whichever half it lands on.
+        Editor dk = fresh("![](a.png) ![](b.png) ![](c.png)");
+        CHECK(dk.image_rect(0, 1, sa, sb));
+        auto click = [&](ImVec2 p, bool down) {
+            io.AddMousePosEvent(p.x, p.y);
+            io.AddMouseButtonEvent(0, down);
+            frame(dk);
+        };
+        ImVec2 left_half(sa.x + 5, (sa.y + sb.y) * 0.5f);
+        click(left_half, false);
+        click(left_half, true);
+        click(left_half, false);
+        CHECK(dk.has_selection() && dk.image_for_caret(&t) == 0 && t == 1);
+        CHECK_EQ(dk.text(), std::string("![](a.png) ![](b.png) ![](c.png)"));
+        io.AddMousePosEvent(-1, -1);
+        frame(dk);
 
         // The blank space beside a resized image joins its row too.
         Editor db = fresh("![|200](a.png)\n\n![](b.png)");

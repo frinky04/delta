@@ -270,6 +270,17 @@ private:
     static int stop_col(const Line& L, int k, int len);
     static int img_tile(const Line& L, int col) { return std::max(0, img_stop(L, col) - 1); }  // the one it's "on"
     void img_caret(const Line& L, int col, float& x, float& y, float& h) const;
+    // The caret never rests on an image line: arriving there picks an image
+    // whole, a selection of exactly it, outlined. picked() is its line (-1
+    // if none is picked) and `tile` which one.
+    int picked(int* tile = nullptr) const;
+    void pick(int line, int tile, bool reveal = true);
+    bool unpick();  // the caret just after the picked image
+    void settle_on_images();
+    void step_picked(int line, int tile, int dir);
+    void vertical_picked(int line, int tile, int dir);
+    void remove_picked(int line, int tile, int dir);
+    static int nearest_tile(const Line& L, float x, bool last_row);
     int img_col_at(const Line& L, int len, float x, float y) const;
     int img_tile_at(const Line& L, float x, float y) const;     // -1 if none there
     void delete_tile(int line, int tile);
@@ -379,6 +390,23 @@ private:
     int land_line_ = -1, land_tile_ = -1;
     bool land_drag_ = false;          // after a drag (the caret waits it out), not a nudge
     ImVec2 land_a_, land_b_;          // doc rect, easing to the tile's
+    // Every other image an edit moves (a row closing up or opening, a swap,
+    // an undo) morphs too: where each was drawn is noted before the edit
+    // (keyed by its path and which use of it it is, so it's found again on
+    // another line), and it eases from there to its new place. Images that
+    // went fade out where they were; new ones fade in.
+    struct TileShot { std::string key, src; ImVec2 a, b; float alpha; };
+    struct TileMorph { int line, tile; ImVec2 da, db; float alpha; };
+    struct TileGone { std::string src; ImVec2 a, b; float alpha; };
+    std::vector<TileShot> tile_shots_;
+    bool tile_shots_new_ = false;
+    std::vector<TileMorph> tile_morphs_;
+    std::vector<TileGone> tile_gone_;
+    void shoot_tiles();
+    void morph_tiles();
+    void step_tile_morphs(float dt);
+    void draw_tiles_gone(ImDrawList* dl);
+    const TileMorph* tile_morph(int line, int tile) const;
     std::map<int, std::string> hints_;
     uint64_t version_ = 1;
 
