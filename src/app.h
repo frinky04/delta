@@ -51,6 +51,7 @@ private:
         bool repeat = false;     // fires on key repeat (line moves, undo...)
         bool global = false;     // also works while the palette is open
         bool in_palette = true;
+        char prefix = 0;         // the palette mode it opens, typed first
         std::vector<Chord> chords;
     };
 
@@ -115,7 +116,6 @@ private:
     void delete_space();
     void restore_note();
     void history_step(int dir);
-    void step_note(int dir);
     void switch_note(int dir);
     std::vector<NoteRef> switch_list() const;
     Place here() const;
@@ -138,7 +138,7 @@ private:
     void dispatch_keys(bool& fired);
     void build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total);
     const std::vector<std::string>& note_lines(const NoteRef& n);
-    void open_palette(const std::string& prefix);
+    void open_palette(const std::string& prefix, bool wide = false);
     void draw_status(ImVec2 min, ImVec2 max);
     void draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float top_pad, float page);
     // The status line as a minibuffer: tools that act on the note in view

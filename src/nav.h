@@ -1,6 +1,6 @@
 #pragma once
 // Getting around between notes: where you've been (back and forward, like a
-// browser) and which notes you've had open lately (the switcher, ctrl+p).
+// browser) and which notes you've had open lately (the switcher, ctrl+tab).
 #include <functional>
 #include <vector>
 

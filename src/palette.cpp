@@ -50,7 +50,13 @@ void Palette::set_text(const std::string& t) {
     built_for_ = "\x01";
 }
 
-void Palette::open(const std::string& text) {
+void Palette::set_wide(bool w) {
+    if (w == wide_) return;
+    wide_ = w;
+    built_for_ = "\x01";
+}
+
+void Palette::open(const std::string& text, bool wide) {
     if (!open_) {
         // Reopened while still fading out (a pick that asks something
         // next): the page never came back, so it mustn't flash in now.
@@ -74,6 +80,7 @@ void Palette::open(const std::string& text) {
     title_.clear();
     // A mode prefix becomes the prompt instead of sitting in the text box.
     mode_ = !text.empty() && std::strchr(kModes, text[0]) ? text[0] : 0;
+    wide_ = wide;
     set_text(mode_ ? text.substr(1) : text);
 }
 
@@ -211,6 +218,8 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         mode_ = 0;
         built_for_ = "\x01";
     }
+    // Tab widens a scoped mode to every space, and narrows it back.
+    if (open_ && !hold_ && scoped() && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) set_wide(!wide_);
 
     // Rebuild the list whenever the text changes.
     if (open_ && built_for_ != text()) {

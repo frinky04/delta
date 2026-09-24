@@ -4,7 +4,8 @@ delta is a markdown note app that feels like a code editor: keyboard-first, fast
 
 ## Feel
 
-- Every action is a command in the `/` palette with a rebindable id (`note.rename`); the mouse is a shortcut to them.
+- Every action is a command (`ctrl+p`) with a rebindable id (`note.rename`); the mouse is a shortcut to them.
+- One route per job. The palette's root is commands; every other mode is a leading character, entered by its own key and left with backspace. Scoped modes widen from this space to every space with `tab`. `#` is kept for tags.
 - The note stays in view. Tools that act on it (find, rename, go to line, fix spelling) open in the status line; choices and confirmations open in the palette. No dialogs, no extra windows.
 - Markdown stays visible, styled in place; reader mode hides the symbols. The palette and status bar are set in mono.
 - Notes are plain `.md` files in plain folders, and nothing touches the network unless the user pastes a URL.

@@ -893,10 +893,10 @@ void App::register_commands() {
     auto ed = [this](void (Editor::*fn)()) { return [this, fn] { if (editing()) (editor_.*fn)(); }; };
 
     // Navigation
-    add("palette.notes", "find a note in this space", "ctrl+p", [this] { open_palette(""); }, false, true);
-    add("palette.commands", "show all commands", "ctrl+shift+p", [this] { open_palette("/"); }, false, true);
-    add("palette.all", "find a note in any space", "ctrl+alt+p", [this] { open_palette("*"); }, false, true);
-    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("#"); }, false, true);
+    add("palette.notes", "find a note in this space", "ctrl+o", [this] { open_palette("."); }, false, true);
+    add("palette.all", "find a note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, true);
+    add("palette.commands", "show all commands", "ctrl+p", [this] { open_palette(""); }, false, true);
+    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, true);
     add("palette.headings", "jump to a heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
     add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, true);
     add("find.open", "find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
@@ -923,13 +923,11 @@ void App::register_commands() {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
     }, false, true);
-    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("<"); }, false, true);
+    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, true);
     add("nav.back", "go back", "alt+left", [this] { history_step(-1); });
     add("nav.forward", "go forward", "alt+right", [this] { history_step(1); });
     add("nav.switch", "switch to a recent note", "ctrl+tab", [this] { switch_note(1); }, true);
     add("nav.switch_back", "switch to a recent note, oldest first", "ctrl+shift+tab", [this] { switch_note(-1); }, true);
-    add("nav.next_note", "go to the next note in this space", "ctrl+pagedown", [this] { step_note(1); }, true);
-    add("nav.prev_note", "go to the previous note in this space", "ctrl+pageup", [this] { step_note(-1); }, true);
 
     // Notes and spaces
     add("note.new", "new note", "ctrl+n", [this] {
@@ -1008,6 +1006,12 @@ void App::register_commands() {
     add("edit.strike", "strikethrough", "ctrl+shift+x", [this] { if (editing()) editor_.wrap_selection("~~"); });
     add("edit.indent", "indent", "ctrl+]", ed(&Editor::indent), true);
     add("edit.outdent", "outdent", "ctrl+[", ed(&Editor::outdent), true);
+
+    // The palette mode each opens, shown beside its shortcut in the list so
+    // the prefixes can be learnt there.
+    for (auto [id, p] : {std::pair{"palette.notes", '.'}, {"palette.all", '.'}, {"palette.spaces", '/'},
+                         {"palette.headings", '@'}, {"palette.line", ':'}, {"palette.search", '?'}, {"palette.backlinks", '['}})
+        if (Command* c = find_command(id)) c->prefix = p;
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,23 +1368,8 @@ void App::history_step(int dir) {
     if (note_ && note_->path == to.note.path) editor_.restore_view(to.caret, to.scroll);
 }
 
-// The space's notes in name order, a step at a time (wrapping).
-void App::step_note(int dir) {
-    auto notes = store_.notes(space_);
-    if (notes.empty()) { status(space_ + "/ has no notes yet"); return; }
-    std::sort(notes.begin(), notes.end(), [](const NoteRef& a, const NoteRef& b) { return lower(a.name) < lower(b.name); });
-    int n = (int)notes.size(), at = -1;
-    for (int k = 0; k < n; k++)
-        if (note_ && notes[k].path == note_->path) at = k;
-    int to = at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n;
-    if (to == at) { status("this is the only note in " + space_); return; }
-    open_note(notes[to]);
-    status(std::to_string(to + 1) + " of " + std::to_string(n) + " in " + space_);
-}
-
 // What ctrl+tab goes through: the notes you've had open, latest first (so
-// the one open now, then the one before), then the rest of this space's by
-// when they were changed.
+// the one open now, then the one before). Finding any other note is ctrl+o's.
 std::vector<NoteRef> App::switch_list() const {
     std::vector<NoteRef> out;
     std::set<std::string> seen;
@@ -1389,8 +1378,6 @@ std::vector<NoteRef> App::switch_list() const {
         if (!fs::exists(n.path, ec) || !seen.insert(path_u8(n.path)).second) continue;
         out.push_back(store_.ref(n.space, n.name));  // when it was changed, as of now
     }
-    for (auto& n : store_.notes(space_))
-        if (seen.insert(path_u8(n.path)).second) out.push_back(n);
     return out;
 }
 
@@ -1417,19 +1404,20 @@ void App::switch_note(int dir) {
 // ---------------------------------------------------------------------------
 // Palette
 
-void App::open_palette(const std::string& prefix) {
+void App::open_palette(const std::string& prefix, bool wide) {
     close_bar();
     cache_notes_ = store_.notes(space_);
     cache_all_.clear();
     cache_spaces_ = store_.spaces();
     cache_text_.clear();
-    // Pressing the same shortcut again closes it.
-    if (palette_.is_open() && !palette_.text().empty() == !prefix.empty() &&
-        (prefix.empty() || palette_.text()[0] == prefix[0])) {
-        palette_.close();
+    // Pressing the same shortcut again closes it; the other scope's
+    // shortcut switches scope instead.
+    if (palette_.in_mode(prefix.empty() ? 0 : prefix[0])) {
+        if (palette_.scoped() && palette_.wide() != wide) palette_.set_wide(wide);
+        else palette_.close();
         return;
     }
-    palette_.open(prefix);
+    palette_.open(prefix, wide);
 }
 
 // A row for a line with a match in it (search, links here): a window of the
@@ -1466,47 +1454,54 @@ const std::vector<std::string>& App::note_lines(const NoteRef& n) {
 
 void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total) {
     char c = text.empty() ? 0 : text[0];
-    bool prefixed = c && std::strchr("#*@/:?<", c);
+    bool prefixed = c && std::strchr(Palette::kModes, c);
     std::string q = trim(prefixed ? text.substr(1) : text);
     auto sort = [&] {
         if (!q.empty()) std::stable_sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.score > b.score; });
     };
 
-    if (!prefixed || c == '*') {
-        bool all = c == '*';
+    // Notes: this space's, or every space's when widened. "work/plan"
+    // narrows to one space from either (and makes the note there).
+    if (c == '.') {
+        std::string only, name = q;
+        if (size_t slash = q.find('/'); slash != std::string::npos) {
+            only = trim(q.substr(0, slash));
+            name = trim(q.substr(slash + 1));
+        }
+        bool all = palette_.wide() || !only.empty();
         if (all && cache_all_.empty()) cache_all_ = store_.all_notes();
-        // Notes you've had open come first, the latest first: the open one
-        // at the top and the one before it selected, so ctrl+p enter flips
-        // back. The rest follow by when they were changed.
+        // Notes you've had open come first, the latest first, so the one
+        // before this is at the top. The rest follow by when they were changed.
         std::map<std::string, int> rank;
         for (auto& n : recent_.list()) rank.emplace(path_u8(n.path), (int)rank.size());
         auto rank_of = [&](const NoteRef& n) {
             auto it = rank.find(path_u8(n.path));
             return it == rank.end() ? INT_MAX : it->second;
         };
-        std::vector<NoteRef> notes = all ? cache_all_ : cache_notes_;
+        std::vector<NoteRef> notes;
+        for (auto& n : all ? cache_all_ : cache_notes_)
+            if ((!note_ || n.path != note_->path) && (only.empty() || iequals(n.space, only))) notes.push_back(n);
         std::stable_sort(notes.begin(), notes.end(), [&](const NoteRef& a, const NoteRef& b) { return rank_of(a) < rank_of(b); });
         total = (int)notes.size();
-        bool exact = false, pick_next = q.empty();
         for (auto& n : notes) {
             PaletteItem it;
-            it.label = all ? n.space + "/" + n.name : n.name;
-            if (!fuzzy_match(q, it.label, it.score, &it.hl)) continue;
-            if (iequals(n.name, q)) exact = true;
-            bool current = note_ && note_->path == n.path;
-            if (pick_next && !current) it.current = true, pick_next = false;
-            it.meta = current ? "open" : ago(n.mtime);
+            std::string where = all ? n.space + "/" : "";
+            it.label = where + n.name;
+            // Past a "space/", only the name is matched.
+            if (only.empty()) {
+                if (!fuzzy_match(name, it.label, it.score, &it.hl)) continue;
+            } else {
+                if (!fuzzy_match(name, n.name, it.score, &it.hl)) continue;
+                for (int& h : it.hl) h += (int)where.size();
+            }
+            it.meta = ago(n.mtime);
             it.action = [this, n] { open_note(n); };
             out.push_back(std::move(it));
             if (out.size() > 300) break;
         }
         sort();
-        if (!q.empty() && !exact) {
-            std::string sp = space_, name = q;
-            if (all && q.find('/') != std::string::npos) {
-                sp = trim(q.substr(0, q.find('/')));
-                name = trim(q.substr(q.find('/') + 1));
-            }
+        std::string sp = only.empty() ? space_ : only;
+        if (!name.empty() && !store_.exists(sp, name)) {
             PaletteItem it;
             it.label = "+ new note \"" + name + "\"";
             it.meta = sp;
@@ -1517,7 +1512,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         return;
     }
 
-    if (c == '#') {
+    if (c == '/') {
         bool exact = false;
         total = (int)cache_spaces_.size();
         for (auto& sp : cache_spaces_) {
@@ -1594,7 +1589,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
                 size_t at = ll.find(lq);
                 if (at == std::string::npos) continue;
                 PaletteItem it = line_item(lines[i], at, q.size());
-                it.meta = n.name + ":" + std::to_string(i + 1);
+                it.meta = (n.space == space_ ? "" : n.space + "/") + n.name + ":" + std::to_string(i + 1);
                 TextPos a{i, (int)at}, b{i, (int)(at + q.size())};
                 it.action = [this, n, a, b] {
                     Jump j(*this);
@@ -1604,8 +1599,11 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
                 out.push_back(std::move(it));
             }
         };
-        if (note_) scan(*note_, editor_.lines());
-        for (auto& n : cache_notes_) {
+        // The open note first, as it is in the editor; then this space's
+        // notes, or every space's when widened.
+        if (is_note()) scan(*note_, editor_.lines());
+        if (palette_.wide() && cache_all_.empty()) cache_all_ = store_.all_notes();
+        for (auto& n : palette_.wide() ? cache_all_ : cache_notes_) {
             if (note_ && n.path == note_->path) continue;
             scan(n, note_lines(n));
         }
@@ -1613,7 +1611,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
     }
 
     // Links here: every [[link]] in any space that leads to the open note.
-    if (c == '<') {
+    if (c == '[') {
         if (!is_note()) return;
         if (cache_all_.empty()) cache_all_ = store_.all_notes();
         total = 0;
@@ -1638,8 +1636,11 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         return;
     }
 
-    if (c == '/') {
+    if (!prefixed) {
         total = (int)std::count_if(cmds_.begin(), cmds_.end(), [](const Command& c) { return c.in_palette; });
+        size_t prefixed_w = 0;
+        for (auto& cmd : cmds_)
+            if (cmd.prefix && !cmd.chords.empty()) prefixed_w = std::max(prefixed_w, chord_str(cmd.chords.front()).size());
         for (auto& cmd : cmds_) {
             if (!cmd.in_palette) continue;
             PaletteItem it;
@@ -1651,7 +1652,11 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
                 if (!fuzzy_match(q, cmd.id, it.score, &dummy)) continue;
                 it.score -= 500;
             }
-            if (!cmd.chords.empty()) it.meta = chord_str(cmd.chords.front());
+            // Prefixes sit in a column of their own: the palette is mono, so
+            // padding the keys to the widest a prefixed command has lines them up.
+            std::string keys = cmd.chords.empty() ? "" : chord_str(cmd.chords.front());
+            if (cmd.prefix) keys = std::string(1, cmd.prefix) + "  " + std::string(prefixed_w - std::min(prefixed_w, keys.size()), ' ') + keys;
+            it.meta = keys;
             auto run = cmd.run;
             it.action = [run] { run(); };
             out.push_back(std::move(it));
@@ -2607,14 +2612,15 @@ void App::frame() {
     // The prompt names where you are, like a minibuffer.
     auto prompt_for = [this](char mode) -> std::string {
         switch (mode) {
-            case '*': return "*/";
-            case '#': return "spaces: ";
+            case '/': return "spaces: ";
             case '@': return "headings: ";
             case ':': return "line: ";
-            case '?': return "search " + space_ + ": ";
-            case '/': return "commands: ";
-            case '<': return note_ ? "links to " + note_->name + ": " : "links here: ";
-            default: return space_ + "/";
+            case '?': return "search " + (palette_.wide() ? std::string("all") : space_) + ": ";
+            case '[': return note_ ? "links to " + note_->name + ": " : "links here: ";
+            case '.':  // a query naming its space ("work/plan") is the whole path
+                if (palette_.text().find('/') != std::string::npos) return "";
+                return palette_.wide() ? "all/" : space_ + "/";
+            default: return "commands: ";
         }
     };
     auto chosen = palette_.draw(

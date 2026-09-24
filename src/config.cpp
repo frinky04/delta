@@ -481,7 +481,7 @@ void apply_edit(std::vector<std::string>& lines, const ConfigEdit& e) {
 std::string default_config_text() {
     return "; delta configuration: anything set here overrides the default.\n"
            "; Open it in delta (ctrl+,) to see each setting's default and what it\n"
-           "; does beside it, and run \"add a setting\" from the / palette to add one.\n"
+           "; does beside it, and run \"add a setting\" from the commands (ctrl+p) to add one.\n"
            "\n"
            "[general]\n"
            "\n"

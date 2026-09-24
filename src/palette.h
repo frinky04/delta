@@ -5,6 +5,7 @@
 //   prompt - the text itself is the answer (new note name, rename...)
 // It's typeset like a terminal picker: mono, a prompt naming the mode, a
 // match count, and a > marker (or an inverted row) for the selection.
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -31,8 +32,12 @@ public:
     // The prompt shown for a mode prefix (0 = no prefix).
     using PromptFor = std::function<std::string(char mode)>;
 
-    // Characters that switch mode when typed first.
-    static constexpr const char* kModes = "*#@:?/<";
+    // Characters that switch mode when typed first. No prefix is commands,
+    // the root that every other mode backspaces out to.
+    static constexpr const char* kModes = ".@:?/[";
+    // Modes with a scope, which tab widens from this space to every space
+    // (notes and text search).
+    static constexpr const char* kScoped = ".?";
 
     // Extras a pick can have.
     struct PickOptions {
@@ -45,7 +50,8 @@ public:
         std::function<void(const PaletteItem* sel, ImDrawList* dl, ImVec2 pos, float w, float h, float alpha)> preview;
     };
 
-    void open(const std::string& text);
+    // `wide`: a scoped mode starts on every space.
+    void open(const std::string& text, bool wide = false);
     void pick(const std::string& prompt, std::vector<PaletteItem> items, PickOptions opts = {});
     // A pick held open by ctrl, like alt+tab: tab and shift+tab move the
     // selection, and letting go of ctrl takes it. Row `sel` starts selected.
@@ -61,6 +67,11 @@ public:
     int generation() const { return generation_; }
     bool visible() const { return open_ || close_t_ < 1.0f; }
     std::string text() const { return mode_ ? std::string(1, mode_) + buf_ : std::string(buf_); }
+    bool in_mode(char m) const { return open_ && kind_ == Kind::Query && mode_ == m; }
+    bool scoped() const { return kind_ == Kind::Query && mode_ && std::strchr(kScoped, mode_); }
+    // Every space rather than this one (see kScoped).
+    bool wide() const { return wide_ && scoped(); }
+    void set_wide(bool w);
 
     enum class Selection { Marker, Invert };
 
@@ -96,6 +107,7 @@ private:
     double open_time_ = -10;
     float close_t_ = 1.0f;       // 0..1 progress of the close fade
     char mode_ = 0;              // query mode prefix, kept out of the text box
+    bool wide_ = false;          // see wide()
     char buf_[512] = {};
     std::string pending_text_;
     bool apply_text_ = false;

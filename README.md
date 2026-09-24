@@ -13,15 +13,18 @@ Notes save as you type. Deleted notes go to the trash; "restore a deleted note" 
 
 ## Palette
 
-`ctrl+p` searches notes in the current space. Type a name that doesn't exist to create it. A leading character changes what it searches:
+`ctrl+p` lists every command, with its shortcut.
 
-- `*` notes in every space
-- `#` spaces
+`ctrl+o` finds a note in the current space; `tab` widens it to every space, and `ctrl+alt+o` starts there. `work/plan` looks in one space. Type a name that doesn't exist to create it. `ctrl+tab` flips back to the note before.
+
+A leading character switches what the palette searches, and backspace goes back to commands:
+
+- `.` notes
+- `/` spaces
 - `@` headings in this note
 - `:` line number
-- `?` text in this space
-- `/` commands, with their shortcuts
-- `<` notes that link here
+- `?` text in this space (`tab` for every space)
+- `[` notes that link here
 
 `f1` shows this page.
 

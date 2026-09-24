@@ -2277,6 +2277,61 @@ static void test_ui_voice() {
     CHECK(titles > 50);  // the pattern still finds the command table
 }
 
+// The palette's modes: tab widens a scoped one (notes, search) to every
+// space and back, and does nothing elsewhere; backspace on an empty query
+// leaves a mode for the root, commands.
+static int g_builds = 0;
+
+static void palette_frame(Palette& p, ImGuiKey k = ImGuiKey_None) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (k != ImGuiKey_None) io.AddKeyEvent(k, true);
+    io.DisplaySize = ImVec2(1000, 800);
+    io.DeltaTime = 1.0f / 60;
+    ImGui::NewFrame();
+    Palette::Frame f{g_sans, g_sans, 17, 1, 100, 600, 40, 700, 0, io.DeltaTime, Palette::Selection::Marker, 2, false};
+    p.draw(f, [](const std::string&, std::vector<PaletteItem>&, int& total) { g_builds++; total = 0; },
+           [](char) { return std::string(); });
+    ImGui::Render();
+    if (k != ImGuiKey_None) io.AddKeyEvent(k, false);
+}
+
+static void test_palette_modes() {
+    Palette p;
+    p.open(".");
+    palette_frame(p);
+    CHECK(p.in_mode('.') && p.scoped() && !p.wide());
+    int builds = g_builds;
+    palette_frame(p, ImGuiKey_Tab);
+    CHECK(p.wide() && g_builds == builds + 1);  // widened, and the list built again
+    palette_frame(p);
+    palette_frame(p, ImGuiKey_Tab);
+    CHECK(!p.wide());
+    palette_frame(p);  // lets tab go before it's pressed again
+
+    p.open("@");
+    palette_frame(p, ImGuiKey_Tab);
+    CHECK(p.in_mode('@') && !p.scoped() && !p.wide());
+    palette_frame(p);
+
+    p.open("?", true);
+    palette_frame(p);
+    CHECK(p.in_mode('?') && p.wide());
+
+    palette_frame(p);
+
+    p.open("");
+    palette_frame(p, ImGuiKey_Tab);
+    CHECK(p.in_mode(0) && !p.scoped() && !p.wide());  // commands have no scope
+    palette_frame(p);
+
+    p.open(".");
+    palette_frame(p);
+    palette_frame(p, ImGuiKey_Backspace);
+    CHECK(p.in_mode(0));
+    p.close();
+    for (int i = 0; i < 30; i++) palette_frame(p);
+}
+
 // "open the manual" shows the README as the build embedded it.
 extern const unsigned char g_manual[];
 extern const std::size_t g_manual_size;
@@ -2498,6 +2553,7 @@ int main() {
     test_fonts();
     test_ui_voice();
     test_manual();
+    test_palette_modes();
     test_sandbox();
     test_config_set();
     test_font_loader();
