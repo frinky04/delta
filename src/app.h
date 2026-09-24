@@ -12,6 +12,7 @@
 #include "editor.h"
 #include "fonts.h"
 #include "keys.h"
+#include "nav.h"
 #include "image_cache.h"
 #include "images.h"
 #include "palette.h"
@@ -104,7 +105,13 @@ private:
     void new_space();
     void rename_space();
     void delete_space();
+    void restore_note();
     void history_step(int dir);
+    void step_note(int dir);
+    void switch_note(int dir);
+    std::vector<NoteRef> switch_list() const;
+    Place here() const;
+    struct Jump;
     void set_title();
 
     // images
@@ -122,6 +129,7 @@ private:
     // ui
     void dispatch_keys(bool& fired);
     void build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total);
+    const std::vector<std::string>& note_lines(const NoteRef& n);
     void open_palette(const std::string& prefix);
     void draw_status(ImVec2 min, ImVec2 max);
     void draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float top_pad, float page);
@@ -265,8 +273,16 @@ private:
     bool focused_ = true;
 
     std::map<std::string, std::pair<TextPos, float>> views_;
-    std::vector<NoteRef> history_;
-    int hist_pos_ = -1;
+    History history_;
+    Recent recent_;
+    int jump_depth_ = 0;              // see Jump
+    Place jump_from_;
+    // ctrl+tab tapped, before the switcher shows: let go of ctrl soon and it
+    // just flips to the note picked, without the list coming up.
+    bool switch_pending_ = false;
+    double switch_time_ = 0;
+    int switch_pick_ = 0;
+    std::vector<NoteRef> switch_notes_;
 
     // palette caches, refreshed each time it opens
     std::vector<NoteRef> cache_notes_, cache_all_;
@@ -294,6 +310,7 @@ private:
     std::string bar_last_;            // bar_buf_ as last acted on
     std::string bar_error_;           // why the last Enter didn't go through
     TextPos bar_cur_, bar_anchor_;    // where you were, for escape
+    Place bar_from_;                  // ...and for back, after find or go to line
     // Fix: the misspelt word being fixed (as written, where), its suggestions
     // and which one is in the field; where the pass began and whether it has
     // wrapped past the end; and, after a fix, where to look for the next.

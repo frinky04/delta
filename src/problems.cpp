@@ -53,3 +53,28 @@ std::vector<Diagnostic> link_problems(const std::vector<std::string>& lines, con
     }
     return out;
 }
+
+std::vector<LinkHit> links_to(const std::vector<std::string>& lines, const std::string& from,
+                              const std::string& space, const std::string& name, const NoteIndex& ix) {
+    std::vector<LinkHit> out;
+    bool in_code = false;
+    LineInfo info;
+    std::vector<uint16_t> st;
+    std::vector<LinkSpan> links;
+    for (int i = 0; i < (int)lines.size(); i++) {
+        const std::string& s = lines[i];
+        bool fence = md_is_fence(s);
+        if (!in_code && !fence && s.find("[[") != std::string::npos) {
+            links.clear();
+            md_analyze(s, false, info, st, &links);
+            for (auto& l : links) {
+                std::string sp, n, to_sp, to_n;
+                if (!l.wiki || !Store::split_target(l.target, sp, n) || !ix.resolve(from, sp, n, to_sp, to_n)) continue;
+                if (!iequals(to_sp, space) || !iequals(to_n, name)) continue;
+                out.push_back({i, l.begin + 2, l.begin + 2 + (int)l.target.size()});
+            }
+        }
+        if (fence) in_code = !in_code;
+    }
+    return out;
+}

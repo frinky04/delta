@@ -29,6 +29,11 @@ struct NoteIndex {
 
     // Does a [[link]]'s space ("" for any) and name lead to a note?
     bool has(const std::string& space, const std::string& name) const;
+    // Which note a [[link]] in a note in `from` leads to, as following it
+    // does: "space/name" to that space's; a bare name to `from`'s own note
+    // first, then the first space that has one. Names come back as written.
+    bool resolve(const std::string& from, const std::string& space, const std::string& name,
+                 std::string& out_space, std::string& out_name) const;
     bool operator==(const NoteIndex&) const = default;
 };
 
@@ -50,7 +55,11 @@ public:
     std::string create_note(const std::string& space, const std::string& name, const std::string& content, NoteRef& out) const;
     std::string rename_note(NoteRef& note, const std::string& name) const;
     std::string move_note(NoteRef& note, const std::string& space) const;
-    std::string trash_note(const NoteRef& note) const;  // moves into <root>/.trash
+    std::string trash_note(const NoteRef& note) const;  // moves into <root>/.trash/<space>
+    std::vector<NoteRef> trashed() const;                // what's there, the latest deleted first
+    // A trashed note back into its space (made again if it's gone), under
+    // its own name or, if that's taken, "name (2)"...; `out` is where it went.
+    std::string restore_note(const NoteRef& trashed, NoteRef& out) const;
     std::string rename_space(const std::string& from, const std::string& to) const;
     std::string delete_space(const std::string& space) const;  // empty spaces only
 

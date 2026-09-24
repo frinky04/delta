@@ -82,6 +82,7 @@ add_library(delta_core STATIC
   src/theme.cpp
   src/platform.cpp
   src/images.cpp
+  src/nav.cpp
   src/fonts.cpp
   ${FONT_SANS_CPP}
   ${FONT_MONO_CPP}

@@ -8,6 +8,7 @@
 
 #include "app.h"
 #include "imgui.h"
+#include "imgui_internal.h"  // ConfigNavWindowingKey*
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "platform.h"
@@ -179,6 +180,9 @@ int main(int argc, char** argv) {
     io.LogFilename = nullptr;
     io.ConfigInputTextCursorBlink = true;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
+    // ctrl+tab is delta's note switcher, not ImGui's window switcher.
+    ImGui::GetCurrentContext()->ConfigNavWindowingKeyNext = 0;
+    ImGui::GetCurrentContext()->ConfigNavWindowingKeyPrev = 0;
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
 

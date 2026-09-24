@@ -32,7 +32,7 @@ public:
     using PromptFor = std::function<std::string(char mode)>;
 
     // Characters that switch mode when typed first.
-    static constexpr const char* kModes = "*#@:?/";
+    static constexpr const char* kModes = "*#@:?/<";
 
     // Extras a pick can have.
     struct PickOptions {
@@ -47,6 +47,9 @@ public:
 
     void open(const std::string& text);
     void pick(const std::string& prompt, std::vector<PaletteItem> items, PickOptions opts = {});
+    // A pick held open by ctrl, like alt+tab: tab and shift+tab move the
+    // selection, and letting go of ctrl takes it. Row `sel` starts selected.
+    void hold(const std::string& prompt, std::vector<PaletteItem> items, int sel);
     void prompt(const std::string& prompt, const std::string& initial, const std::string& action_label,
                 std::function<void(const std::string&)> submit);
     // A pick's list, changed while it's open. The query stays, and so does
@@ -89,6 +92,7 @@ private:
 
     Kind kind_ = Kind::Query;
     bool open_ = false;
+    bool hold_ = false;          // see hold()
     double open_time_ = -10;
     float close_t_ = 1.0f;       // 0..1 progress of the close fade
     char mode_ = 0;              // query mode prefix, kept out of the text box

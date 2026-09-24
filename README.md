@@ -15,7 +15,7 @@ ImGui 1.92.9b, GLFW 3.4 and stb_image 2.30 are vendored in `third_party/`. The d
 
 ## Spaces
 
-Notes live in `notes_dir` (default `~/Documents/delta`). Each folder directly under it is a **space**, and each `.md` file in a space is a note. Spaces don't nest. Every note belongs to exactly one space, and the palette only shows the current space unless you ask for all of them. Deleted notes go to `notes_dir/.trash`.
+Notes live in `notes_dir` (default `~/Documents/delta`). Each folder directly under it is a **space**, and each `.md` file in a space is a note. Spaces don't nest. Every note belongs to exactly one space, and the palette only shows the current space unless you ask for all of them. Deleted notes go to `notes_dir/.trash`; "Restore a deleted note" in the `/` palette brings one back (as `name (2)` if its name has been taken since).
 
 Daily notes (`alt+d`) go in the `daily` space, named `YYYY-MM-DD` by default.
 
@@ -32,6 +32,17 @@ Daily notes (`alt+d`) go in the `daily` space, named `YYYY-MM-DD` by default.
 | `:` | go to line (hands over to the status line) |
 | `?` | full-text search in this space |
 | `/` | every command, with its shortcut |
+| `<` | links to this note, from any space |
+
+With nothing typed, notes you've had open come first, the latest first: the open note at the top and the one before it selected, so `ctrl+p` `enter` flips back. A query's matches are ranked the same way when they match equally well.
+
+## Getting around
+
+**Back and forward** (`alt+left` / `alt+right`, or the mouse's back and forward buttons) go through the places you've jumped between, like a browser's history but inside notes too. A jump is opening a note, following a link, going to a heading, a line, a problem or misspelt word, a search result or a find. Typing and moving the caret about aren't. Each place is kept as you left it, so after following a link from halfway down a note, back returns you to that line. Stepping through headings, problems or misspelt words is one jump however many steps you take, so back goes to where you started.
+
+**Switching** (`ctrl+tab`) works like alt+tab: a tap flips to the note you had open before, and holding `ctrl` brings up the notes you've had open lately (then the rest of this space's), where `tab` / `shift+tab` step through and letting go of `ctrl` opens one. `ctrl+pgdn` / `ctrl+pgup` step through this space's notes in name order instead.
+
+**Links here** (`ctrl+shift+b`, or `<` in the palette) lists every `[[link]]` to the open note, from any space, with its line; pick one to go there.
 
 ## Editing
 
@@ -58,7 +69,10 @@ Default keys (all rebindable):
 | `alt+.` | fix the nearest misspelt word with its best guess (again: the next guess) |
 | `ctrl+.` | fix spelling, word by word |
 | `ctrl+n` / `alt+d` / `f2` | new note / today's daily note / rename |
-| `alt+left` / `alt+right` | back / forward through opened notes |
+| `alt+left` / `alt+right`, mouse back / forward | back / forward (see Getting around) |
+| `ctrl+tab` / `ctrl+shift+tab` | switch to a recent note |
+| `ctrl+pgup` / `ctrl+pgdn` | previous / next note in this space, by name |
+| `ctrl+shift+b` | notes that link here |
 | `ctrl+e` | reader mode |
 | `alt+up` / `alt+down` | move line(s); with an image picked, the image |
 | `shift+alt+up` / `shift+alt+down` | duplicate line(s) |

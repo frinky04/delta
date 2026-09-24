@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <climits>
 #include <cstring>
 #include <set>
 #include <sstream>
@@ -53,6 +54,26 @@ fs::file_time_type mtime_of(const fs::path& p) {
 }
 
 }  // namespace
+
+Place App::here() const {
+    Place p;
+    if (note_) p = {*note_, editor_.cursor(), editor_.scroll()};
+    return p;
+}
+
+// A jump, for back and forward: where you were when it began and where it
+// left you go in the history. Nested (a search result opening its note),
+// only the outermost one counts.
+struct App::Jump {
+    App& app;
+    History::Kind kind;
+    explicit Jump(App& a, History::Kind k = History::Other) : app(a), kind(k) {
+        if (app.jump_depth_++ == 0) app.jump_from_ = app.here();
+    }
+    ~Jump() {
+        if (--app.jump_depth_ == 0) app.history_.jumped(app.jump_from_, app.here(), kind);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -511,6 +532,7 @@ void App::update_echo() {
 }
 
 void App::goto_misspelling(int dir) {
+    Jump j(*this, History::Misspelling);
     if (spelling_.empty()) {
         status(!cfg_.spell ? "Spellcheck is off" : speller_.loading() || spell_pending_ ? "Still checking the spelling" : "No misspelt words in this note");
         return;
@@ -642,6 +664,7 @@ void App::add_to_dictionary(const std::string& word) {
 // Steps through the open document's problems. From a note that has none, the
 // config's are next door.
 void App::goto_problem(int dir) {
+    Jump j(*this, History::Problem);
     const Diagnostic* to = nullptr;
     if (problems_.empty()) {
         bool config_has = std::any_of(config_problems_.begin(), config_problems_.end(), [](const ConfigIssue& is) { return is.line >= 0; });
@@ -864,8 +887,16 @@ void App::register_commands() {
     add("palette.line", "Go to line", "ctrl+g", [this] { open_line(); }, false, true);
     add("find.open", "Find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
     add("find.replace", "Find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
-    add("nav.heading_next", "Go to the next heading", "ctrl+alt+down", [this] { if (editing()) editor_.goto_heading(1); }, true);
-    add("nav.heading_prev", "Go to the previous heading", "ctrl+alt+up", [this] { if (editing()) editor_.goto_heading(-1); }, true);
+    add("nav.heading_next", "Go to the next heading", "ctrl+alt+down", [this] {
+        if (!editing()) return;
+        Jump j(*this, History::Heading);
+        editor_.goto_heading(1);
+    }, true);
+    add("nav.heading_prev", "Go to the previous heading", "ctrl+alt+up", [this] {
+        if (!editing()) return;
+        Jump j(*this, History::Heading);
+        editor_.goto_heading(-1);
+    }, true);
     add("edit.expand_selection", "Expand selection", "alt+shift+right", [this] { if (editing()) editor_.expand_selection(); }, true);
     add("edit.shrink_selection", "Shrink selection", "alt+shift+left", [this] { if (editing()) editor_.shrink_selection(); }, true);
     add("edit.follow_link", "Follow the link at the caret", "alt+enter", [this] {
@@ -878,8 +909,13 @@ void App::register_commands() {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
     }, false, true);
-    add("nav.back", "Go back to the previous note", "alt+left", [this] { history_step(-1); });
-    add("nav.forward", "Go forward to the next note", "alt+right", [this] { history_step(1); });
+    add("palette.backlinks", "Show notes that link here", "ctrl+shift+b", [this] { open_palette("<"); }, false, true);
+    add("nav.back", "Go back", "alt+left", [this] { history_step(-1); });
+    add("nav.forward", "Go forward", "alt+right", [this] { history_step(1); });
+    add("nav.switch", "Switch to a recent note", "ctrl+tab", [this] { switch_note(1); }, true);
+    add("nav.switch_back", "Switch to a recent note, oldest first", "ctrl+shift+tab", [this] { switch_note(-1); }, true);
+    add("nav.next_note", "Go to the next note in this space", "ctrl+pagedown", [this] { step_note(1); }, true);
+    add("nav.prev_note", "Go to the previous note in this space", "ctrl+pageup", [this] { step_note(-1); }, true);
 
     // Notes and spaces
     add("note.new", "New note", "ctrl+n", [this] {
@@ -889,6 +925,7 @@ void App::register_commands() {
     add("note.rename", "Rename note", "f2", [this] { rename_note(); });
     add("note.move", "Move note to another space", "", [this] { move_note(); });
     add("note.delete", "Delete note", "", [this] { delete_note(); });
+    add("note.restore", "Restore a deleted note", "", [this] { restore_note(); });
     add("note.save", "Save note now", "ctrl+s", [this] { if (save()) status("Saved"); });
     add("space.new", "New space", "", [this] { new_space(); });
     add("space.rename", "Rename this space", "", [this] { rename_space(); });
@@ -1002,6 +1039,8 @@ bool App::save() {
 }
 
 void App::open_note(const NoteRef& n, bool push_history) {
+    std::optional<Jump> jump;
+    if (push_history) jump.emplace(*this);
     close_bar();
     save();
     remember_view();
@@ -1044,15 +1083,7 @@ void App::open_note(const NoteRef& n, bool push_history) {
     disk_mtime_ = mtime_of(n.path);
     if (auto it = views_.find(path_u8(n.path)); it != views_.end()) editor_.restore_view(it->second.first, it->second.second);
     fade_start_ = anim::clock;
-    if (push_history) {
-        if (hist_pos_ >= 0 && hist_pos_ < (int)history_.size() && history_[hist_pos_].path == n.path) {
-            // same note, nothing to record
-        } else {
-            history_.resize(hist_pos_ + 1);
-            history_.push_back(n);
-            hist_pos_ = (int)history_.size() - 1;
-        }
-    }
+    if (!config) recent_.visit(n);
     set_title();
 }
 
@@ -1179,6 +1210,9 @@ void App::move_note() {
             NoteRef n = *note_;
             if (auto e = store_.move_note(n, sp); !e.empty()) { status(e, true); return; }
             views_.erase(old);
+            auto moved = [&](NoteRef& r) { if (r.path == note_->path) r = n; };
+            history_.update(moved);
+            recent_.update(moved);
             note_ = n;
             space_ = sp;
             apply_spelling();  // this space may want other dictionaries
@@ -1203,8 +1237,8 @@ void App::delete_note() {
         save();
         if (auto e = store_.trash_note(n); !e.empty()) { status(e, true); return; }
         views_.erase(path_u8(n.path));
-        history_.erase(std::remove_if(history_.begin(), history_.end(), [&](const NoteRef& h) { return h.path == n.path; }), history_.end());
-        hist_pos_ = std::min(hist_pos_, (int)history_.size() - 1);
+        history_.forget(n.path);
+        recent_.forget(n.path);
         note_.reset();
         auto rest = store_.notes(n.space);
         if (!rest.empty()) open_note(rest.front(), false);
@@ -1233,8 +1267,9 @@ void App::rename_space() {
         space_ = to;
         apply_spelling();
         views_.clear();
-        for (auto& h : history_)
-            if (h.space == from) h = store_.ref(to, h.name);
+        auto moved = [&](NoteRef& r) { if (r.space == from) r = store_.ref(to, r.name); };
+        history_.update(moved);
+        recent_.update(moved);
         if (note_) {
             note_ = store_.ref(to, note_->name);
             disk_mtime_ = mtime_of(note_->path);
@@ -1264,18 +1299,89 @@ void App::delete_space() {
     palette_.pick("delete space? ", {yes, no});
 }
 
-void App::history_step(int dir) {
-    int p = hist_pos_ + dir;
-    while (p >= 0 && p < (int)history_.size()) {
-        std::error_code ec;
-        if (fs::exists(history_[p].path, ec)) {
-            hist_pos_ = p;
-            open_note(history_[p], false);
-            return;
-        }
-        history_.erase(history_.begin() + p);
-        if (dir < 0) p--;
+void App::restore_note() {
+    std::vector<PaletteItem> items;
+    for (auto& t : store_.trashed()) {
+        PaletteItem it;
+        it.label = t.space + "/" + t.name;
+        it.meta = ago(t.mtime);  // when it was deleted
+        it.action = [this, t] {
+            NoteRef n;
+            if (auto e = store_.restore_note(t, n); !e.empty()) { status(e, true); return; }
+            open_note(n);
+            status("Restored " + n.name + (n.name != t.name ? " (its name was taken)" : ""));
+        };
+        items.push_back(std::move(it));
     }
+    if (items.empty()) { status("There are no deleted notes."); return; }
+    palette_.pick("restore: ", std::move(items));
+}
+
+// Back and forward, through the places you've jumped between (see History).
+void App::history_step(int dir) {
+    close_bar();
+    const Place* p = history_.step(dir, here(), [](const Place& p) {
+        std::error_code ec;
+        return fs::exists(p.note.path, ec);
+    });
+    if (!p) return;
+    Place to = *p;
+    if (note_ && note_->path == to.note.path) {
+        editor_.return_to(to.caret, to.caret, to.scroll);  // glides there
+        return;
+    }
+    open_note(to.note, false);
+    if (note_ && note_->path == to.note.path) editor_.restore_view(to.caret, to.scroll);
+}
+
+// The space's notes in name order, a step at a time (wrapping).
+void App::step_note(int dir) {
+    auto notes = store_.notes(space_);
+    if (notes.empty()) { status(space_ + "/ has no notes yet"); return; }
+    std::sort(notes.begin(), notes.end(), [](const NoteRef& a, const NoteRef& b) { return lower(a.name) < lower(b.name); });
+    int n = (int)notes.size(), at = -1;
+    for (int k = 0; k < n; k++)
+        if (note_ && notes[k].path == note_->path) at = k;
+    int to = at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n;
+    if (to == at) { status("This is the only note in " + space_); return; }
+    open_note(notes[to]);
+    status(std::to_string(to + 1) + " of " + std::to_string(n) + " in " + space_);
+}
+
+// What ctrl+tab goes through: the notes you've had open, latest first (so
+// the one open now, then the one before), then the rest of this space's by
+// when they were changed.
+std::vector<NoteRef> App::switch_list() const {
+    std::vector<NoteRef> out;
+    std::set<std::string> seen;
+    for (auto& n : recent_.list()) {
+        std::error_code ec;
+        if (!fs::exists(n.path, ec) || !seen.insert(path_u8(n.path)).second) continue;
+        out.push_back(store_.ref(n.space, n.name));  // when it was changed, as of now
+    }
+    for (auto& n : store_.notes(space_))
+        if (seen.insert(path_u8(n.path)).second) out.push_back(n);
+    return out;
+}
+
+// ctrl+tab, like alt+tab: a tap flips to the note you had open before; held,
+// the list comes up and tab steps through it until ctrl is let go (see
+// frame and Palette::hold).
+void App::switch_note(int dir) {
+    if (!switch_pending_) {
+        switch_notes_ = switch_list();
+        int n = (int)switch_notes_.size();
+        bool first_open = note_ && n && switch_notes_[0].path == note_->path;
+        if (n < (first_open ? 2 : 1)) { status("No other notes yet"); return; }
+        switch_pick_ = dir > 0 ? (first_open ? 1 : 0) : n - 1;
+        switch_pending_ = true;
+        switch_time_ = ImGui::GetTime();
+        return;
+    }
+    // Pressed again before the list showed: show it now, a step on.
+    int n = (int)switch_notes_.size();
+    switch_pick_ = (switch_pick_ + dir + n) % n;
+    switch_time_ = -100;
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,9 +1402,41 @@ void App::open_palette(const std::string& prefix) {
     palette_.open(prefix);
 }
 
+// A row for a line with a match in it (search, links here): a window of the
+// line around the match, which is highlighted.
+static PaletteItem line_item(const std::string& line, size_t at, size_t len) {
+    size_t from = at > 40 ? at - 40 : 0;
+    while (from > 0 && utf8::is_cont((unsigned char)line[from])) from--;
+    std::string snippet = (from ? "..." : "") + line.substr(from, 160);
+    int hl0 = (int)(at - from + (from ? 3 : 0));
+    PaletteItem it;
+    it.label = trim(snippet);
+    size_t first = snippet.find_first_not_of(" \t");
+    int lead = (int)(snippet.size() - snippet.substr(first == std::string::npos ? 0 : first).size());
+    for (int k = 0; k < (int)len; k++) it.hl.push_back(hl0 - lead + k);
+    return it;
+}
+
+// A note's lines, read once while the palette is open.
+const std::vector<std::string>& App::note_lines(const NoteRef& n) {
+    auto it = cache_text_.find(path_u8(n.path));
+    if (it == cache_text_.end()) {
+        std::string text;
+        read_file(n.path, text);
+        std::vector<std::string> lines(1);
+        for (char ch : text) {
+            if (ch == '\r') continue;
+            if (ch == '\n') lines.emplace_back();
+            else lines.back() += ch;
+        }
+        it = cache_text_.emplace(path_u8(n.path), std::move(lines)).first;
+    }
+    return it->second;
+}
+
 void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total) {
     char c = text.empty() ? 0 : text[0];
-    bool prefixed = c && std::strchr("#*@/:?", c);
+    bool prefixed = c && std::strchr("#*@/:?<", c);
     std::string q = trim(prefixed ? text.substr(1) : text);
     auto sort = [&] {
         if (!q.empty()) std::stable_sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.score > b.score; });
@@ -1307,15 +1445,26 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
     if (!prefixed || c == '*') {
         bool all = c == '*';
         if (all && cache_all_.empty()) cache_all_ = store_.all_notes();
-        const auto& notes = all ? cache_all_ : cache_notes_;
+        // Notes you've had open come first, the latest first: the open one
+        // at the top and the one before it selected, so ctrl+p enter flips
+        // back. The rest follow by when they were changed.
+        std::map<std::string, int> rank;
+        for (auto& n : recent_.list()) rank.emplace(path_u8(n.path), (int)rank.size());
+        auto rank_of = [&](const NoteRef& n) {
+            auto it = rank.find(path_u8(n.path));
+            return it == rank.end() ? INT_MAX : it->second;
+        };
+        std::vector<NoteRef> notes = all ? cache_all_ : cache_notes_;
+        std::stable_sort(notes.begin(), notes.end(), [&](const NoteRef& a, const NoteRef& b) { return rank_of(a) < rank_of(b); });
         total = (int)notes.size();
-        bool exact = false;
+        bool exact = false, pick_next = q.empty();
         for (auto& n : notes) {
             PaletteItem it;
             it.label = all ? n.space + "/" + n.name : n.name;
             if (!fuzzy_match(q, it.label, it.score, &it.hl)) continue;
             if (iequals(n.name, q)) exact = true;
             bool current = note_ && note_->path == n.path;
+            if (pick_next && !current) it.current = true, pick_next = false;
             it.meta = current ? "open" : ago(n.mtime);
             it.action = [this, n] { open_note(n); };
             out.push_back(std::move(it));
@@ -1383,7 +1532,10 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             it.meta = std::to_string(h.line + 1);
             it.current = q.empty() && k == here;
             int line = h.line;
-            it.action = [this, line] { editor_.goto_line(line); };
+            it.action = [this, line] {
+                Jump j(*this);
+                editor_.goto_line(line);
+            };
             out.push_back(std::move(it));
         }
         sort();
@@ -1411,18 +1563,11 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
                 std::string ll = lower(lines[i]);
                 size_t at = ll.find(lq);
                 if (at == std::string::npos) continue;
-                // Show a window around the match.
-                size_t from = at > 40 ? at - 40 : 0;
-                while (from > 0 && utf8::is_cont((unsigned char)lines[i][from])) from--;
-                std::string snippet = (from ? "..." : "") + lines[i].substr(from, 160);
-                int hl0 = (int)(at - from + (from ? 3 : 0));
-                PaletteItem it;
-                it.label = trim(snippet);
-                int lead = (int)(snippet.size() - snippet.substr(snippet.find_first_not_of(" \t") == std::string::npos ? 0 : snippet.find_first_not_of(" \t")).size());
-                for (int k = 0; k < (int)q.size(); k++) it.hl.push_back(hl0 - lead + k);
+                PaletteItem it = line_item(lines[i], at, q.size());
                 it.meta = n.name + ":" + std::to_string(i + 1);
                 TextPos a{i, (int)at}, b{i, (int)(at + q.size())};
                 it.action = [this, n, a, b] {
+                    Jump j(*this);
                     if (!note_ || note_->path != n.path) open_note(n);
                     editor_.select_range(a, b);
                 };
@@ -1432,20 +1577,34 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
         if (note_) scan(*note_, editor_.lines());
         for (auto& n : cache_notes_) {
             if (note_ && n.path == note_->path) continue;
-            auto it = cache_text_.find(path_u8(n.path));
-            if (it == cache_text_.end()) {
-                std::string text;
-                read_file(n.path, text);
-                std::vector<std::string> lines(1);
-                for (char ch : text) {
-                    if (ch == '\r') continue;
-                    if (ch == '\n') lines.emplace_back();
-                    else lines.back() += ch;
-                }
-                it = cache_text_.emplace(path_u8(n.path), std::move(lines)).first;
-            }
-            scan(n, it->second);
+            scan(n, note_lines(n));
         }
+        return;
+    }
+
+    // Links here: every [[link]] in any space that leads to the open note.
+    if (c == '<') {
+        if (!note_ || is_config()) return;
+        if (cache_all_.empty()) cache_all_ = store_.all_notes();
+        total = 0;
+        for (auto& n : cache_all_) {
+            if (n.path == note_->path) continue;
+            const auto& lines = note_lines(n);
+            for (auto& h : links_to(lines, n.space, note_->space, note_->name, note_index_)) {
+                total++;
+                PaletteItem it = line_item(lines[h.line], h.col0, h.col1 - h.col0);
+                it.meta = (n.space == space_ ? "" : n.space + "/") + n.name + ":" + std::to_string(h.line + 1);
+                if (!fuzzy_match(q, it.label + " " + it.meta, it.score, nullptr)) continue;
+                TextPos a{h.line, h.col0}, b{h.line, h.col1};
+                it.action = [this, n, a, b] {
+                    Jump j(*this);
+                    open_note(n);
+                    editor_.select_range(a, b);
+                };
+                out.push_back(std::move(it));
+            }
+        }
+        sort();
         return;
     }
 
@@ -1497,6 +1656,7 @@ double App::next_wake(double now) {
     double status_end = status_time_ + 3.4;
     if (status_end > now) t = std::min(t, status_end);
     if (note_ && next_problem_check_ > now) t = std::min(t, next_problem_check_);
+    if (switch_pending_) t = std::min(t, switch_time_ + 0.15);        // the switcher comes up
     if (spell_pending_ || (bar_ == Bar::Fix && fix_advance_)) t = now;  // more lines to check, or a fix to move on from
     else if (speller_.loading()) t = std::min(t, now + 0.05);        // marks as soon as it's loaded
     if (speller_.suggesting()) t = std::min(t, now + 0.016);         // the echo as soon as its suggestions are in
@@ -1649,6 +1809,9 @@ void App::open_bar(Bar kind) {
 void App::close_bar() {
     if (bar_ == Bar::None) return;
     if (bar_ == Bar::Find) editor_.find_end();  // the current match stays selected
+    // Where find or go to line took you is a jump (escape from go to line
+    // has already gone back, so it isn't).
+    if (bar_ == Bar::Find || bar_ == Bar::Line) history_.jumped(bar_from_, here());
     bar_ = Bar::None;
     bar_error_.clear();
 }
@@ -1735,6 +1898,7 @@ void App::open_find(bool replace) {
         if (editor_.has_selection() && editor_.cursor().line == editor_.anchor().line)
             std::snprintf(find_buf_, sizeof find_buf_, "%s", editor_.selected_text().c_str());
         open_bar(Bar::Find);
+        bar_from_ = here();
         editor_.find_begin();
         find_last_ = "\x01";  // match again on the next frame
     } else {
@@ -1966,12 +2130,14 @@ static bool parse_line_target(const std::string& q, int origin, const std::vecto
 
 void App::open_line(const std::string& text) {
     if (!note_) return;
-    if (bar_ != Bar::Line) {
+    bool fresh = bar_ != Bar::Line;
+    if (fresh) {
         bar_cur_ = editor_.cursor();
         bar_anchor_ = editor_.anchor();
         bar_scroll_ = editor_.scroll();
     }
     open_bar(Bar::Line);
+    if (fresh) bar_from_ = here();
     std::snprintf(bar_buf_, sizeof bar_buf_, "%s", text.c_str());
     bar_last_.clear();
     if (!text.empty()) { bar_select_all_ = false; bar_select_pending_ = 2; }
@@ -2030,8 +2196,9 @@ void App::draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) 
             e = store_.rename_note(n, v);
             if (e.empty()) {
                 views_.erase(old);
-                for (auto& h : history_)
-                    if (path_u8(h.path) == old) h = n;
+                auto renamed = [&](NoteRef& r) { if (path_u8(r.path) == old) r = n; };
+                history_.update(renamed);
+                recent_.update(renamed);
                 note_ = n;
                 disk_mtime_ = mtime_of(n.path);
                 set_title();
@@ -2270,6 +2437,34 @@ void App::frame() {
     bool fired = false;
     dispatch_keys(fired);
 
+    // The mouse's back and forward buttons (4 and 5), as in a browser.
+    for (int b : {3, 4}) {
+        if (viewer_.open || !ImGui::IsMouseClicked(b)) continue;
+        if (palette_.is_open()) palette_.close();
+        history_step(b == 3 ? -1 : 1);
+    }
+
+    // ctrl+tab: let go of ctrl straight away and it flips; hold it and the
+    // list comes up (see switch_note).
+    if (switch_pending_) {
+        if (!io.KeyCtrl) {
+            switch_pending_ = false;
+            open_note(switch_notes_[switch_pick_]);
+        } else if (now - switch_time_ >= 0.15) {
+            switch_pending_ = false;
+            std::vector<PaletteItem> items;
+            for (auto& n : switch_notes_) {
+                PaletteItem it;
+                it.label = n.space == space_ ? n.name : n.space + "/" + n.name;
+                it.meta = note_ && n.path == note_->path ? "open" : ago(n.mtime);
+                it.action = [this, n] { open_note(n); };
+                items.push_back(std::move(it));
+            }
+            close_bar();
+            palette_.hold("switch to: ", std::move(items), switch_pick_);
+        }
+    }
+
     float s = base_size();
     float bar_h = std::round(s * 1.5f);
     ImVec2 min = vp->Pos, max(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - bar_h);
@@ -2387,6 +2582,7 @@ void App::frame() {
             case ':': return "line: ";
             case '?': return "search " + space_ + ": ";
             case '/': return "commands: ";
+            case '<': return note_ ? "links to " + note_->name + ": " : "links here: ";
             default: return space_ + "/";
         }
     };

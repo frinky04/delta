@@ -689,6 +689,7 @@ static void test_config_schema() {
     fs::remove_all(kvp.parent_path());
 }
 
+#include "nav.h"
 #include "problems.h"
 #include "spell.h"
 #include "spell_fix.h"
@@ -1893,6 +1894,104 @@ static void test_link_problems() {
     for (int i = 0; i < 60; i++) frame(e);
 }
 
+// Back and forward, recent notes, links here and the trash.
+static void test_nav() {
+    auto note = [](const char* name) {
+        NoteRef n;
+        n.space = "s";
+        n.name = name;
+        n.path = fs::path("s") / (std::string(name) + ".md");
+        return n;
+    };
+    auto at = [&](const char* name, int line) { return Place{note(name), {line, 0}, 0}; };
+    auto yes = [](const Place&) { return true; };
+    auto where = [](const Place* p) { return p ? p->note.name + ":" + std::to_string(p->caret.line) : std::string("-"); };
+
+    // A place is kept as you left it; forward undoes back.
+    History h;
+    h.jumped(Place{}, at("a", 0));           // opened a, nothing open before
+    h.jumped(at("a", 7), at("b", 0));        // opened b from line 7 of a
+    h.jumped(at("b", 3), at("b", 40));       // a heading in b
+    CHECK_EQ(h.size(), 3);
+    CHECK_EQ(where(h.step(-1, at("b", 41), yes)), std::string("b:3"));
+    CHECK_EQ(where(h.step(-1, at("b", 3), yes)), std::string("a:7"));
+    CHECK_EQ(where(h.step(-1, at("a", 7), yes)), std::string("-"));
+    CHECK_EQ(where(h.step(1, at("a", 7), yes)), std::string("b:3"));
+    CHECK_EQ(where(h.step(1, at("b", 3), yes)), std::string("b:41"));
+
+    // Going nowhere adds nothing; going somewhere new ends forward.
+    h.jumped(at("b", 41), at("b", 41));
+    CHECK_EQ(h.size(), 3);
+    h.step(-1, at("b", 41), yes);
+    h.jumped(at("b", 3), at("c", 0));
+    CHECK_EQ(h.size(), 3);
+    CHECK_EQ(where(h.step(1, at("c", 0), yes)), std::string("-"));
+
+    // A run of steps of one kind is one jump; anything between splits it.
+    History r;
+    r.jumped(Place{}, at("a", 0));
+    r.jumped(at("a", 0), at("a", 10), History::Heading);
+    r.jumped(at("a", 10), at("a", 20), History::Heading);
+    r.jumped(at("a", 20), at("a", 30), History::Heading);
+    CHECK_EQ(r.size(), 2);
+    r.jumped(at("a", 31), at("a", 40), History::Heading);  // moved in between
+    CHECK_EQ(r.size(), 3);
+    CHECK_EQ(where(r.step(-1, at("a", 40), yes)), std::string("a:31"));
+    CHECK_EQ(where(r.step(-1, at("a", 31), yes)), std::string("a:0"));
+
+    // Places in a deleted note are skipped, or forgotten.
+    History d;
+    d.jumped(Place{}, at("a", 0));
+    d.jumped(at("a", 0), at("gone", 0));
+    d.jumped(at("gone", 0), at("c", 0));
+    CHECK_EQ(where(d.step(-1, at("c", 0), [](const Place& p) { return p.note.name != "gone"; })), std::string("a:0"));
+    d.forget(note("a").path);
+    CHECK_EQ(d.size(), 1);
+    // Somewhere history didn't see you go counts as where you are.
+    CHECK_EQ(where(d.step(-1, at("x", 5), yes)), std::string("c:0"));
+
+    Recent rc;
+    rc.visit(note("a"));
+    rc.visit(note("b"));
+    rc.visit(note("a"));
+    CHECK(rc.list().size() == 2 && rc.list()[0].name == "a" && rc.list()[1].name == "b");
+    rc.update([](NoteRef& n) { if (n.name == "b") n.name = "b2"; });
+    rc.forget(note("a").path);
+    CHECK(rc.list().size() == 1 && rc.list()[0].name == "b2");
+
+    // Links here resolve as following them does.
+    fs::path root = fs::temp_directory_path() / "delta_test_nav";
+    fs::remove_all(root);
+    Store st;
+    st.set_root(root);
+    NoteRef plan, home_plan, other;
+    st.create_note("work", "Plan", "", plan);
+    st.create_note("home", "Plan", "", home_plan);
+    st.create_note("home", "Other", "", other);
+    NoteIndex ix = st.index();
+    std::string sp, nm;
+    CHECK(ix.resolve("work", "", "plan", sp, nm) && sp == "work" && nm == "Plan");
+    CHECK(ix.resolve("home", "", "plan", sp, nm) && sp == "home");
+    CHECK(ix.resolve("home", "WORK", "plan", sp, nm) && sp == "work");
+    CHECK(!ix.resolve("work", "", "nothing", sp, nm));
+    std::vector<std::string> text = {"[[Plan]] and [[work/plan|alias]]", "```", "[[Plan]]", "```"};
+    auto hits = links_to(text, "home", "work", "Plan", ix);  // [[Plan]] in home is home's own
+    CHECK(hits.size() == 1 && hits[0].line == 0 && hits[0].col0 == 15 && hits[0].col1 == 24);
+    CHECK_EQ(links_to(text, "work", "work", "Plan", ix).size(), (size_t)2);
+
+    // Deleted notes come back, under a free name if theirs was taken.
+    CHECK_EQ(st.trash_note(plan), std::string());
+    NoteRef again, back;
+    st.create_note("work", "Plan", "new", again);
+    auto trashed = st.trashed();
+    CHECK(trashed.size() == 1 && trashed[0].space == "work" && trashed[0].name == "Plan");
+    if (trashed.size() == 1) {
+        CHECK_EQ(st.restore_note(trashed[0], back), std::string());
+        CHECK(back.name == "Plan (2)" && st.exists("work", "Plan (2)") && st.trashed().empty());
+    }
+    fs::remove_all(root);
+}
+
 // The words spellcheck would look at in a line, joined with |.
 static std::string spelled(const std::string& line) {
     std::string out;
@@ -2295,6 +2394,7 @@ int main() {
     test_writing_pass();
     test_undo_history();
     test_link_problems();
+    test_nav();
     test_spell_words();
     test_speller();
     test_spell_fix();

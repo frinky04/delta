@@ -67,6 +67,7 @@ void Palette::open(const std::string& text) {
     generation_++;
     keep_sel_.clear();
     open_ = true;
+    hold_ = false;
     committed_ = false;
     focus_ = true;
     close_t_ = 1.0f;
@@ -82,6 +83,12 @@ void Palette::pick(const std::string& prompt, std::vector<PaletteItem> items, Pi
     title_ = prompt;
     fixed_ = std::move(items);
     opts_ = std::move(opts);
+}
+
+void Palette::hold(const std::string& prompt, std::vector<PaletteItem> items, int sel) {
+    for (int k = 0; k < (int)items.size(); k++) items[k].current = k == sel;
+    pick(prompt, std::move(items));
+    hold_ = true;
 }
 
 void Palette::prompt(const std::string& prompt, const std::string& initial, const std::string& action_label,
@@ -313,7 +320,9 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     focus_ = false;
     ImGuiInputTextFlags flags = ImGuiInputTextFlags_CallbackAlways;
     if (!open_) flags |= ImGuiInputTextFlags_ReadOnly;
+    ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);  // tab is ours (see hold)
     ImGui::InputText("##q", buf_, sizeof buf_, flags, &Palette::input_callback, this);
+    ImGui::PopItemFlag();
     ImGui::PopStyleColor(2);
     ImGui::PopFont();
     ImGui::PopStyleVar();
@@ -349,7 +358,14 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     int sel_before = sel_;
     if (open_) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) close();
-        if (n > 0) {
+        if (hold_ && n > 0 && open_) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Tab)) sel_ = ImGui::GetIO().KeyShift ? (sel_ - 1 + n) % n : (sel_ + 1) % n;
+            if (!ImGui::GetIO().KeyCtrl && items_[sel_].action) {
+                chosen = items_[sel_].action;
+                commit(sel_);
+            }
+        }
+        if (n > 0 && open_) {
             if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) sel_ = (sel_ + 1) % n;
             if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) sel_ = (sel_ - 1 + n) % n;
             if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) sel_ = std::min(n - 1, sel_ + max_rows);

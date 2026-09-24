@@ -104,6 +104,26 @@ bool NoteIndex::has(const std::string& space, const std::string& name) const {
     return false;
 }
 
+bool NoteIndex::resolve(const std::string& from, const std::string& space, const std::string& name,
+                        std::string& out_space, std::string& out_name) const {
+    std::string n = lower(name);
+    auto in = [&](const Space& s) {
+        auto it = s.notes.find(n);
+        if (it == s.notes.end()) return false;
+        out_space = s.name;
+        out_name = it->second;
+        return true;
+    };
+    if (!space.empty()) {
+        auto s = spaces.find(lower(space));
+        return s != spaces.end() && in(s->second);
+    }
+    if (auto s = spaces.find(lower(from)); s != spaces.end() && in(s->second)) return true;
+    for (auto& [k, s] : spaces)
+        if (in(s)) return true;
+    return false;
+}
+
 bool Store::split_target(const std::string& target, std::string& space, std::string& name) {
     std::string t = trim(target);
     if (auto h = t.find('#'); h != std::string::npos) t = trim(t.substr(0, h));
@@ -185,6 +205,43 @@ std::string Store::trash_note(const NoteRef& note) const {
     for (int i = 2; fs::exists(to, ec); i++) to = dir / u8path(note.name + " (" + std::to_string(i) + ").md");
     fs::rename(note.path, to, ec);
     if (ec) return "Couldn't delete: " + ec.message();
+    // Stamped with when it was deleted, which is what the trash is sorted by.
+    fs::last_write_time(to, fs::file_time_type::clock::now(), ec);
+    return {};
+}
+
+std::vector<NoteRef> Store::trashed() const {
+    std::vector<NoteRef> out;
+    std::error_code ec;
+    for (auto& d : fs::directory_iterator(root_ / ".trash", ec)) {
+        std::error_code ec2;
+        if (!d.is_directory(ec2)) continue;
+        std::string space = path_u8(d.path().filename());
+        for (auto& e : fs::directory_iterator(d.path(), ec2)) {
+            if (!is_note_file(e)) continue;
+            NoteRef n;
+            n.space = space;
+            n.name = path_u8(e.path().stem());
+            n.path = e.path();
+            std::error_code ec3;
+            auto t = e.last_write_time(ec3);
+            if (!ec3) n.mtime = to_time_t(t);
+            out.push_back(std::move(n));
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const NoteRef& a, const NoteRef& b) { return a.mtime > b.mtime; });
+    return out;
+}
+
+std::string Store::restore_note(const NoteRef& trashed, NoteRef& out) const {
+    if (auto e = ensure_space(trashed.space); !e.empty()) return e;
+    std::string name = trashed.name;
+    for (int i = 2; exists(trashed.space, name); i++) name = trashed.name + " (" + std::to_string(i) + ")";
+    NoteRef to = ref(trashed.space, name);
+    std::error_code ec;
+    fs::rename(trashed.path, to.path, ec);
+    if (ec) return "Couldn't restore: " + ec.message();
+    out = ref(trashed.space, name);
     return {};
 }
 
