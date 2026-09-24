@@ -11,6 +11,8 @@ Notes live in `~/Documents/delta`. Each folder there is a **space**, and each `.
 
 Notes save as you type. Deleted notes go to the trash; "restore deleted note" brings one back.
 
+If a note changes on disk while you have edits not yet saved, delta stops saving it until you choose: `ctrl+s` keeps your version, "reload note" takes the file's. Leave the note without choosing and your edits are kept beside it as "name (yours)".
+
 ## Palette
 
 `ctrl+p` lists every command, with its shortcut.

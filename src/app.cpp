@@ -966,7 +966,7 @@ void App::register_commands() {
     });
     add("edit.web_search", "search the web for selection", "alt+shift+enter", [this] {
         if (!note_ || !editor_.has_selection()) status("select some text to search the web for it");
-        else if (!web_search(editor_.selected_text())) status("couldn't open a browser", true);
+        else if (!web_search(editor_.selected_text())) status("couldn't open a browser; set a default browser in your system settings", true);
     });
     add("palette.search", "search notes in this space", "ctrl+shift+f", [this] {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
@@ -987,7 +987,8 @@ void App::register_commands() {
     add("note.move", "move note to another space", "", [this] { move_note(); });
     add("note.delete", "delete note", "", [this] { delete_note(); });
     add("note.restore", "restore deleted note", "", [this] { restore_note(); });
-    add("note.save", "save note now", "ctrl+s", [this] { if (save()) status("saved"); });
+    add("note.save", "save note now", "ctrl+s", [this] { if (save(true)) status("saved"); });
+    add("note.reload", "reload note", "", [this] { reload_note(); });
     add("space.new", "new space", "", [this] { new_space(); });
     add("space.rename", "rename this space", "", [this] { rename_space(); });
     add("space.delete", "delete this space", "", [this] { delete_space(); });
@@ -1011,7 +1012,7 @@ void App::register_commands() {
     add("font.choose_mono", "choose mono font", "", [this] { choose_font(true); });
     add("theme.choose", "choose theme", "", [this] { choose_theme(); });
     add("config.open_external", "open config in another app", "", [this] {
-        if (!open_with_default_app(cfg_path_)) status("couldn't open " + path_u8(cfg_path_), true);
+        if (!open_with_default_app(cfg_path_)) status("couldn't open " + path_u8(cfg_path_.filename()) + "; choose a default app for its file type in your system settings", true);
     });
     add("nav.next_problem", "next problem", "f8", [this] { goto_problem(1); }, true);
     add("nav.prev_problem", "previous problem", "shift+f8", [this] { goto_problem(-1); }, true);
@@ -1077,8 +1078,7 @@ void App::remember_view() {
     if (note_) views_[path_u8(note_->path)] = {editor_.cursor(), editor_.scroll()};
 }
 
-bool App::save() {
-    if (!note_ || is_manual() || editor_.version() == saved_version_) return true;
+std::string App::disk_text() const {
     std::string text = editor_.text();
     // A download still on its way is saved as the address it came from; the
     // placeholder is only ever on screen.
@@ -1096,30 +1096,79 @@ bool App::save() {
         }
         text.swap(out);
     }
+    return text;
+}
+
+bool App::save(bool over_disk) {
+    if (!note_ || is_manual() || editor_.version() == saved_version_) return true;
+    if (!over_disk && !conflict_) {
+        // Changed on disk since we last looked (before the poll saw it).
+        auto nm = mtime_of(note_->path);
+        if (nm != fs::file_time_type{} && disk_mtime_ != fs::file_time_type{} && nm != disk_mtime_) {
+            disk_mtime_ = nm;
+            conflict_ = true;
+        }
+    }
+    if (conflict_ && !over_disk) return false;
     std::string err;
     std::error_code ec;
     fs::create_directories(note_->path.parent_path(), ec);
-    if (!atomic_write(note_->path, text, &err)) {
+    if (!atomic_write(note_->path, disk_text(), &err)) {
         status("couldn't save: " + err, true);
         return false;
     }
     saved_version_ = editor_.version();
     disk_mtime_ = mtime_of(note_->path);
+    conflict_ = false;
     if (is_config()) load_settings();  // edits apply as soon as they're saved
     return true;
+}
+
+// The note as it is on disk, in place of what's in the editor.
+void App::reload_note() {
+    if (!note_ || is_manual()) return;
+    std::string text;
+    if (!read_file(note_->path, text)) {
+        status("couldn't read " + note_->name + "; it may have been moved or deleted", true);
+        return;
+    }
+    crlf_ = text.find("\r\n") != std::string::npos;
+    editor_.reload_text(text);
+    saved_version_ = seen_version_ = editor_.version();
+    disk_mtime_ = mtime_of(note_->path);
+    conflict_ = false;
+}
+
+// Leaving a note in conflict with disk: the file keeps the other version,
+// and your edits are saved beside it as "name (yours)", so neither is lost.
+void App::keep_yours() {
+    if (!conflict_ || !note_ || editor_.version() == saved_version_) { conflict_ = false; return; }
+    conflict_ = false;
+    fs::path dir = note_->path.parent_path(), ext = note_->path.extension();
+    std::string stem = path_u8(note_->path.stem()) + " (yours)", name = stem;
+    std::error_code ec;
+    for (int i = 2; fs::exists(dir / u8path(name + path_u8(ext)), ec); i++) name = stem + " " + std::to_string(i);
+    std::string err;
+    if (!atomic_write(dir / u8path(name + path_u8(ext)), disk_text(), &err)) {
+        status("couldn't keep your edits: " + err, true);
+        return;
+    }
+    saved_version_ = editor_.version();  // nothing left to save over the other version
+    status("kept your edits as " + name + "; " + note_->name + " has the version from disk");
 }
 
 void App::open_note(const NoteRef& n, bool push_history) {
     std::optional<Jump> jump;
     if (push_history) jump.emplace(*this);
     close_bar();
+    keep_yours();
     save();
     remember_view();
     bool config = n.path == cfg_path_, manual = n.path == kManual;
     std::string text;
     if (manual) text.assign((const char*)g_manual, g_manual_size);
     else if (!read_file(n.path, text)) {
-        status("couldn't open " + n.name, true);
+        status("couldn't open " + n.name + "; it may have been moved, deleted or locked by another app", true);
         return;
     }
     crlf_ = text.find("\r\n") != std::string::npos;
@@ -1172,6 +1221,7 @@ void App::open_manual() {
 }
 
 void App::close_note() {
+    keep_yours();
     save();
     remember_view();
     note_.reset();
@@ -1610,7 +1660,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
     // The note's outline. With nothing typed, the section you're in starts
     // selected, so up and down step from where you are.
     if (c == '@') {
-        if (!note_) return;
+        if (!note_) { palette_.set_empty("open a note first; headings are listed from the note in view"); return; }
         auto heads = editor_.headings();
         total = (int)heads.size();
         int here = -1;
@@ -1631,6 +1681,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             };
             out.push_back(std::move(it));
         }
+        palette_.set_empty(heads.empty() ? "no headings in this note; start a line with # to add one" : "no heading matches " + quote(q));
         sort();
         return;
     }
@@ -1675,12 +1726,14 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             if (note_ && n.path == note_->path) continue;
             scan(n, note_lines(n));
         }
+        palette_.set_empty(palette_.wide() ? "no matches for " + quote(q) + " in any space"
+                                           : "no matches for " + quote(q) + " in " + space_ + "; tab searches every space");
         return;
     }
 
     // Links here: every [[link]] in any space that leads to the open note.
     if (c == '[') {
-        if (!is_note()) return;
+        if (!is_note()) { palette_.set_empty("open a note first; its links are listed here"); return; }
         if (cache_all_.empty()) cache_all_ = store_.all_notes();
         total = 0;
         for (auto& n : cache_all_) {
@@ -1700,11 +1753,14 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
                 out.push_back(std::move(it));
             }
         }
+        palette_.set_empty(total == 0 ? "no notes link to " + note_->name + " yet; link one with [[" + note_->name + "]]"
+                                      : "no links match " + quote(q));
         sort();
         return;
     }
 
     if (!prefixed) {
+        palette_.set_empty("no command matches " + quote(q));
         total = (int)std::count_if(cmds_.begin(), cmds_.end(), [](const Command& c) { return c.in_palette; });
         size_t prefixed_w = 0;
         for (auto& cmd : cmds_)
@@ -1736,7 +1792,7 @@ ImU32 App::background() const { return T.bg; }
 
 void App::status(const std::string& msg, bool error) {
     status_ = msg;
-    status_error_ = error;
+    status_error_ = status_held_ = error;
     status_time_ = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0;
 }
 
@@ -1749,7 +1805,7 @@ void App::on_focus(bool focused) {
 double App::next_wake(double now) {
     double t = now + 1.0;
     if (note_ && editing() && cfg_.cursor_blink && focused_ && !palette_.is_open()) t = std::min(t, editor_.next_blink(now));
-    if (note_ && editor_.version() != saved_version_) t = std::min(t, last_change_ + cfg_.autosave_delay);
+    if (note_ && !conflict_ && editor_.version() != saved_version_) t = std::min(t, last_change_ + cfg_.autosave_delay);
     double status_end = status_time_ + 3.4;
     if (status_end > now) t = std::min(t, status_end);
     if (note_ && next_problem_check_ > now) t = std::min(t, next_problem_check_);
@@ -1783,16 +1839,8 @@ void App::poll_files(double now) {
     auto nm = mtime_of(note_->path);
     if (nm == fs::file_time_type{} || nm == disk_mtime_) return;
     disk_mtime_ = nm;
-    if (editor_.version() != saved_version_) {
-        status("this note changed on disk; your next save will overwrite it", true);
-        return;
-    }
-    std::string text;
-    if (read_file(note_->path, text)) {
-        crlf_ = text.find("\r\n") != std::string::npos;
-        editor_.reload_text(text);
-        saved_version_ = seen_version_ = editor_.version();
-    }
+    if (editor_.version() != saved_version_) conflict_ = true;  // the status line says so until it's settled
+    else reload_note();
 }
 
 void App::toggle_fullscreen() {
@@ -2170,7 +2218,7 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     for (auto& [label, act] : keys) keys_w += W(label) + (keys_w > 0 ? W(sep) : 0);
     if (rx - keys_w - s * 1.6f - W(count) > x + s * 8) {
         float kx = rx - keys_w;
-        ImU32 quiet = col_mix(T.faint, T.dim, 0.6f);
+        ImU32 quiet = T.dim;
         for (size_t i = 0; i < keys.size(); i++) {
             if (i) {
                 dl->AddText(mono_, s, ImVec2(kx, ty), quiet, sep);
@@ -2411,27 +2459,52 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
         if (editor_.has_selection() && editor_.image_for_caret() < 0) put_right(std::to_string(editor_.selection_length()) + " selected", T.dim);
     }
 
-    // Transient message, between the two.
+    // A message too long for the room ends in an ellipsis, not mid-letter.
+    auto fit = [&](std::string t) {
+        float room = rx - left_end;
+        if (W(t) <= room) return t;
+        const std::string dots = "\xE2\x80\xA6";  // "…"
+        while (!t.empty() && W(t + dots) > room) {
+            size_t n = t.size() - 1;
+            while (n > 0 && utf8::is_cont((unsigned char)t[n])) n--;
+            t.resize(n);
+        }
+        return t + dots;
+    };
+    auto centred = [&](const std::string& t, ImU32 col) {
+        // Centred on the bar, unless that would push it past the counts.
+        float mx = std::max(left_end, std::min(std::round((min.x + max.x - W(t)) * 0.5f), rx - W(t)));
+        dl->PushClipRect(ImVec2(left_end, min.y), ImVec2(rx, max.y), true);
+        dl->AddText(mono_, s, ImVec2(mx, ty), col, t.c_str());
+        dl->PopClipRect();
+    };
+
+    // Transient message, between the two. An error stays until the next key.
     double now = ImGui::GetTime();
     float age = (float)(now - status_time_);
+    if (status_held_) age = std::min(age, 3.0f);
     if (!status_.empty() && age < 3.4f) {
         float a = age < 3.0f ? 1.0f : 1.0f - (age - 3.0f) / 0.4f;
         float in = anim::ease_out(std::min(1.0f, age / 0.1f));
         if (age < 0.1f) anim::active = true;
-        if (age >= 3.0f) anim::active = true;
-        ImU32 col = status_error_ ? T.bright : T.text;
-        float mx = std::max(left_end, std::round((min.x + max.x - W(status_)) * 0.5f));
-        dl->PushClipRect(ImVec2(left_end, min.y), ImVec2(rx, max.y), true);
-        dl->AddText(mono_, s, ImVec2(mx, ty), col_alpha(col, a * in), status_.c_str());
-        dl->PopClipRect();
+        if (age >= 3.0f && !status_held_) anim::active = true;
+        centred(fit(status_), col_alpha(status_error_ ? T.bright : T.text, a * in));
     } else if (age >= 3.4f) {
         status_.clear();
+    }
+
+    // Otherwise, while the note on disk and yours differ, the two ways out.
+    if (status_.empty() && conflict_) {
+        std::string save = chord_for("note.save");
+        centred(fit("changed on disk; " + (save.empty() ? "\"save note now\"" : save) +
+                    " keeps your version, \"reload note\" takes the file's"),
+                T.bright);
     }
 
     // Otherwise, in the same place, the echo of what the caret is on.
     if (!echo_.empty()) echo_shown_ = echo_;
     echo_a_ = anim::approach(echo_a_, echo_.empty() ? 0.0f : 1.0f, 16.0f, ImGui::GetIO().DeltaTime, 0.004f);
-    if (status_.empty() && echo_a_ > 0.0f && !echo_shown_.empty()) {
+    if (status_.empty() && !conflict_ && echo_a_ > 0.0f && !echo_shown_.empty()) {
         // Centred in the room between the note's name and the counts.
         float w = 0;
         for (auto& e : echo_shown_) w += W(e.text);
@@ -2448,7 +2521,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) act = e.act;
             }
-            ImU32 col = e.tone == Tone::Strong ? T.text : e.tone == Tone::Quiet ? col_mix(T.faint, T.dim, 0.6f) : T.dim;
+            ImU32 col = e.tone == Tone::Strong ? T.text : e.tone == Tone::Quiet ? T.dim : col_mix(T.dim, T.text, 0.4f);
             if (over) col = e.tone == Tone::Strong ? T.bright : T.text;
             dl->AddText(mono_, s, ImVec2(ex, ty), col_alpha(col, echo_a_), e.text.c_str());
             ex += W(e.text);
@@ -2465,6 +2538,16 @@ void App::frame() {
     images_.frame(now);
     poll_downloads();
     handle_drops();
+
+    // A held error starts to fade at the first key after it (not the one
+    // that caused it).
+    if (status_held_ && now > status_time_)
+        for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; k++)
+            if (ImGui::IsKeyPressed((ImGuiKey)k, false)) {
+                status_held_ = false;
+                status_time_ = now - 3.0;
+                break;
+            }
 
     // Commands passed on the command line (used for testing and scripting).
     // A scripted key press (see "key:" below) is released the frame after.
@@ -2728,11 +2811,12 @@ void App::frame() {
             seen_version_ = editor_.version();
             last_change_ = now;
         }
-        if (editor_.version() != saved_version_ && now - last_change_ >= cfg_.autosave_delay) save();
+        if (!conflict_ && editor_.version() != saved_version_ && now - last_change_ >= cfg_.autosave_delay) save();
     }
 }
 
 void App::shutdown() {
+    keep_yours();
     save();
     images_.shutdown();  // while the GL context is still around
     std::map<std::string, std::string> kv;

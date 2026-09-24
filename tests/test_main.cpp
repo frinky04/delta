@@ -565,9 +565,9 @@ static void test_themes() {
         parse_config("[appearance]\ntheme = " + t.name + "\n", c, is);
         CHECK(is.empty() && c.theme == t.name);
 
-        // Readable: text clearly, secondary text and the caret enough to find.
+        // Readable: text and secondary text as text (4.5:1), the caret as a mark (3:1).
         unsigned bg = t.colours[0], dim = t.colours[4], text = t.colours[5], accent = t.colours[7];
-        if (contrast(text, bg) < 4.5f || contrast(dim, bg) < 2.5f || contrast(accent, bg) < 2.5f)
+        if (contrast(text, bg) < 4.5f || contrast(dim, bg) < 4.5f || contrast(accent, bg) < 3.0f)
             { CHECK(!"theme contrast"); std::printf("   %s: text %.1f dim %.1f accent %.1f\n", t.name.c_str(), contrast(text, bg), contrast(dim, bg), contrast(accent, bg)); }
     }
     CHECK(find_theme("dark") == &all_themes()[0] && find_theme("light") && !find_theme("Dark") && !find_theme(""));

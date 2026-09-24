@@ -229,6 +229,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         built_for_ = text();
         items_.clear();
         total_ = -1;
+        empty_.clear();
         if (kind_ == Kind::Query) {
             tag_.clear();
             build(text(), items_, total_);
@@ -288,8 +289,13 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     // The preview line, under a gap as wide as the one above the list.
     const float preview_gap = opts_.preview ? std::round(em * 0.9f) : 0;
     const float preview_h = opts_.preview ? std::round(em * 2.4f) : 0;
-    const int max_rows = std::clamp((int)((f.bottom - list_top - preview_gap - preview_h) / row_h), 3, 16);
+    const int fit = std::max(3, (int)((f.bottom - list_top - preview_gap - preview_h) / row_h));
     const int n = (int)items_.size();
+    // More than fits: a row fewer, and the top half of the next one shows
+    // below, fading out, so the list never looks complete when it isn't.
+    const bool more = n > fit;
+    const int max_rows = more ? fit - 1 : fit;
+    const float peek = more ? std::round(row_h * 0.5f) : 0;
     const int shown = std::max(1, std::min(n, max_rows));
     const float y0 = f.top;
     const float list_y = list_top;
@@ -297,7 +303,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     const bool invert = f.selection == Selection::Invert;
 
     ImGui::SetNextWindowPos(ImVec2(x0 - margin, y0));
-    ImGui::SetNextWindowSize(ImVec2(cw + margin * 2, list_y + shown * row_h + preview_gap + preview_h - y0));
+    ImGui::SetNextWindowSize(ImVec2(cw + margin * 2, list_y + shown * row_h + peek + preview_gap + preview_h - y0));
     if (open_ && focus_) ImGui::SetNextWindowFocus();
     ImGui::Begin("##palette", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
@@ -320,7 +326,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     if (kind_ == Kind::Query && !tag_.empty()) count = tag_ + (count.empty() ? "" : "  " + count);
     float count_w = count.empty() ? 0 : W(mono, count);
     if (!count.empty())
-        dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - count_w), text_y), col_alpha(T.faint, vis), count.c_str());
+        dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - count_w), text_y), col_alpha(T.dim, vis), count.c_str());
 
     char before[sizeof buf_];
     std::memcpy(before, buf_, sizeof buf_);
@@ -412,11 +418,11 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
 
     const float row_text_y = std::round((row_h - ms) * 0.5f);
     const float pad = std::round(em * 0.3f);   // inverted bar overhang around the label
-    const float list_bottom = list_y + shown * row_h;
+    const float list_bottom = list_y + shown * row_h + peek;
     dl->PushClipRect(ImVec2(x0 - margin, list_y), ImVec2(x0 + cw + margin, list_bottom), true);
     if (n == 0) {
-        const char* msg = trim(buf_).size() > 1 ? "no matches" : "nothing here yet";
-        dl->AddText(mono, ms, ImVec2(x0, list_y + row_text_y), col_alpha(T.dim, vis), msg);
+        std::string msg = !empty_.empty() ? empty_ : trim(buf_).size() > 1 ? "no matches" : "nothing here yet";
+        dl->AddText(mono, ms, ImVec2(x0, list_y + row_text_y), col_alpha(T.dim, vis), msg.c_str());
     } else {
         float pick_a = vis_pick;
         if (!invert) {
@@ -449,7 +455,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             if (it.emphasis && on) col = T.bright;
             if (!it.action) col = T.dim;
             ImU32 hl = on ? T.bright : T.text;
-            ImU32 meta = on ? T.dim : T.faint;
+            ImU32 meta = on ? col_mix(T.dim, T.text, 0.45f) : T.dim;
             if (!it.meta.empty()) {
                 float meta_w = W(mono, it.meta);
                 dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - meta_w), std::round(ry + row_text_y)), col_alpha(meta, a), it.meta.c_str());
@@ -460,7 +466,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
                        it.dim, col_alpha(meta, a));
             if (!it.aside.empty()) {
                 float ax = lx + label_width(mono, mono_b, ms, it.label, it.hl) + W(mono, "  ");
-                dl->AddText(mono, ms, ImVec2(std::round(ax), std::round(ry + row_text_y)), col_alpha(T.faint, a), it.aside.c_str());
+                dl->AddText(mono, ms, ImVec2(std::round(ax), std::round(ry + row_text_y)), col_alpha(T.dim, a), it.aside.c_str());
             }
             dl->PopClipRect();
         }
@@ -497,6 +503,10 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             }
             dl->PopClipRect();
         }
+    }
+    if (peek > 0) {
+        ImU32 clear = col_alpha(T.bg, 0.0f), solid = col_alpha(T.bg, vis);
+        dl->AddRectFilledMultiColor(ImVec2(x0 - margin, list_bottom - peek), ImVec2(x0 + cw + margin, list_bottom), clear, clear, solid, solid);
     }
     dl->PopClipRect();
 

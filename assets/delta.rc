@@ -1,0 +1,3 @@
+// The app icon. GLFW looks for this name when it registers the window class,
+// so the title bar and taskbar use it too; Explorer shows it as the exe's.
+GLFW_ICON ICON "delta.ico"

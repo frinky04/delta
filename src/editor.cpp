@@ -1305,7 +1305,9 @@ void Editor::layout(int mode) {
         else L.img = false;
         L.pad = 0;
         if (L.info.kind == LineKind::Heading && i > 0)
-            L.pad = std::round(P_.size * (L.info.level <= 2 ? 0.5f : 0.25f));
+            // Sizes barely step (see md_heading_scale), so the space above
+            // carries the level: a top-level section opens widest.
+            L.pad = std::round(P_.size * (L.info.level == 1 ? 0.9f : L.info.level == 2 ? 0.5f : 0.25f));
         L.y = y;
         L.h = L.pad + L.rows.size() * L.row_h;
         if (mode == 1) { L.dy = L.y; L.dh = L.h; }  // the reader doesn't animate layout
@@ -3684,7 +3686,7 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
             ImVec2 sz = p.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
             float ty = ye + (L0.row_h - L0.size) * 0.5f + (L0.size - ns) * 0.78f;
             dl->AddText(p.mono, ns, ImVec2(std::round(x0 - p.size * 1.3f - sz.x), std::round(ty)),
-                        col_alpha(i == cur_.line ? T.accent : T.faint, base * syntax_a), buf);
+                        col_alpha(i == cur_.line ? T.accent : T.dim, base * syntax_a), buf);
         }
     }
     P_.alpha = base;
@@ -3869,7 +3871,7 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         ImVec2 sz = P_.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
         float ty = y + (L.row_h - L.size) * 0.5f + (L.size - ns) * 0.78f;
         if (L.img) ty = y + L.img_m;  // level with the image's top
-        ImU32 col = i == cur_.line ? T.accent : T.faint;  // where you are
+        ImU32 col = i == cur_.line ? T.accent : T.dim;  // where you are
         dl->AddText(P_.mono, ns, ImVec2(std::round(x0 - P_.size * 1.3f - sz.x), std::round(ty)), fade(col), buf);
     }
 
@@ -3927,7 +3929,7 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         }
 
         if (!hint_text.empty() && pa < 1.0f)
-            note(rows - 1, hint_text, col_alpha(fade(col_mix(T.faint, T.dim, 0.6f)), 1.0f - pa));
+            note(rows - 1, hint_text, col_alpha(fade(T.dim), 1.0f - pa));
         // The underlines, row by row if a range wraps. No range: the whole
         // line. They sit where an underline does, just under the baseline;
         // on a link, which has its own, just under that. Spelling gets dots,
@@ -3988,7 +3990,6 @@ Look resolve(uint16_t f, const LineInfo& info, bool reader) {
         k.bold = k.underline = k.strike = k.italic = false;
         if (f & (S_ListMark | S_QuoteMark | S_TaskBox)) k.col = structural;
         if ((f & S_TaskBox) && info.done) k.col = T.dim;
-        if (f & S_Url) k.col = T.faint;
     }
     if (reader && (f & S_ListMark)) k.col = T.dim;
     return k;
@@ -4000,7 +4001,7 @@ Look resolve_ini(uint16_t f) {
     Look k{T.text};
     if (f & I_Comment) k.col = T.dim;
     else if (f & I_Section) { k.col = T.bright; k.bold = true; }
-    else if (f & (I_Bracket | I_Eq)) k.col = T.faint;
+    else if (f & (I_Bracket | I_Eq)) k.col = T.dim;
     else if (f & I_Value) k.col = T.bright;
     else if (f & I_Key) k.col = col_mix(T.text, T.dim, 0.2f);
     return k;
@@ -4074,9 +4075,10 @@ void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m,
         }
         Look k = syntax_ == Syntax::Ini ? resolve_ini(f) : resolve(f, L.info, mode == 1);
         ImU32 col = fade(k.col);
-        // Structural markers (bullets, >, [ ]) are part of reading a list, so
-        // only the other syntax fades away from the caret.
-        if ((f & S_Marker) && !(f & (S_ListMark | S_QuoteMark | S_TaskBox)))
+        // Structural markers (bullets, >, [ ]) are part of reading a list, and
+        // a link's address is content, so only the other syntax fades away
+        // from the caret.
+        if ((f & S_Marker) && !(f & (S_ListMark | S_QuoteMark | S_TaskBox | S_Url)))
             col = fade(col_alpha(k.col, line_mark_a_));
         bool mono = is_mono(f);
 

@@ -74,7 +74,7 @@ const std::vector<Setting>& all_settings() {
         {"colors", "background", K::Colour, "", 0, 0, nullptr, ""},
         {"colors", "surface", K::Colour, "", 0, 0, nullptr, "raised panels"},
         {"colors", "border", K::Colour, "", 0, 0, nullptr, ""},
-        {"colors", "faint", K::Colour, "", 0, 0, nullptr, "quietest text"},
+        {"colors", "faint", K::Colour, "", 0, 0, nullptr, "separators and guides"},
         {"colors", "dim", K::Colour, "", 0, 0, nullptr, "symbols, secondary text"},
         {"colors", "text", K::Colour, "", 0, 0, nullptr, ""},
         {"colors", "bright", K::Colour, "", 0, 0, nullptr, "headings, bold"},
@@ -501,9 +501,8 @@ void apply_edit(std::vector<std::string>& lines, const ConfigEdit& e) {
 }
 
 std::string default_config_text() {
-    return "; delta configuration: anything set here overrides the default.\n"
-           "; Open it in delta (ctrl+,) to see each setting's default and what it\n"
-           "; does beside it, and run \"add setting\" from the commands (ctrl+p) to add one.\n"
+    return "; delta config: anything set here overrides the default\n"
+           "; in delta (ctrl+,) each setting shows its default beside it; \"add setting\" (ctrl+p) adds one\n"
            "\n"
            "[general]\n"
            "\n"

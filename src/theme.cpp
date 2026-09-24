@@ -83,13 +83,14 @@ static unsigned hold(unsigned c, unsigned bg, unsigned to, float ratio) {
 // background, `text` what you type, and `error`. Delta needs twelve, so
 // the rest are mixed from those the way delta's own themes step between
 // them. `main` stays the accent alone: headings get brighter, not coloured.
-// Where a theme's secondary text or its caret would be hard to find on its
-// background, they're pushed just far enough out to be found.
+// Secondary text is still text, so `sub` is pushed toward `text` until it
+// reads at 4.5:1; the caret and the palette's pick are marks, so `main` is
+// pushed out to 3:1.
 static ThemeDef port(const char* name, unsigned bg, unsigned main, unsigned sub, unsigned sub_alt, unsigned text,
                      unsigned error) {
     unsigned far = contrast(0xffffff, bg) > contrast(0x000000, bg) ? 0xffffff : 0x000000;
-    sub = hold(sub, bg, text, 2.5f);
-    main = hold(main, bg, far, 2.5f);
+    sub = hold(sub, bg, text, 4.5f);
+    main = hold(main, bg, far, 3.0f);
     return {name,
             {bg, sub_alt, mix(bg, sub, 0.25f), mix(bg, sub, 0.5f), sub, text, mix(text, far, 0.5f), main,
              mix(text, sub, 0.35f), mix(bg, text, 0.06f), error, mix(error, sub, 0.25f)}};
@@ -105,13 +106,13 @@ const std::vector<ThemeDef>& all_themes() {
         // accent bar). `error` is the same kind of signal for problems:
         // marks only, never the message.
         {"dark",
-         {0x0c0c0c, 0x151515, 0x242424, 0x383838, 0x6b6b6b, 0xbdbdbd, 0xf0f0f0,
+         {0x0c0c0c, 0x151515, 0x242424, 0x383838, 0x7f7f7f, 0xbdbdbd, 0xf0f0f0,
           0xe0851e,  // warm orange, after Krita's dark theme
           0x9e9e9e, 0x161616,
           0xd0564a,    // muted brick red
           0xac5d55}},  // the same, nearer grey
         {"light",
-         {0xf4f4f4, 0xffffff, 0xdedede, 0xbdbdbd, 0x8c8c8c, 0x2e2e2e, 0x0a0a0a,
+         {0xf4f4f4, 0xffffff, 0xdedede, 0xbdbdbd, 0x696969, 0x2e2e2e, 0x0a0a0a,
           0xc96f0e,  // deeper, so it holds up on light grey
           0x4a4a4a, 0xe9e9e9, 0xb8412f, 0xa95b50}},
 

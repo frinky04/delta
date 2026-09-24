@@ -105,7 +105,12 @@ private:
     // notes
     void open_note(const NoteRef& n, bool push_history = true);
     void close_note();
-    bool save();
+    // Writes the note. While it's in conflict with disk, only `over_disk`
+    // (an explicit save) writes.
+    bool save(bool over_disk = false);
+    std::string disk_text() const;  // the editor's text as it's written: line endings, pending downloads
+    void reload_note();
+    void keep_yours();  // leaving a note in conflict: your edits go to a copy beside it
     void remember_view();
     void switch_space(const std::string& space);
     void create_note(const std::string& space, const std::string& name);
@@ -286,6 +291,9 @@ private:
     uint64_t saved_version_ = 0, seen_version_ = 0;
     double last_change_ = 0;
     fs::file_time_type disk_mtime_{};
+    // The note changed on disk while you had edits not yet saved: nothing
+    // saves over it until you pick a version (see keep_yours).
+    bool conflict_ = false;
     double next_poll_ = 0;
     bool focused_ = true;
 
@@ -308,6 +316,7 @@ private:
 
     std::string status_;
     bool status_error_ = false;
+    bool status_held_ = false;  // an error stays until the next key
     double status_time_ = -100;
     double fade_start_ = -100;
 
