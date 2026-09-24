@@ -1508,6 +1508,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             bool open = note_ && note_->path == n.path;
             std::string where = all ? n.space + "/" : "";
             it.label = where + n.name;
+            it.dim = (int)where.size();
             // Past a "space/", only the name is matched.
             if (only.empty()) {
                 if (!fuzzy_match(name, it.label, it.score, &it.hl)) continue;

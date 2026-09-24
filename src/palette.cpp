@@ -140,10 +140,12 @@ int Palette::input_callback(ImGuiInputTextCallbackData* d) {
     return 0;
 }
 
-// Matched characters are drawn in the bold weight and their own colour.
+// Matched characters are drawn in the bold weight and their own colour; the
+// first `dim` bytes (a note's space, say) in `dim_col` where they aren't.
 static void draw_label(ImDrawList* dl, ImFont* font, ImFont* bold, float size, ImVec2 pos, const std::string& s,
-                       const std::vector<int>& hl, ImU32 col, ImU32 hl_col) {
-    std::vector<char> mask(s.size(), 0);
+                       const std::vector<int>& hl, ImU32 col, ImU32 hl_col, int dim = 0, ImU32 dim_col = 0) {
+    std::vector<char> mask(s.size(), 0);  // 0 plain, 1 matched, 2 dim
+    for (int k = 0; k < std::min(dim, (int)s.size()); k++) mask[k] = 2;
     for (int h : hl) {
         if (h < 0 || h >= (int)s.size()) continue;
         int e = utf8::next(s, h);
@@ -153,8 +155,9 @@ static void draw_label(ImDrawList* dl, ImFont* font, ImFont* bold, float size, I
     for (size_t i = 0; i < s.size();) {
         size_t j = i;
         while (j < s.size() && mask[j] == mask[i]) j++;
-        ImFont* fnt = mask[i] && bold ? bold : font;
-        dl->AddText(fnt, size, ImVec2(std::round(x), pos.y), mask[i] ? hl_col : col, s.data() + i, s.data() + j);
+        ImFont* fnt = mask[i] == 1 && bold ? bold : font;
+        ImU32 c = mask[i] == 1 ? hl_col : mask[i] == 2 ? dim_col : col;
+        dl->AddText(fnt, size, ImVec2(std::round(x), pos.y), c, s.data() + i, s.data() + j);
         x += fnt->CalcTextSizeA(size, FLT_MAX, 0, s.data() + i, s.data() + j).x;
         i = j;
     }
@@ -453,7 +456,8 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             }
             float lx = label_x(it);
             dl->PushClipRect(ImVec2(lx, ry), ImVec2(label_end(it), ry + row_h), true);
-            draw_label(dl, mono, mono_b, ms, ImVec2(lx, ry + row_text_y), it.label, it.hl, col_alpha(col, a), col_alpha(hl, a));
+            draw_label(dl, mono, mono_b, ms, ImVec2(lx, ry + row_text_y), it.label, it.hl, col_alpha(col, a), col_alpha(hl, a),
+                       it.dim, col_alpha(meta, a));
             dl->PopClipRect();
         }
 

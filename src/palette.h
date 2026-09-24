@@ -20,6 +20,7 @@ struct PaletteItem {
     std::function<void()> action;
     int score = 0;
     int indent = 0;             // heading depth etc.
+    int dim = 0;                // leading bytes of label drawn dim (a note's "space/")
     bool emphasis = false;      // "+ new ..." rows
     bool current = false;       // where you are: selected when the list is built
 };
