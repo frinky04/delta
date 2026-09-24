@@ -78,6 +78,44 @@ int Store::note_count(const std::string& space) const {
     return n;
 }
 
+NoteIndex Store::index() const {
+    NoteIndex ix;
+    for (auto& s : spaces()) {
+        NoteIndex::Space& sp = ix.spaces[lower(s)];
+        sp.name = s;
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(root_ / u8path(s), ec)) {
+            if (!is_note_file(e)) continue;
+            std::string n = path_u8(e.path().stem());
+            sp.notes[lower(n)] = n;
+        }
+    }
+    return ix;
+}
+
+bool NoteIndex::has(const std::string& space, const std::string& name) const {
+    std::string n = lower(name);
+    if (!space.empty()) {
+        auto s = spaces.find(lower(space));
+        return s != spaces.end() && s->second.notes.count(n);
+    }
+    for (auto& [k, s] : spaces)
+        if (s.notes.count(n)) return true;
+    return false;
+}
+
+bool Store::split_target(const std::string& target, std::string& space, std::string& name) {
+    std::string t = trim(target);
+    if (auto h = t.find('#'); h != std::string::npos) t = trim(t.substr(0, h));
+    space.clear();
+    name = t;
+    if (auto slash = t.find('/'); slash != std::string::npos) {
+        space = trim(t.substr(0, slash));
+        name = trim(t.substr(slash + 1));
+    }
+    return !name.empty();
+}
+
 NoteRef Store::ref(const std::string& space, const std::string& name) const {
     NoteRef n;
     n.space = space;

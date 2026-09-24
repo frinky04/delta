@@ -49,6 +49,7 @@ add_library(delta_core STATIC
   src/markdown.cpp
   src/ini_syntax.cpp
   src/palette.cpp
+  src/problems.cpp
   src/store.cpp
   src/config.cpp
   src/keys.cpp

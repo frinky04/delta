@@ -3,6 +3,7 @@
 // inside them. No nesting: sub-folders of a space are ignored, and folders
 // starting with '.' (like .trash) are not spaces.
 #include <ctime>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,22 @@ struct NoteRef {
     std::string name;   // file name without .md
     fs::path path;
     std::time_t mtime = 0;
+};
+
+// Every note's name, by space, for looking names up without the disk.
+// Keys are lower-cased (names match case-insensitively); values keep the
+// names as written.
+struct NoteIndex {
+    struct Space {
+        std::string name;
+        std::map<std::string, std::string> notes;
+        bool operator==(const Space&) const = default;
+    };
+    std::map<std::string, Space> spaces;
+
+    // Does a [[link]]'s space ("" for any) and name lead to a note?
+    bool has(const std::string& space, const std::string& name) const;
+    bool operator==(const NoteIndex&) const = default;
 };
 
 class Store {
@@ -26,6 +43,7 @@ public:
     bool exists(const std::string& space, const std::string& name) const;
     NoteRef ref(const std::string& space, const std::string& name) const;
     int note_count(const std::string& space) const;
+    NoteIndex index() const;
 
     // Each returns an empty string on success, or what went wrong.
     std::string ensure_space(const std::string& space) const;
@@ -37,6 +55,10 @@ public:
     std::string delete_space(const std::string& space) const;  // empty spaces only
 
     static std::string check_name(const std::string& name, const char* what);
+    // A [[link]] target as written: "name" or "space/name", any "#heading"
+    // after it dropped. `space` is "" when it doesn't name one. False if
+    // there's no name left.
+    static bool split_target(const std::string& target, std::string& space, std::string& name);
 
 private:
     fs::path root_;
