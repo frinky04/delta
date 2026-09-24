@@ -69,6 +69,7 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     register_commands();
     load_settings();
     apply_fonts();
+    font_loader_.list_families();  // ready for the font picker
 
     auto state = load_kv(state_path_);
     if (auto it = state.find("zoom"); it != state.end()) zoom_ = std::clamp((float)std::atof(it->second.c_str()), 0.5f, 3.0f);
@@ -141,31 +142,129 @@ void App::load_settings() {
     if (!Store::check_name(cfg_.default_space, "space").empty()) cfg_.default_space = "default";
     if (!Store::check_name(cfg_.daily_space, "space").empty()) cfg_.daily_space = "daily";
     apply_spelling();
-    // Loaded before the next frame (apply_fonts), so a change shows as soon
-    // as the config is saved.
-    auto pick = [&](const char* key, const std::string& value, FontPick& out) {
-        std::string bad = pick_font(value, find_setting("editor", key)->def, out);
-        if (!bad.empty()) issues.push_back(issue_at(cfg_, std::string("editor.") + key, true, bad));
-    };
-    pick("font", cfg_.font, sans_pick_);
-    pick("mono_font", cfg_.mono_font, mono_pick_);
+    // Fonts are found and read on the font worker and loaded between frames
+    // (apply_fonts), so a change shows soon after the config is saved. At
+    // start-up there's nothing to draw with until they're in, so they're
+    // found here.
+    FontLoader::Settings fonts{cfg_.font, find_setting("editor", "font")->def, cfg_.mono_font,
+                               find_setting("editor", "mono_font")->def};
+    if (!sans_) fonts_in_ = font_loader_.load_now(fonts);
+    else font_loader_.load(fonts);
 
-    // Problems show on their lines when the config is open in delta;
-    // otherwise the first one goes to the status bar.
-    set_problems(std::move(issues));
+    config_issues_ = std::move(issues);
     hints_version_ = UINT64_MAX;  // colour defaults follow the theme
-    const auto& all = config_problems_;
-    if (!all.empty() && !is_config()) {
-        const ConfigIssue& first = all[0];
+    publish_problems(true);
+}
+
+// The config's problems: load_settings' own and its fonts' (which the font
+// worker finds a little later). On their lines when the config is open in
+// delta; otherwise, if `announce`, the first one goes to the status bar.
+void App::publish_problems(bool announce) {
+    std::vector<ConfigIssue> all = config_issues_;
+    for (auto& [key, fp] : font_problems_) {
+        // Only while the setting still says what was found wrong with it.
+        const std::string& value = key == "font" ? cfg_.font : cfg_.mono_font;
+        if (!fp.problem.empty() && fp.value == value) all.push_back(issue_at(cfg_, "editor." + key, true, fp.problem));
+    }
+    set_problems(std::move(all));
+    const auto& shown = config_problems_;
+    if (announce && !shown.empty() && !is_config()) {
+        const ConfigIssue& first = shown[0];
         std::string msg = "Config: " + (first.line >= 0 ? "line " + std::to_string(first.line + 1) + ", " : std::string()) + first.msg;
-        if (all.size() > 1) msg += " (+" + std::to_string(all.size() - 1) + " more)";
+        if (shown.size() > 1) msg += " (+" + std::to_string(shown.size() - 1) + " more)";
         status(msg, true);
     }
 }
 
+// One font: the picked face (`bytes`, if any), then the embedded face for the
+// glyphs it lacks, then the system's symbol fonts for the glyphs Noto lacks
+// (arrows, emoji). All borrowed, never copied: whoever loads a font holds its
+// bytes for as long as it's loaded (the loader holds the symbol fonts').
+ImFont* App::load_font(const FontBytes& bytes, int index, const unsigned char* noto, std::size_t noto_size) {
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    ImFont* font = nullptr;
+    auto add = [&](const void* data, std::size_t size, int face) {
+        ImFontConfig c;
+        c.FontDataOwnedByAtlas = false;
+        c.FontNo = (ImU32)face;
+        c.MergeMode = font != nullptr;
+        c.DstFont = font;
+        ImFont* f = atlas->AddFontFromMemoryTTF(const_cast<void*>(data), (int)size, 17.0f, &c);
+        if (!font) font = f;
+    };
+    if (bytes) add(bytes->data(), bytes->size(), index);
+    add(noto, noto_size, 0);
+    for (auto& s : font_loader_.symbols()) add(s->data(), s->size(), 0);
+    return font;
+}
+
+// Takes in what the font worker has for us, between frames: the fonts the
+// config picks, the preview's, the list of installed ones.
 void App::apply_fonts() {
+    FontLoader::Pair in;
+    if (fonts_in_) {
+        in = std::move(*fonts_in_);
+        fonts_in_.reset();
+        install_fonts(in);
+    } else if (font_loader_.take(in)) {
+        install_fonts(in);
+    }
+
+    if (preview_want_ != preview_asked_) {
+        preview_asked_ = preview_want_;
+        if (!preview_want_.empty()) {
+            bool mono = preview_want_[0] == 'm';
+            font_loader_.preview(preview_want_.substr(2), find_setting("editor", mono ? "mono_font" : "font")->def);
+        }
+    }
+    // Nothing wanted any more (the palette closed), or something else now.
+    if (!preview_loaded_.empty() && preview_loaded_ != preview_want_) {
+        if (preview_font_) ImGui::GetIO().Fonts->RemoveFont(preview_font_);
+        preview_font_ = nullptr;
+        preview_bytes_.reset();
+        preview_error_.clear();
+        preview_loaded_.clear();
+    }
+    FontLoad pl;
+    // The worker only hands over the newest, which is the one asked for last.
+    if (font_loader_.take_preview(pl) && !preview_want_.empty() && preview_asked_ == preview_want_) {
+        bool mono = preview_want_[0] == 'm';
+        preview_error_ = pl.problem;
+        preview_bytes_ = pl.regular;
+        if (pl.problem.empty())
+            preview_font_ = mono ? load_font(pl.regular, pl.pick.regular.index, g_font_mono, g_font_mono_size)
+                                 : load_font(pl.regular, pl.pick.regular.index, g_font_sans, g_font_sans_size);
+        preview_loaded_ = preview_want_;
+    }
+
+    std::vector<FontFamily> fams;
+    if (font_loader_.take_families(fams)) {
+        auto names = [](const std::vector<FontFamily>& v) {
+            std::vector<std::string> out;
+            for (auto& f : v) out.push_back(f.name);
+            return out;
+        };
+        bool changed = names(fams) != names(families_);
+        families_ = std::move(fams);
+        // The picker open on the old list gets the new one.
+        if (changed && font_picker_open() && palette_.is_open()) palette_.update_items(font_rows(font_picker_ == 2));
+    }
+}
+
+void App::install_fonts(FontLoader::Pair& in) {
+    // Their problems first, whether or not the fonts change.
+    bool changed = false, fresh = false;
+    for (auto [key, l] : {std::pair<const char*, FontLoad*>{"font", &in.sans}, {"mono_font", &in.mono}}) {
+        FontProblem& fp = font_problems_[key];
+        if (fp.value == l->value && fp.problem == l->problem) continue;
+        changed = true;
+        fresh = fresh || !l->problem.empty();
+        fp = {l->value, l->problem};
+    }
+    if (changed) publish_problems(fresh);
+
     auto key_of = [](const FontFace& f) { return path_u8(f.file) + "#" + std::to_string(f.index) + "\n"; };
-    std::string key = key_of(sans_pick_.regular) + key_of(sans_pick_.bold) + key_of(mono_pick_.regular) + key_of(mono_pick_.bold);
+    std::string key = key_of(in.sans.pick.regular) + key_of(in.sans.pick.bold) + key_of(in.mono.pick.regular) + key_of(in.mono.pick.bold);
     if (sans_ && key == fonts_key_) return;
     bool reload = sans_ != nullptr;
     fonts_key_ = key;
@@ -176,47 +275,18 @@ void App::apply_fonts() {
     if (mono_bold_ != mono_) atlas->RemoveFont(mono_bold_);
     for (ImFont* f : {sans_, mono_})
         if (f) atlas->RemoveFont(f);
+    // The old fonts' bytes can go now, and the new ones' must stay.
+    font_bytes_ = {in.sans.regular, in.sans.bold, in.mono.regular, in.mono.bold};
 
-    // One font: the picked face, if there is one, then the embedded face for
-    // the glyphs it lacks, then the system's symbol fonts for the glyphs Noto
-    // lacks (arrows, emoji). A face that can't be read is left out.
-    auto load = [&](const FontFace& face, const unsigned char* noto, std::size_t noto_size) {
-        ImFont* font = nullptr;
-        auto add = [&](void* data, std::size_t size, bool owned, int index) {
-            ImFontConfig c;
-            c.FontDataOwnedByAtlas = owned;
-            c.FontNo = (ImU32)index;
-            c.MergeMode = font != nullptr;
-            c.DstFont = font;
-            ImFont* f = atlas->AddFontFromMemoryTTF(data, (int)size, 17.0f, &c);
-            if (!font) font = f;
-        };
-        auto add_file = [&](const fs::path& path, int index) {
-            std::string bytes;
-            if (!read_file(path, bytes) || bytes.empty()) return;
-            void* data = IM_ALLOC(bytes.size());  // the atlas frees it
-            std::memcpy(data, bytes.data(), bytes.size());
-            add(data, bytes.size(), true, index);
-        };
-        if (!face.file.empty()) add_file(face.file, face.index);
-        add((void*)noto, noto_size, false, 0);
-#ifdef _WIN32
-        for (const char* path : {"C:\\Windows\\Fonts\\seguisym.ttf", "C:\\Windows\\Fonts\\seguiemj.ttf"}) {
-            std::error_code ec;
-            if (fs::exists(path, ec)) add_file(path, 0);
-        }
-#endif
-        return font;
-    };
-    sans_ = load(sans_pick_.regular, g_font_sans, g_font_sans_size);
-    mono_ = load(mono_pick_.regular, g_font_mono, g_font_mono_size);
+    sans_ = load_font(in.sans.regular, in.sans.pick.regular.index, g_font_sans, g_font_sans_size);
+    mono_ = load_font(in.mono.regular, in.mono.pick.regular.index, g_font_mono, g_font_mono_size);
     // A picked font without a semibold uses its regular face for bold, not
     // Noto's semibold, which wouldn't match it. (The editor is given none
     // then, and draws bold doubled.)
-    sans_bold_ = sans_pick_.embedded() || !sans_pick_.bold.file.empty()
-                     ? load(sans_pick_.bold, g_font_sans_bold, g_font_sans_bold_size) : sans_;
-    mono_bold_ = mono_pick_.embedded() || !mono_pick_.bold.file.empty()
-                     ? load(mono_pick_.bold, g_font_mono_bold, g_font_mono_bold_size) : mono_;
+    sans_bold_ = !in.sans.regular || in.sans.bold
+                     ? load_font(in.sans.bold, in.sans.pick.bold.index, g_font_sans_bold, g_font_sans_bold_size) : sans_;
+    mono_bold_ = !in.mono.regular || in.mono.bold
+                     ? load_font(in.mono.bold, in.mono.pick.bold.index, g_font_mono_bold, g_font_mono_bold_size) : mono_;
     if (reload) editor_.fonts_changed();
 }
 
@@ -619,20 +689,8 @@ void App::add_setting() {
 
     auto insert = [this](std::string section, std::string key, std::string value) {
         if (!is_config()) return;
-        const auto& lines = editor_.lines();
-        bool header = false;
-        int at = config_insert_line(lines, section, header);
-        // Written at the end of the line before, so the new text ends
-        // exactly after the value.
-        std::string text = "\n";
-        if (header) {
-            bool empty_file = lines.size() == 1 && lines[0].empty();
-            text = empty_file ? "" : lines.back().empty() ? "\n" : "\n\n";
-            text += "[" + section + "]\n";
-        }
-        text += key + " = " + value;
-        int prev = std::max(0, at - 1);
-        TextPos end = editor_.insert_text({prev, (int)lines[prev].size()}, text);
+        ConfigEdit e = config_set(editor_.lines(), section, key, value);  // not set yet: added
+        TextPos end = editor_.insert_text({e.line, e.col0}, e.text);
         editor_.select_range({end.line, end.col - (int)value.size()}, end);
     };
 
@@ -656,6 +714,106 @@ void App::add_setting() {
         items.push_back(std::move(it));
     }
     palette_.pick("add setting: ", std::move(items));
+}
+
+// The font picker's rows, from the installed fonts as last listed.
+std::vector<PaletteItem> App::font_rows(bool mono) {
+    const char* key = mono ? "mono_font" : "font";
+    const std::string builtin = find_setting("editor", key)->def;
+    const std::string cur = mono ? cfg_.mono_font : cfg_.font;
+    std::vector<PaletteItem> items;
+    auto row = [&](const std::string& label, const std::string& meta) {
+        PaletteItem it;
+        it.label = label;
+        it.current = iequals(label, cur) || (cur.empty() && label == builtin);
+        it.meta = !it.current ? meta : meta.empty() ? "current" : meta + ", current";
+        it.action = [this, mono, label] { set_font(mono, label); };
+        items.push_back(std::move(it));
+    };
+    row(builtin, "built in");
+    if (is_font_path(cur)) row(cur, "file");
+    for (auto& f : families_) {
+        // Not on this computer as a file (a cloud font), or the built-in one again.
+        if ((mono && !f.mono) || f.regular.file.empty() || iequals(f.name, builtin)) continue;
+        row(f.name, real_bold(f.regular, f.bold) ? "" : "no bold");
+    }
+    return items;
+}
+
+// Picks an installed font for the config's font or mono_font (or, typed, a
+// font file), with the one selected shown in itself under the list. The
+// list is the one from last time (or start-up), and is listed again on the
+// font worker: a font installed since joins it when that's done.
+void App::choose_font(bool mono) {
+    font_loader_.list_families();
+    Palette::PickOptions opts;
+    opts.typed = [this, mono](const std::string& text, PaletteItem& it) {
+        if (text.empty() || !is_font_path(text)) return false;
+        it.label = text;
+        it.meta = "use this file";
+        it.action = [this, mono, text] { set_font(mono, text); };
+        return true;
+    };
+    opts.preview = [this, mono](const PaletteItem* sel, ImDrawList* dl, ImVec2 pos, float w, float h, float alpha) {
+        (void)w;  // clipped to it already
+        std::string value = sel ? sel->label : std::string();
+        double t = ImGui::GetTime();
+        if (value != preview_sel_) {
+            preview_sel_ = value;
+            preview_since_ = t;
+        }
+        std::string want = value.empty() ? std::string() : (mono ? "m:" : "s:") + value;
+        if (t - preview_since_ >= 0.12) preview_want_ = want;
+        else anim::active = true;  // a frame when it has rested long enough
+        if (want.empty() || preview_loaded_ != want) return;
+
+        float s = base_size(), size = mono ? std::round(s * 0.9f) : s;  // as the editor sets them
+        float y = std::round(pos.y + (h - size) * 0.5f);
+        if (!preview_error_.empty()) {
+            dl->AddText(mono_, std::round(s * 0.92f), ImVec2(pos.x, y), col_alpha(T.dim, alpha), preview_error_.c_str());
+            return;
+        }
+        if (!preview_font_) return;
+        const char* sample = mono ? "if (x == 0O1lI) return {\"\xE2\x86\x92\", 42}; // \xE2\x9C\x93"
+                                  : "The quick brown fox jumps over the lazy dog. 0O 1lI \xE2\x86\x92";
+        dl->AddText(preview_font_, size, ImVec2(pos.x, y), col_alpha(T.text, alpha), sample);
+    };
+    palette_.pick(mono ? "mono font: " : "font: ", font_rows(mono), std::move(opts));
+    font_picker_ = mono ? 2 : 1;
+    font_picker_gen_ = palette_.generation();
+}
+
+// Writes the font picker's choice into the config: into the editor as one
+// undoable edit when the config is open there, else into the file. Either
+// way it's saved, and the reload that follows loads the font.
+void App::set_font(bool mono, const std::string& value) {
+    const char* key = mono ? "mono_font" : "font";
+    status(std::string(mono ? "Mono font: " : "Font: ") + value);
+    if (is_config()) {
+        ConfigEdit e = config_set(editor_.lines(), "editor", key, value);
+        editor_.replace_range({e.line, e.col0}, {e.line, e.col1}, e.text);
+        save();
+        return;
+    }
+    std::string text;
+    read_file(cfg_path_, text);  // none yet: written from scratch
+    bool crlf = text.find("\r\n") != std::string::npos;
+    std::vector<std::string> lines;
+    std::istringstream in(text);
+    for (std::string line; std::getline(in, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(line);
+    }
+    if (text.empty() || text.back() == '\n') lines.emplace_back();  // the empty last line after a final newline
+    apply_edit(lines, config_set(lines, "editor", key, value));
+    std::string out;
+    for (size_t i = 0; i < lines.size(); i++) out += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
+    std::string err;
+    if (!atomic_write(cfg_path_, out, &err)) {
+        status("Couldn't save the config: " + err, true);
+        return;
+    }
+    load_settings();
 }
 
 std::vector<BindingDoc> App::binding_docs() const {
@@ -750,6 +908,8 @@ void App::register_commands() {
     // App
     add("config.open", "Edit config", "ctrl+,", [this] { open_config(); });
     add("config.add_setting", "Add a setting", "", [this] { add_setting(); });
+    add("font.choose", "Choose font", "", [this] { choose_font(false); });
+    add("font.choose_mono", "Choose mono font", "", [this] { choose_font(true); });
     add("config.open_external", "Open config in another app", "", [this] {
         if (!open_with_default_app(cfg_path_)) status("Couldn't open " + path_u8(cfg_path_), true);
     });
@@ -1340,6 +1500,7 @@ double App::next_wake(double now) {
     if (spell_pending_ || (bar_ == Bar::Fix && fix_advance_)) t = now;  // more lines to check, or a fix to move on from
     else if (speller_.loading()) t = std::min(t, now + 0.05);        // marks as soon as it's loaded
     if (speller_.suggesting()) t = std::min(t, now + 0.016);         // the echo as soon as its suggestions are in
+    if (font_loader_.busy()) t = std::min(t, now + 0.016);           // fonts as soon as they're found
     return t;
 }
 
@@ -2232,6 +2393,13 @@ void App::frame() {
     auto chosen = palette_.draw(
         pf, [this](const std::string& t, std::vector<PaletteItem>& out, int& total) { build_palette(t, out, total); }, prompt_for);
     if (chosen) chosen();
+    // The font picker's preview font goes with it. One wanted is asked for
+    // (and, once in, loaded) between frames, so there have to be some.
+    if (!font_picker_open()) {
+        font_picker_ = 0;
+        preview_want_.clear();
+    }
+    if (preview_want_ != preview_loaded_) anim::active = true;
     draw_viewer();
     if (palette_.is_open() && note_) {
         std::string t = palette_.text();

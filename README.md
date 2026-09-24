@@ -146,6 +146,8 @@ mono_font = ~/fonts/Iosevka-Regular.ttf
 
 The defaults, `Noto Sans` and `Noto Sans Mono`, are the embedded fonts. Looking up a font by name works on Windows only; elsewhere, give a path. Bold uses the family's semibold weight, or the next heavier one it has. A font file on its own, or a family without heavier weights, gets its bold drawn doubled instead. That includes variable fonts, since only their default weight can be drawn. Characters a font lacks come from Noto, and then from the system's symbol fonts. A new font shows as soon as the config is saved.
 
+"Choose font" and "Choose mono font" in the `/` palette list the installed fonts (only the monospaced ones for mono), with the one in use selected, and mark those whose bold will be drawn doubled "no bold". Under the list, a sample line shows the selected font in itself, once the selection rests on it. Typing a font file's path offers "use this file". Choosing writes the setting into the config: as an edit you can undo when the config is open in delta, and straight into the file otherwise.
+
 Window position, the last open note and zoom live in `state.ini` next to it, so the app never rewrites your config.
 
 ## Command line

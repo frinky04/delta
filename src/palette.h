@@ -34,12 +34,28 @@ public:
     // Characters that switch mode when typed first.
     static constexpr const char* kModes = "*#@:?/";
 
+    // Extras a pick can have.
+    struct PickOptions {
+        // A row for the text as typed, above the matches (a file's path,
+        // say). False: none.
+        std::function<bool(const std::string& text, PaletteItem& row)> typed;
+        // Draws a line under the list about the selected row (null when
+        // nothing is), `h` high at `pos` and `w` wide. Every frame the
+        // palette shows.
+        std::function<void(const PaletteItem* sel, ImDrawList* dl, ImVec2 pos, float w, float h, float alpha)> preview;
+    };
+
     void open(const std::string& text);
-    void pick(const std::string& prompt, std::vector<PaletteItem> items);
+    void pick(const std::string& prompt, std::vector<PaletteItem> items, PickOptions opts = {});
     void prompt(const std::string& prompt, const std::string& initial, const std::string& action_label,
                 std::function<void(const std::string&)> submit);
+    // A pick's list, changed while it's open. The query stays, and so does
+    // the selection if its row is still there.
+    void update_items(std::vector<PaletteItem> items);
     void close();
     bool is_open() const { return open_; }
+    // Changes each time it opens, to tell one list from the next.
+    int generation() const { return generation_; }
     bool visible() const { return open_ || close_t_ < 1.0f; }
     std::string text() const { return mode_ ? std::string(1, mode_) + buf_ : std::string(buf_); }
 
@@ -82,6 +98,9 @@ private:
     bool focus_ = false;
     std::string title_, action_label_;
     std::vector<PaletteItem> fixed_, items_;
+    PickOptions opts_;
+    int generation_ = 0;
+    std::string keep_sel_;             // after update_items: the row to stay on
     int total_ = -1;
     std::function<void(const std::string&)> submit_;
     std::string built_for_;

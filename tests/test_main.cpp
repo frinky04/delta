@@ -2146,8 +2146,116 @@ static void test_fonts() {
     CHECK_EQ(pick_font("Consolsa", "Noto Sans Mono", p), std::string("no installed font with this name; did you mean Consolas?"));
     CHECK(p.embedded());
     CHECK_EQ(pick_font("Zzqx Nothing Like It", "Noto Sans", p), std::string("no installed font with this name, using Noto Sans"));
+
+    // The picker lists families with whether they're monospaced.
+    auto families = system_font_families();
+    auto family = [&](const char* name) -> const FontFamily* {
+        for (auto& f : families)
+            if (f.name == name) return &f;
+        return nullptr;
+    };
+    CHECK(family("Consolas") && family("Consolas")->mono && real_bold(family("Consolas")->regular, family("Consolas")->bold));
+    CHECK(family("Georgia") && !family("Georgia")->mono);
 #endif
     fs::remove_all(root);
+
+    CHECK(is_font_path("~/fonts/a.ttf") && is_font_path("Mine.OTF") && is_font_path("C:\\x\\y"));
+    CHECK(!is_font_path("JetBrains Mono") && !is_font_path("Iosevka Term"));
+}
+
+// The font worker: fonts found and read off the UI thread, the newest request
+// winning, and each file read once while anything holds it.
+static void test_font_loader() {
+    fs::path root = fs::temp_directory_path() / "delta_test_font_loader";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    fs::path a = root / "a.ttf", b = root / "b.ttf";
+    CHECK(atomic_write(a, std::string((const char*)g_font_mono, g_font_mono_size), nullptr));
+    CHECK(atomic_write(b, std::string((const char*)g_font_sans, g_font_sans_size), nullptr));
+    auto wait = [](auto&& done) {
+        for (int i = 0; i < 500 && !done(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    };
+
+    FontLoader fl;
+    // Now, for start-up: the same file for both is read once.
+    FontLoader::Pair now = fl.load_now({path_u8(a), "Noto Sans", path_u8(a), "Noto Sans Mono"});
+    CHECK(now.sans.regular && now.sans.regular == now.mono.regular);
+    CHECK_EQ(now.sans.regular->size(), g_font_mono_size);
+    CHECK(!now.sans.bold && now.sans.problem.empty());
+
+    // On the worker, the newest wins: the first is never handed over.
+    fl.load({path_u8(b), "Noto Sans", "", "Noto Sans Mono"});
+    fl.load({path_u8(a), "Noto Sans", "", "Noto Sans Mono"});
+    FontLoader::Pair got;
+    wait([&] { return fl.take(got); });
+    CHECK_EQ(got.sans.value, path_u8(a));
+    CHECK(got.sans.regular == now.sans.regular);  // still held (by `now`): not read again
+    CHECK(!got.mono.regular && got.mono.problem.empty());  // the embedded font
+    CHECK(!fl.take(got));  // once
+    wait([&] { return !fl.busy(); });
+    CHECK(!fl.busy());
+
+    // Once nothing holds a file's bytes, they're gone; asked again, it's read again.
+    std::weak_ptr<const std::string> gone = now.sans.regular;
+    now = {};
+    got = {};
+    CHECK(gone.expired());
+    FontLoader::Pair again = fl.load_now({path_u8(a), "Noto Sans", "", "Noto Sans Mono"});
+    CHECK(again.sans.regular && again.sans.regular->size() == g_font_mono_size);
+
+    // A problem comes back with the embedded font.
+    fl.preview(path_u8(root / "missing.ttf"), "Noto Sans");
+    FontLoad pl;
+    wait([&] { return fl.take_preview(pl); });
+    CHECK_EQ(pl.problem, std::string("no font file here, using Noto Sans"));
+    CHECK(!pl.regular);
+
+#ifdef _WIN32
+    fl.list_families();
+    std::vector<FontFamily> fams;
+    wait([&] { return fl.take_families(fams); });
+    CHECK(fams.size() > 10);
+    bool sorted = true;
+    for (size_t i = 1; i < fams.size(); i++)
+        if (lower(fams[i - 1].name) > lower(fams[i].name)) sorted = false;
+    CHECK(sorted);
+#endif
+    fs::remove_all(root);
+}
+
+// What the font picker writes: the value replaced where it's set, or the
+// setting added where "add a setting" would put it.
+static void test_config_set() {
+    auto set = [](const std::string& text, const std::string& key, const std::string& value) {
+        std::vector<std::string> lines;
+        for (size_t a = 0, b;; a = b + 1) {
+            b = text.find('\n', a);
+            lines.push_back(text.substr(a, b == std::string::npos ? std::string::npos : b - a));
+            if (b == std::string::npos) break;
+        }
+        apply_edit(lines, config_set(lines, "editor", key, value));
+        std::string out;
+        for (size_t i = 0; i < lines.size(); i++) out += (i ? "\n" : "") + lines[i];
+        return out;
+    };
+    // Replaced, keeping a comment after it.
+    CHECK_EQ(set("[editor]\nfont = Georgia ; mine\n", "font", "Consolas"), std::string("[editor]\nfont = Consolas ; mine\n"));
+    CHECK_EQ(set("[editor]\nfont = \"Georgia\"\n", "font", "Consolas"), std::string("[editor]\nfont = Consolas\n"));
+    // No value yet.
+    CHECK_EQ(set("[editor]\nfont =\n", "font", "Consolas"), std::string("[editor]\nfont = Consolas\n"));
+    CHECK_EQ(set("[editor]\nfont = ; later\n", "font", "Consolas"), std::string("[editor]\nfont = Consolas ; later\n"));
+    // Set twice: the last one counts, so that's the one changed.
+    CHECK_EQ(set("[editor]\nfont = A\nfont = B\n", "font", "C"), std::string("[editor]\nfont = A\nfont = C\n"));
+    // Only in its own section, and not commented out.
+    CHECK_EQ(set("[spell]\nfont = A\n[editor]\n; font = B\nfont_size = 14\n", "font", "C"),
+             std::string("[spell]\nfont = A\n[editor]\n; font = B\nfont_size = 14\nfont = C\n"));
+    // Added: after the section's last setting, or in a new section.
+    CHECK_EQ(set("[editor]\nfont_size = 14\n\n[colors]\n", "mono_font", "Consolas"),
+             std::string("[editor]\nfont_size = 14\nmono_font = Consolas\n\n[colors]\n"));
+    CHECK_EQ(set("[general]\nx = 1\n", "font", "Georgia"), std::string("[general]\nx = 1\n\n[editor]\nfont = Georgia"));
+    CHECK_EQ(set("", "font", "Georgia"), std::string("[editor]\nfont = Georgia"));
+    // A " ;" in the value would start a comment, so it's quoted.
+    CHECK_EQ(set("[editor]\n", "font", "C:/my ;fonts/a.ttf"), std::string("[editor]\nfont = \"C:/my ;fonts/a.ttf\"\n"));
 }
 
 int main() {
@@ -2192,6 +2300,8 @@ int main() {
     test_spell_fix();
     test_spell_config();
     test_fonts();
+    test_config_set();
+    test_font_loader();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

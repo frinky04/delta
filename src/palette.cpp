@@ -63,6 +63,9 @@ void Palette::open(const std::string& text) {
         caret_.reset();
     }
     kind_ = Kind::Query;
+    opts_ = {};
+    generation_++;
+    keep_sel_.clear();
     open_ = true;
     committed_ = false;
     focus_ = true;
@@ -73,11 +76,12 @@ void Palette::open(const std::string& text) {
     set_text(mode_ ? text.substr(1) : text);
 }
 
-void Palette::pick(const std::string& prompt, std::vector<PaletteItem> items) {
+void Palette::pick(const std::string& prompt, std::vector<PaletteItem> items, PickOptions opts) {
     open("");
     kind_ = Kind::Pick;
     title_ = prompt;
     fixed_ = std::move(items);
+    opts_ = std::move(opts);
 }
 
 void Palette::prompt(const std::string& prompt, const std::string& initial, const std::string& action_label,
@@ -88,6 +92,13 @@ void Palette::prompt(const std::string& prompt, const std::string& initial, cons
     title_ = prompt;
     action_label_ = action_label;
     submit_ = std::move(submit);
+}
+
+void Palette::update_items(std::vector<PaletteItem> items) {
+    if (!open_ || kind_ != Kind::Pick) return;
+    if (sel_ >= 0 && sel_ < (int)items_.size()) keep_sel_ = items_[sel_].label;
+    fixed_ = std::move(items);
+    built_for_ = "\x01";  // filtered again next frame
 }
 
 void Palette::close() {
@@ -211,6 +222,11 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             if (!q.empty())
                 std::stable_sort(items_.begin(), items_.end(), [](auto& a, auto& b) { return a.score > b.score; });
             total_ = (int)fixed_.size();
+            PaletteItem typed;
+            if (opts_.typed && opts_.typed(q, typed)) {
+                typed.emphasis = true;
+                items_.insert(items_.begin(), std::move(typed));
+            }
         } else {
             std::string v = trim(buf_);
             PaletteItem it;
@@ -223,9 +239,19 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             items_.push_back(it);
         }
         sel_ = 0;
-        scroll_target_ = 0;
-        for (int k = 0; k < (int)items_.size(); k++)
-            if (items_[k].current) { sel_ = k; reveal_sel_ = true; break; }
+        // The row you were on, if the list changed under you; else where you are.
+        int keep = -1;
+        for (int k = 0; k < (int)items_.size() && !keep_sel_.empty(); k++)
+            if (items_[k].label == keep_sel_) { keep = k; break; }
+        if (keep >= 0) {
+            sel_ = keep;
+            reveal_sel_ = true;
+        } else {
+            scroll_target_ = 0;
+            for (int k = 0; k < (int)items_.size(); k++)
+                if (items_[k].current) { sel_ = k; reveal_sel_ = true; break; }
+        }
+        keep_sel_.clear();
     }
 
     // Set in the page's column like a terminal picker: all mono, a prompt
@@ -239,7 +265,10 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     const float in_h = std::round(em * 1.6f);
     const float row_h = std::round(em * 1.65f);
     const float list_top = f.top + in_h + std::round(em * 0.9f);
-    const int max_rows = std::clamp((int)((f.bottom - list_top) / row_h), 3, 16);
+    // The preview line, under a gap as wide as the one above the list.
+    const float preview_gap = opts_.preview ? std::round(em * 0.9f) : 0;
+    const float preview_h = opts_.preview ? std::round(em * 2.4f) : 0;
+    const int max_rows = std::clamp((int)((f.bottom - list_top - preview_gap - preview_h) / row_h), 3, 16);
     const int n = (int)items_.size();
     const int shown = std::max(1, std::min(n, max_rows));
     const float y0 = f.top;
@@ -248,7 +277,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     const bool invert = f.selection == Selection::Invert;
 
     ImGui::SetNextWindowPos(ImVec2(x0 - margin, y0));
-    ImGui::SetNextWindowSize(ImVec2(cw + margin * 2, list_y + shown * row_h - y0));
+    ImGui::SetNextWindowSize(ImVec2(cw + margin * 2, list_y + shown * row_h + preview_gap + preview_h - y0));
     if (open_ && focus_) ImGui::SetNextWindowFocus();
     ImGui::Begin("##palette", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
@@ -435,6 +464,17 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         }
     }
     dl->PopClipRect();
+
+    if (opts_.preview) {
+        // A hairline between the list and the preview, like a terminal
+        // picker's rule above its preview pane.
+        float py = list_bottom + preview_gap;
+        float rule = std::round(list_bottom + preview_gap * 0.5f);
+        dl->AddLine(ImVec2(x0, rule), ImVec2(x0 + cw, rule), col_alpha(T.border, vis), std::max(1.0f, std::round(f.dpi)));
+        dl->PushClipRect(ImVec2(x0, py), ImVec2(x0 + cw, py + preview_h), true);
+        opts_.preview(n > 0 ? &items_[std::clamp(sel_, 0, n - 1)] : nullptr, dl, ImVec2(x0, py), cw, preview_h, vis);
+        dl->PopClipRect();
+    }
     dl->PopClipRect();
     ImGui::End();
     return chosen;

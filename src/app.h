@@ -76,6 +76,13 @@ private:
     void goto_problem(int dir);
     void open_config();
     void add_setting();
+    void publish_problems(bool announce);
+    ImFont* load_font(const FontBytes& bytes, int index, const unsigned char* noto, std::size_t noto_size);
+    void install_fonts(FontLoader::Pair& in);
+    std::vector<PaletteItem> font_rows(bool mono);
+    bool font_picker_open() const { return font_picker_ && palette_.visible() && palette_.generation() == font_picker_gen_; }
+    void choose_font(bool mono);
+    void set_font(bool mono, const std::string& value);
     bool is_config() const { return note_ && note_->path == cfg_path_; }
     std::vector<BindingDoc> binding_docs() const;
     Command* find_command(const std::string& id);
@@ -225,8 +232,27 @@ private:
     ImFont* mono_ = nullptr;
     ImFont* sans_bold_ = nullptr;  // SemiBold weights
     ImFont* mono_bold_ = nullptr;
-    FontPick sans_pick_, mono_pick_;  // what the config asks for
-    std::string fonts_key_;           // which picks are loaded
+    FontLoader font_loader_;
+    std::optional<FontLoader::Pair> fonts_in_;  // found at start-up, to load before the first frame
+    std::string fonts_key_;                     // which faces are loaded
+    std::vector<FontBytes> font_bytes_;         // theirs, held while they're loaded
+    // What was wrong with each font setting ("font", "mono_font"), and the
+    // value it was wrong about.
+    struct FontProblem { std::string value, problem; };
+    std::map<std::string, FontProblem> font_problems_;
+    std::vector<ConfigIssue> config_issues_;    // the rest of the config's problems
+    std::vector<FontFamily> families_;          // installed, as last listed
+    int font_picker_ = 0;                       // 1 font, 2 mono font: that picker is open
+    int font_picker_gen_ = 0;                   // ...as the palette's this generation
+    // The font picker's preview: the font wanted ("s:" or "m:", for font or
+    // mono_font, then the setting's value; "" for none), asked the font
+    // worker for, and loaded (or found wrong: why). The selection must rest a
+    // moment before a font is wanted, so scrolling past doesn't load each one.
+    std::string preview_want_, preview_asked_, preview_loaded_, preview_error_;
+    ImFont* preview_font_ = nullptr;
+    FontBytes preview_bytes_;
+    std::string preview_sel_;
+    double preview_since_ = 0;
     float dpi_ = 1, zoom_ = 1;
 
     std::string space_;

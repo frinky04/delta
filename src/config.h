@@ -124,6 +124,20 @@ std::map<int, std::string> config_hints(const std::vector<std::string>& lines, c
 // yet and "[section]" must be written first (at the returned line, the end).
 int config_insert_line(const std::vector<std::string>& lines, const std::string& section, bool& header);
 
+// An edit to a config's lines: bytes col0..col1 of `line` become `text`
+// (which may run over several lines).
+struct ConfigEdit {
+    int line = 0, col0 = 0, col1 = 0;
+    std::string text;
+};
+// The edit that sets section.key to `value`: the value replaced where it's
+// set (the last time, which is the one that counts), or else the setting
+// added where config_insert_line puts it, in which case `text` ends with
+// the value.
+ConfigEdit config_set(const std::vector<std::string>& lines, const std::string& section, const std::string& key,
+                      const std::string& value);
+void apply_edit(std::vector<std::string>& lines, const ConfigEdit& e);
+
 // The file written on first launch: just the sections. Defaults and
 // descriptions are shown beside each setting by delta itself, and "add a
 // setting" inserts them, so nothing needs to live in the file.

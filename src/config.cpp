@@ -418,6 +418,66 @@ int config_insert_line(const std::vector<std::string>& lines, const std::string&
     return (int)lines.size();
 }
 
+ConfigEdit config_set(const std::vector<std::string>& lines, const std::string& section, const std::string& key,
+                      const std::string& value) {
+    // A " ;" in it would start a comment: quoted, it's kept.
+    std::string v = value;
+    if (v.find(" ;") != std::string::npos || v.find("\t;") != std::string::npos) v = "\"" + v + "\"";
+
+    ConfigEdit e;
+    const ConfigEntry* set = nullptr;
+    std::vector<ConfigEntry> entries = scan_config(lines);
+    for (auto& en : entries)
+        if (en.section == section && en.key == key) set = &en;
+    if (set) {
+        // The value as parse_config reads it: after the =, up to a " ; comment".
+        const std::string& raw = lines[set->line];
+        size_t eq = raw.find('='), vend = raw.size();
+        for (size_t i = eq + 2; i < raw.size(); i++)
+            if (raw[i] == ';' && (raw[i - 1] == ' ' || raw[i - 1] == '\t')) { vend = i; break; }
+        auto [a, b] = trim_span(raw, eq + 1, vend);
+        if (a == b) {  // no value yet: whatever's after the = becomes " value"
+            a = (int)eq + 1;
+            b = (int)vend;
+            v = " " + v + (vend < raw.size() ? " " : "");
+        }
+        e.line = set->line;
+        e.col0 = a;
+        e.col1 = b;
+        e.text = v;
+        return e;
+    }
+
+    // Written at the end of the line before, so the new text ends exactly
+    // after the value.
+    bool header = false;
+    int at = config_insert_line(lines, section, header);
+    e.text = "\n";
+    if (header) {
+        bool empty_file = lines.empty() || (lines.size() == 1 && lines[0].empty());
+        e.text = empty_file ? "" : lines.back().empty() ? "\n" : "\n\n";
+        e.text += "[" + section + "]\n";
+    }
+    e.text += key + " = " + v;
+    e.line = std::max(0, at - 1);
+    e.col0 = e.col1 = lines.empty() ? 0 : (int)lines[e.line].size();
+    return e;
+}
+
+void apply_edit(std::vector<std::string>& lines, const ConfigEdit& e) {
+    if (lines.empty()) lines.emplace_back();
+    const std::string& s = lines[e.line];
+    std::string joined = s.substr(0, e.col0) + e.text + s.substr(e.col1);
+    std::vector<std::string> parts;
+    for (size_t a = 0, b;; a = b + 1) {
+        b = joined.find('\n', a);
+        parts.push_back(joined.substr(a, b == std::string::npos ? std::string::npos : b - a));
+        if (b == std::string::npos) break;
+    }
+    lines.erase(lines.begin() + e.line);
+    lines.insert(lines.begin() + e.line, parts.begin(), parts.end());
+}
+
 std::string default_config_text() {
     return "; delta configuration: anything set here overrides the default.\n"
            "; Open it in delta (ctrl+,) to see each setting's default and what it\n"

@@ -36,8 +36,15 @@ struct FontFace {
 // semibold), upright and normal width. False if there's no such family, or
 // it isn't a local file. Windows (DirectWrite) only; elsewhere finds nothing.
 bool find_system_font(const std::string& family, int weight, FontFace& out);
-// Every installed family's name, for suggesting one.
-std::vector<std::string> system_font_families();
+// An installed family, with the faces find_system_font would find for
+// regular (400) and semibold (600). A face without a file isn't local.
+struct FontFamily {
+    std::string name;
+    bool mono = false;  // monospaced
+    FontFace regular, bold;
+};
+// Every installed family, in no particular order.
+std::vector<FontFamily> system_font_families();
 
 // The clipboard beyond text (Windows; elsewhere these find nothing).
 std::vector<fs::path> clipboard_files();      // files copied in a file manager

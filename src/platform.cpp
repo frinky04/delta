@@ -11,7 +11,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dwmapi.h>
-#include <dwrite.h>
+#include <dwrite_1.h>
 #include <shellapi.h>
 #include <wininet.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -188,20 +188,19 @@ bool system_collection(Com<IDWriteFontCollection>& out) {
 }  // namespace
 #endif
 
-bool find_system_font(const std::string& family, int weight, FontFace& out) {
 #ifdef _WIN32
-    Com<IDWriteFontCollection> fonts;
-    if (!system_collection(fonts)) return false;
-    UINT32 at = 0;
-    BOOL found = FALSE;
-    if (FAILED(fonts->FindFamilyName(widen(family).c_str(), &at, &found)) || !found) return false;
-    Com<IDWriteFontFamily> fam;
+// The family's face nearest `weight`, upright and normal width; `mono` (if
+// asked) says whether it's monospaced.
+static bool family_face(IDWriteFontFamily* fam, int weight, FontFace& out, bool* mono = nullptr) {
     Com<IDWriteFont> font;
     Com<IDWriteFontFace> face;
-    if (FAILED(fonts->GetFontFamily(at, &fam)) ||
-        FAILED(fam->GetFirstMatchingFont((DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font)) ||
+    if (FAILED(fam->GetFirstMatchingFont((DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font)) ||
         FAILED(font->CreateFontFace(&face)))
         return false;
+    if (mono) {
+        Com<IDWriteFont1> font1;  // Windows 8 and later
+        *mono = SUCCEEDED(font->QueryInterface(__uuidof(IDWriteFont1), (void**)&font1)) && font1->IsMonospacedFont();
+    }
 
     // The file behind the face, if it's a file on this machine.
     UINT32 files = 0;
@@ -225,14 +224,27 @@ bool find_system_font(const std::string& family, int weight, FontFace& out) {
     // A bold DirectWrite would fake by thickening isn't in the file.
     out.weight = (font->GetSimulations() & DWRITE_FONT_SIMULATIONS_BOLD) ? 400 : (int)font->GetWeight();
     return true;
+}
+#endif
+
+bool find_system_font(const std::string& family, int weight, FontFace& out) {
+#ifdef _WIN32
+    Com<IDWriteFontCollection> fonts;
+    Com<IDWriteFontFamily> fam;
+    UINT32 at = 0;
+    BOOL found = FALSE;
+    if (!system_collection(fonts) || FAILED(fonts->FindFamilyName(widen(family).c_str(), &at, &found)) || !found ||
+        FAILED(fonts->GetFontFamily(at, &fam)))
+        return false;
+    return family_face(fam.p, weight, out);
 #else
     (void)family; (void)weight; (void)out;
     return false;
 #endif
 }
 
-std::vector<std::string> system_font_families() {
-    std::vector<std::string> out;
+std::vector<FontFamily> system_font_families() {
+    std::vector<FontFamily> out;
 #ifdef _WIN32
     Com<IDWriteFontCollection> fonts;
     if (!system_collection(fonts)) return out;
@@ -247,7 +259,11 @@ std::vector<std::string> system_font_families() {
         std::wstring w(len + 1, L'\0');
         if (FAILED(names->GetString(at, w.data(), len + 1))) continue;
         w.resize(len);
-        out.push_back(narrow(w));
+        FontFamily f;
+        f.name = narrow(w);
+        family_face(fam.p, 400, f.regular, &f.mono);
+        family_face(fam.p, 600, f.bold);
+        out.push_back(std::move(f));
     }
 #endif
     return out;
