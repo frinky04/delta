@@ -1414,61 +1414,86 @@ static void test_morph_still_text() {
 }
 
 static void test_find_replace() {
+    // Smart case: lowercase matches any case, a capital makes it exact.
+    // Stepping visits every match in order and wraps both ways.
     Editor e = fresh("foo bar Foo\nfoo end");
     e.find_begin();
-    e.find_set("foo");  // smart case: lowercase matches any case
+    e.find_set("foo");
     CHECK_EQ(e.find_count(), 3);
-    CHECK_EQ(e.selected_text(), std::string("foo"));
-    CHECK(e.anchor().line == 0 && e.anchor().col == 0);
+    CHECK(e.anchor() == (TextPos{0, 0}) && e.cursor() == (TextPos{0, 3}));
     e.find_step(1);
-    CHECK(e.anchor().col == 8);          // "Foo"
+    CHECK(e.anchor() == (TextPos{0, 8}));
     e.find_step(1);
-    CHECK(e.anchor().line == 1);
+    CHECK(e.anchor() == (TextPos{1, 0}));
     e.find_step(1);
-    CHECK(e.anchor().line == 0 && e.anchor().col == 0);  // wraps
+    CHECK(e.anchor() == (TextPos{0, 0}));
     e.find_step(-1);
-    CHECK(e.anchor().line == 1);         // and back
-    e.find_set("Foo");                   // a capital: case-sensitive
+    CHECK(e.anchor() == (TextPos{1, 0}));
+    e.find_set("Foo");
     CHECK_EQ(e.find_count(), 1);
-    e.find_set("zzz");
-    CHECK_EQ(e.find_count(), 0);
-    CHECK(!e.has_selection());
 
-    // Replace one: moves on to the next match.
+    // Find starts at the caret, not at the top of the note; when nothing
+    // matches, the caret goes back to where find started.
+    Editor c = fresh("cat\ncat");
+    c.select_range({0, 1}, {0, 1});
+    c.find_begin();
+    c.find_set("cat");
+    CHECK(c.anchor() == (TextPos{1, 0}));
+    c.find_set("zzz");
+    CHECK_EQ(c.find_count(), 0);
+    CHECK(!c.has_selection() && c.cursor() == (TextPos{0, 1}));
+
+    // Matches don't overlap.
+    Editor o = fresh("aaaa");
+    o.find_begin();
+    o.find_set("aa");
+    CHECK_EQ(o.find_count(), 2);
+
+    // Replace one: only the current match changes; one undo takes it back.
     Editor r = fresh("a cat, a cat, a cat");
     r.find_begin();
     r.find_set("cat");
     r.replace_current("dog");
-    frame(r);
     CHECK_EQ(r.text(), std::string("a dog, a cat, a cat"));
-    CHECK_EQ(r.find_count(), 2);
-    CHECK(r.anchor().col == 9);
-    // Replace all: one undo step, each replacement pulses.
-    CHECK_EQ(r.replace_all("bird"), 2);
-    frame(r);
-    CHECK_EQ(r.text(), std::string("a dog, a bird, a bird"));
-    CHECK_EQ(r.pulse_spans(), 2);
+    CHECK_EQ(r.selected_text(), std::string("cat"));  // on to the next one
     r.undo();
-    frame(r);
-    CHECK_EQ(r.text(), std::string("a dog, a cat, a cat"));
-    // A replacement containing the query isn't matched again.
-    Editor g = fresh("x x");
-    g.find_begin();
-    g.find_set("x");
-    CHECK_EQ(g.replace_all("xx"), 2);
-    CHECK_EQ(g.text(), std::string("xx xx"));
-    g.find_end();
+    CHECK_EQ(r.text(), std::string("a cat, a cat, a cat"));
+
+    // Replace all, shrinking, growing and deleting, several matches to a
+    // line: exact text, one undo step for the lot, and redo.
+    const std::string src = "one two one\ntwo one one\nnone";
+    struct { const char* q; const char* with; int n; const char* want; } cases[] = {
+        {"one", "1", 5, "1 two 1\ntwo 1 1\nn1"},
+        {"one", "one one", 5, "one one two one one\ntwo one one one one\nnone one"},
+        {"one", "", 5, " two \ntwo  \nn"},
+        {"zzz", "x", 0, "one two one\ntwo one one\nnone"},
+    };
+    for (auto& k : cases) {
+        Editor a = fresh(src);
+        a.find_begin();
+        a.find_set(k.q);
+        CHECK_EQ(a.replace_all(k.with), k.n);
+        CHECK_EQ(a.text(), std::string(k.want));
+        if (k.n == 0) continue;
+        a.undo();
+        CHECK_EQ(a.text(), src);
+        a.redo();
+        CHECK_EQ(a.text(), std::string(k.want));
+    }
 }
 
 static void test_navigation_pass() {
-    // Headings.
-    Editor h = fresh("# One\ntext\n## Two\nmore\n# Three");
+    // Headings: lands on the heading's text; a "#" line inside a code block
+    // isn't one; past the last heading it stays put.
+    Editor h = fresh("# One\ntext\n## Two\n```\n# not a heading\n```\n# Three");
     h.goto_heading(1);
-    CHECK(h.cursor().line == 2 && h.cursor().col == 3);
+    CHECK(h.cursor() == (TextPos{2, 3}));
     h.goto_heading(1);
-    CHECK(h.cursor().line == 4);
+    CHECK(h.cursor() == (TextPos{6, 2}));
+    h.goto_heading(1);
+    CHECK(h.cursor() == (TextPos{6, 2}));
     h.goto_heading(-1);
-    CHECK(h.cursor().line == 2);
+    CHECK(h.cursor() == (TextPos{2, 3}));
 
     // Paragraphs: ctrl+down to the next one's start, ctrl+up back.
     Editor p = fresh("a1\na2\n\nb1\nb2\n\n\nc1");
@@ -1557,15 +1582,93 @@ static void test_writing_pass() {
     s.delete_lines();
     CHECK_EQ(s.text(), std::string("5. a\n    1. x\n    2. y\n6. c"));
 
-    // Numbers growing a digit keep the caret in place.
+    // A number growing a digit keeps the caret on the same character.
     std::string many;
     for (int i = 1; i <= 9; i++) many += std::to_string(i) + ". i\n";
     Editor w = fresh(many + "9. last");
     w.select_range({9, 7}, {9, 7});
     frame(w);
-    CHECK_EQ(w.lines()[9], std::string("9. last"));
-    w.duplicate_lines(-1);  // renumbers the list: the last item becomes 11
+    w.duplicate_lines(-1);  // renumbers the list: the last two become 10, 11
+    CHECK_EQ(w.lines()[9], std::string("10. last"));
     CHECK_EQ(w.lines()[10], std::string("11. last"));
+    CHECK(w.cursor() == (TextPos{9, 8}));
+}
+
+// Undo and redo: every step restores the exact text, and the history is
+// bounded without losing the newest steps.
+static void test_undo_history() {
+    // Step back through distinct edits and forward again.
+    Editor e = fresh("base");
+    std::vector<std::string> states = {e.text()};
+    e.insert_text({0, 4}, " one");
+    states.push_back(e.text());
+    e.insert_text({0, 0}, "top\n");
+    states.push_back(e.text());
+    e.select_range({1, 2}, {1, 2});
+    e.delete_lines();
+    states.push_back(e.text());
+    for (int i = (int)states.size() - 2; i >= 0; i--) {
+        e.undo();
+        CHECK_EQ(e.text(), states[i]);
+        if (i == 2) CHECK(e.cursor() == (TextPos{1, 2}));  // the caret comes back too
+    }
+    e.undo();  // nothing left: a no-op
+    CHECK_EQ(e.text(), states[0]);
+    for (size_t i = 1; i < states.size(); i++) {
+        e.redo();
+        CHECK_EQ(e.text(), states[i]);
+    }
+    e.undo();
+    e.undo();
+    // A new edit drops what could be redone.
+    e.insert_text({0, 0}, "new ");
+    std::string after = e.text();
+    e.redo();
+    CHECK_EQ(e.text(), after);
+
+    // Opening another note starts a fresh history: undo can't bring back
+    // the previous note's text.
+    Editor n = fresh("first note");
+    n.insert_text({0, 0}, "x");
+    n.set_text("second note");
+    n.undo();
+    CHECK_EQ(n.text(), std::string("second note"));
+
+    // A reload from disk is undoable.
+    Editor d = fresh("mine");
+    d.reload_text("theirs\nchanged");
+    CHECK_EQ(d.text(), std::string("theirs\nchanged"));
+    d.undo();
+    CHECK_EQ(d.text(), std::string("mine"));
+
+    // How far back undo goes, and where it lands.
+    auto depth = [](Editor& ed) {
+        int n = 0;
+        for (uint64_t v = ed.version(); ed.undo(), ed.version() != v; v = ed.version()) n++;
+        return n;
+    };
+    // Many small edits: a long history is kept, capped, and it's the oldest
+    // steps that go. Each edit adds one "x" at the start, so the length says
+    // which step undo reached.
+    const int kSmall = 700;
+    Editor s = fresh("");
+    for (int i = 0; i < kSmall; i++) s.insert_text({0, 0}, "x");
+    s.undo();
+    CHECK_EQ((int)s.text().size(), kSmall - 1);
+    int ds = 1 + depth(s);
+    CHECK(ds >= 100 && ds < kSmall);
+    CHECK_EQ((int)s.text().size(), kSmall - ds);
+
+    // A big note: fewer steps fit, but the newest are still there.
+    const int kBig = 48;
+    const std::string big((size_t)4 << 20, 'b');
+    Editor b = fresh(big);
+    for (int i = 0; i < kBig; i++) b.insert_text({0, 0}, "x");
+    b.undo();
+    CHECK_EQ(b.text().size(), big.size() + kBig - 1);
+    int db = 1 + depth(b);
+    CHECK(db >= 2 && db < kBig);
+    CHECK_EQ(b.text().size(), big.size() + kBig - db);
 }
 
 int main() {
