@@ -86,6 +86,7 @@ public:
         ImFont* mono;
         ImFont* mono_bold;   // matched characters
         float size;          // body font, ImGui units
+        float text;          // its own (mono) text, ImGui units
         float dpi;
         float col_x, col_w;  // the text column it's set in
         float top, bottom;   // first text line of the page / lowest usable y

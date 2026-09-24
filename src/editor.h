@@ -54,7 +54,10 @@ struct EditorParams {
     ImFont* mono_bold = nullptr;
     float size = 17;          // base pixel size
     float line_height = 1.6f;
-    float column = 600;       // text column width in px
+    float code_size = 0.9f;   // mono text, as a multiple of the line's size
+    float small_size = 0.8f;  // line numbers and image labels, x size
+    float ui_size = 0.9f;     // notes beside lines (problems, hints), x size
+    float column = 600;      // text column width in px
     ImVec2 min, max;          // area the editor owns
     float top_pad = 40;
     float dpi = 1;
@@ -209,7 +212,7 @@ public:
 private:
     struct Line {
         uint64_t hash = 0;
-        float wrap = -1, base = -1, lh = -1, blank = -1;
+        float wrap = -1, base = -1, lh = -1, blank = -1, code = -1;
         float hang = 0;                  // x where wrapped rows start
         float dy = 0, dh = 0;            // where it's drawn now (edit mode animates these)
         int tab = -1;

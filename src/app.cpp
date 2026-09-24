@@ -806,10 +806,10 @@ void App::choose_font(bool mono) {
         else anim::active = true;  // a frame when it has rested long enough
         if (want.empty() || preview_loaded_ != want) return;
 
-        float s = base_size(), size = mono ? std::round(s * 0.9f) : s;  // as the editor sets them
+        float s = base_size(), size = mono ? std::round(s * cfg_.code_size) : s;  // as the editor sets them
         float y = std::round(pos.y + (h - size) * 0.5f);
         if (!preview_error_.empty()) {
-            dl->AddText(mono_, std::round(s * 0.92f), ImVec2(pos.x, y), col_alpha(T.dim, alpha), preview_error_.c_str());
+            dl->AddText(mono_, std::round(s * cfg_.ui_size), ImVec2(pos.x, y), col_alpha(T.dim, alpha), preview_error_.c_str());
             return;
         }
         if (!preview_font_) return;
@@ -1815,7 +1815,7 @@ void App::draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float to
     float top = min.y + top_pad;
     int lines = std::max(1, (int)((max.y - top) / row_h));
 
-    float ms = std::round(s * 0.9f);
+    float ms = std::round(s * cfg_.ui_size);
     auto W = [&](ImFont* f, const std::string& t) { return f->CalcTextSizeA(ms, FLT_MAX, 0, t.c_str()).x; };
     int n = store_.note_count(space_);
     std::string sub = space_ + "/ is empty";
@@ -2288,7 +2288,7 @@ void App::draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) 
 
 void App::draw_status(ImVec2 min, ImVec2 max) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float s = std::round(base_size() * 0.86f);
+    float s = std::round(base_size() * cfg_.ui_size);
     float pad = std::round(16 * dpi_);
     float ty = std::round(min.y + (max.y - min.y - s) * 0.5f);
     if (bar_ != Bar::None) { draw_bar(min, max, s, pad, ty); return; }
@@ -2521,7 +2521,7 @@ void App::frame() {
     }
 
     float s = base_size();
-    float bar_h = std::round(s * 1.5f);
+    float bar_h = std::round(s * std::max(cfg_.ui_size, 0.86f) * 1.75f);  // room for its text
     ImVec2 min = vp->Pos, max(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - bar_h);
 
     // The text column, shared by the editor and the palette (which is set in it).
@@ -2546,6 +2546,9 @@ void App::frame() {
         p.mono_bold = mono_bold_ != mono_ ? mono_bold_ : nullptr;
         p.size = s;
         p.line_height = cfg_.line_height;
+        p.code_size = cfg_.code_size;
+        p.small_size = cfg_.small_size;
+        p.ui_size = cfg_.ui_size;
         p.column = column;
         p.min = min;
         p.max = max;
@@ -2625,7 +2628,7 @@ void App::frame() {
     // The palette's caret matches the page's (a block makes no sense in a
     // one-line input, so it gets the thick bar).
     float palette_caret = caret_width(caret == EditorParams::Caret::Block ? EditorParams::Caret::Thick : caret, s, dpi_);
-    Palette::Frame pf{mono_, mono_bold_, s, dpi_, col_x, column, min.y + top_pad, max.y - top_pad, now, io.DeltaTime,
+    Palette::Frame pf{mono_, mono_bold_, s, std::round(s * cfg_.ui_size), dpi_, col_x, column, min.y + top_pad, max.y - top_pad, now, io.DeltaTime,
                       cfg_.palette_selection == "invert" ? Palette::Selection::Invert : Palette::Selection::Marker,
                       palette_caret, cfg_.cursor_blink && focused_};
     // The prompt names where you are, like a minibuffer.

@@ -276,8 +276,8 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
 
     // Set in the page's column like a terminal picker: all mono, a prompt
     // that names the mode, a match count, tabular details on the right.
-    const float s = f.size, em = s / kEm;
-    const float ms = std::round(s * 0.92f);                // mono text size
+    const float s = f.size, em = std::max(s, f.text) / kEm;  // grows with text larger than the body
+    const float ms = f.text;
     ImFont* mono = f.mono;
     ImFont* mono_b = f.mono_bold ? f.mono_bold : f.mono;
     auto W = [&](ImFont* fnt, const std::string& t) { return fnt->CalcTextSizeA(ms, FLT_MAX, 0, t.c_str()).x; };
@@ -351,7 +351,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             last_buf_ = buf_;
         }
         float cx = x0 + prompt_w + mono->CalcTextSizeA(ms, FLT_MAX, 0, buf_, buf_ + cur).x;
-        float ch = std::round(s * 0.92f), w = std::round(f.caret_w);
+        float ch = ms, w = std::round(f.caret_w);
         float cy = std::round(y0 + (in_h - ch) * 0.5f);
         ImVec2 cmin(std::round(cx - std::round(w * 0.4f)), cy), cmax(cmin.x + w, cy + ch);
         if (!caret_.valid()) caret_.snap(cmin, cmax);
@@ -472,7 +472,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             const PaletteItem& it = items_[std::clamp(sel_, 0, n - 1)];
             float tx = label_x(it) - pad;
             float tw = std::min(label_width(mono, mono_b, ms, it.label, it.hl) + pad * 2, label_end(it) + em - tx);
-            float bh = std::round(s * 0.92f);
+            float bh = ms;
             float by = std::round(sel_ * row_h + (row_h - bh) * 0.5f);
             ImVec2 boff(0, list_y - scroll_ * row_h);
             bar_.set(ImVec2(tx, by), ImVec2(tx + tw, by + bh), false, 45.0f);

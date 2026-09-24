@@ -41,6 +41,8 @@ const std::vector<Setting>& all_settings() {
         {"editor", "mono_font", K::Text, "Noto Sans Mono", nullptr, 0, 0, nullptr, "for code; a name or a file"},
         {"editor", "font_size", K::Float, "14", nullptr, 8, 48, nullptr, "px"},
         {"editor", "line_height", K::Float, "1.5", nullptr, 1, 3, nullptr, "x font size"},
+        {"editor", "code_size", K::Float, "0.9", nullptr, 0.5f, 1.5f, nullptr, "x font size; code"},
+        {"editor", "small_size", K::Float, "0.8", nullptr, 0.5f, 1.5f, nullptr, "x font size; line numbers, image labels"},
         {"editor", "column_width", K::Int, "72", nullptr, 20, 400, nullptr, "characters"},
         {"editor", "line_numbers", K::Bool, "false", nullptr, 0, 0, nullptr, ""},
         {"editor", "tab_size", K::Int, "4", nullptr, 1, 8, nullptr, "spaces"},
@@ -54,6 +56,7 @@ const std::vector<Setting>& all_settings() {
 
         {"appearance", "theme", K::Choice, "dark", nullptr, 0, 0, "dark|light", "dark or light"},
         {"appearance", "animations", K::Bool, "true", nullptr, 0, 0, nullptr, ""},
+        {"appearance", "ui_size", K::Float, "0.9", nullptr, 0.5f, 1.5f, nullptr, "x font size; palette, status line, notes"},
         {"appearance", "animation_speed", K::Float, "1", nullptr, 0.1f, 10, nullptr, "2 is twice as fast"},
         {"appearance", "palette_selection", K::Choice, "marker", nullptr, 0, 0, "marker|invert", "marker or invert"},
 
@@ -316,6 +319,8 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
     c.mono_font = get("editor.mono_font");
     c.font_size = num("editor.font_size");
     c.line_height = num("editor.line_height");
+    c.code_size = num("editor.code_size");
+    c.small_size = num("editor.small_size");
     c.column_width = (int)num("editor.column_width");
     c.line_numbers = flag("editor.line_numbers");
     c.tab_size = (int)num("editor.tab_size");
@@ -328,6 +333,7 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
     c.scroll_past_end = flag("editor.scroll_past_end");
     c.theme = get("appearance.theme");
     c.animations = flag("appearance.animations");
+    c.ui_size = num("appearance.ui_size");
     c.animation_speed = num("appearance.animation_speed");
     c.palette_selection = get("appearance.palette_selection");
     c.spell = flag("spell.enabled");

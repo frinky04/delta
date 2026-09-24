@@ -1163,7 +1163,7 @@ double Editor::next_blink(double now) const {
 Editor::Metrics Editor::metrics(float size) const {
     Metrics m;
     m.size = size;
-    m.msize = std::round(size * 0.9f);
+    m.msize = std::round(size * P_.code_size);
     m.sans = P_.sans->GetFontBaked(size);
     m.mono = P_.mono->GetFontBaked(m.msize);
     m.sans_b = P_.sans_bold ? P_.sans_bold->GetFontBaked(size) : nullptr;
@@ -1215,7 +1215,7 @@ void Editor::layout(int mode) {
         Line& L = V[i];
         const std::string& s = lines_[i];
         if ((!same_text && L.hash != fnv(s)) || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
-            L.lh != P_.line_height || L.tab != P_.tab_size || L.blank != P_.blank_line) {
+            L.lh != P_.line_height || L.tab != P_.tab_size || L.blank != P_.blank_line || L.code != P_.code_size) {
             L.hash = fnv(s);
             L.in_code = in_code;
             L.wrap = P_.column;
@@ -1223,6 +1223,7 @@ void Editor::layout(int mode) {
             L.lh = P_.line_height;
             L.tab = P_.tab_size;
             L.blank = P_.blank_line;
+            L.code = P_.code_size;
             if (syntax_ == Syntax::Ini) ini_analyze(s, L.info, L.style);
             else md_analyze(s, in_code, L.info, L.style);
             float scale = L.info.kind == LineKind::Heading ? md_heading_scale(L.info.level) : 1.0f;
@@ -3676,7 +3677,7 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
 
         // Line numbers belong to the editor.
         if (p.line_numbers && x0 - p.min.x > p.size * 4 && syntax_a > 0) {
-            float ns = std::round(p.size * 0.8f);
+            float ns = std::round(p.size * p.small_size);
             char buf[16];
             snprintf(buf, sizeof buf, "%d", i + 1);
             ImVec2 sz = p.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
@@ -3732,7 +3733,7 @@ void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float a
             anim::active = true;  // waiting for it, or fading it in
             std::string label = P_.images && !tex ? P_.images->label(t.src) : std::string();
             if (!label.empty()) {
-                float ls = std::round(P_.size * 0.86f);
+                float ls = std::round(P_.size * P_.small_size);
                 ImVec2 sz = P_.mono->CalcTextSizeA(ls, FLT_MAX, 0, label.c_str());
                 if (sz.x < t.w && ls < t.h)
                     dl->AddText(P_.mono, ls, ImVec2(std::round((a.x + b.x - sz.x) * 0.5f), std::round((a.y + b.y - ls) * 0.5f)),
@@ -3787,7 +3788,7 @@ void Editor::draw_image(ImDrawList* dl, const Line& L, float x, float y, float a
     if (resize_line_ == index) {
         const Line::Tile& t = L.tiles[0];
         std::string label = !resize_snap_.empty() ? resize_snap_ : std::to_string((int)std::lround(t.w / P_.px)) + "px";
-        float ls = std::round(P_.size * 0.8f);
+        float ls = std::round(P_.size * P_.small_size);
         ImVec2 sz = P_.mono->CalcTextSizeA(ls, FLT_MAX, 0, label.c_str());
         float lx = std::round(hb.x + 8 * P_.dpi), ly = std::round((ha.y + hb.y - ls) * 0.5f);
         if (lx + sz.x > P_.max.x - 4 * P_.dpi) lx = std::round(ha.x - 8 * P_.dpi - sz.x);
@@ -3861,7 +3862,7 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
 
     // Line number in the left margin, only where there's room.
     if (i >= 0 && mode == 0 && P_.line_numbers && x0 - P_.min.x > P_.size * 4) {
-        float ns = std::round(P_.size * 0.8f);
+        float ns = std::round(P_.size * P_.small_size);
         char buf[16];
         snprintf(buf, sizeof buf, "%d", i + 1);
         ImVec2 sz = P_.mono->CalcTextSizeA(ns, FLT_MAX, 0, buf);
@@ -3903,7 +3904,7 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         }
 
         int rows = (int)L.rows.size();
-        float ms = std::round(P_.size * 0.86f);
+        float ms = std::round(P_.size * P_.ui_size);
         float clip_x = P_.max.x - P_.size;
         auto note_x = [&](int r) {
             int ra = L.rows[r], rb = r + 1 < rows ? L.rows[r + 1] : (int)s.size();

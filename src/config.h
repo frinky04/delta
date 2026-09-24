@@ -21,6 +21,8 @@ struct Config {
     std::string mono_font = "Noto Sans Mono";  // the same, for code
     float font_size = 14.0f;     // px, as in CSS (the em size)
     float line_height = 1.5f;    // multiple of font_size, as in CSS
+    float code_size = 0.9f;      // multiple of font_size: code in notes
+    float small_size = 0.8f;     // multiple of font_size: line numbers, image labels
     int column_width = 72;       // measured in "ch" (width of the digit 0)
     bool line_numbers = false;
     int tab_size = 4;
@@ -35,6 +37,7 @@ struct Config {
     // [appearance]
     std::string theme = "dark";
     bool animations = true;
+    float ui_size = 0.9f;        // multiple of font_size: palette, status line, inline notes
     std::string palette_selection = "marker";  // marker (a > in the margin) or invert (a solid bar)
     float animation_speed = 1.0f;
 
