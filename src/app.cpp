@@ -1757,7 +1757,12 @@ void App::poll_files(double now) {
 }
 
 void App::toggle_fullscreen() {
+    // Borderless: an undecorated window covering the monitor. A monitor-owned
+    // window would be topmost and minimize whenever it loses focus.
     if (!fullscreen_) {
+        // Restore first, so the size we come back to is the unmaximized one.
+        was_maximized_ = glfwGetWindowAttrib(win_, GLFW_MAXIMIZED);
+        if (was_maximized_) glfwRestoreWindow(win_);
         glfwGetWindowPos(win_, &win_x_, &win_y_);
         glfwGetWindowSize(win_, &win_w_, &win_h_);
         GLFWmonitor* mon = glfwGetPrimaryMonitor();
@@ -1771,11 +1776,19 @@ void App::toggle_fullscreen() {
             const GLFWvidmode* vm = glfwGetVideoMode(mons[i]);
             if (cx >= mx && cx < mx + vm->width && cy >= my && cy < my + vm->height) mon = mons[i];
         }
+        int mx, my;
+        glfwGetMonitorPos(mon, &mx, &my);
         const GLFWvidmode* vm = glfwGetVideoMode(mon);
-        glfwSetWindowMonitor(win_, mon, 0, 0, vm->width, vm->height, vm->refreshRate);
+        glfwSetWindowAttrib(win_, GLFW_DECORATED, GLFW_FALSE);
+        // One row past the bottom edge: a GL window that exactly matches the
+        // monitor gets switched to the driver's fullscreen path, which blanks
+        // the screen while the display resyncs.
+        glfwSetWindowMonitor(win_, nullptr, mx, my, vm->width, vm->height + 1, 0);
         fullscreen_ = true;
     } else {
+        glfwSetWindowAttrib(win_, GLFW_DECORATED, GLFW_TRUE);
         glfwSetWindowMonitor(win_, nullptr, win_x_, win_y_, win_w_, win_h_, 0);
+        if (was_maximized_) glfwMaximizeWindow(win_);
         fullscreen_ = false;
     }
 }

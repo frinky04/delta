@@ -305,6 +305,7 @@ private:
     double fade_start_ = -100;
 
     bool fullscreen_ = false;
+    bool was_maximized_ = false;
     int win_x_ = 0, win_y_ = 0, win_w_ = 0, win_h_ = 0;
     bool quit_ = false;
 
