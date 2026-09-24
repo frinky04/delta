@@ -688,7 +688,13 @@ static void test_config_schema() {
     fs::remove_all(kvp.parent_path());
 }
 
+#include "problems.h"
+#include "spell.h"
+#include "speller.h"
 #include "store.h"
+
+#include <chrono>
+#include <thread>
 
 // Notes are the user's documents: every store operation must keep their
 // bytes intact and refuse anything that would overwrite or orphan one.
@@ -1835,6 +1841,208 @@ static void test_undo_history() {
     CHECK_EQ(b.text().size(), big.size() + kBig - db);
 }
 
+static void test_link_problems() {
+    std::string space, name;
+    CHECK(Store::split_target(" work / Plan #goals ", space, name));
+    CHECK_EQ(space, std::string("work"));
+    CHECK_EQ(name, std::string("Plan"));
+    CHECK(!Store::split_target("#only a heading", space, name));
+
+    // The index comes from the disk: spaces and their notes, as written.
+    fs::path root = fs::temp_directory_path() / "delta_test_links";
+    fs::remove_all(root);
+    Store st;
+    st.set_root(root);
+    NoteRef made;
+    st.create_note("work", "Plan", "", made);
+    st.create_note("home", "Groceries", "", made);
+    NoteIndex ix = st.index();
+    CHECK(ix.has("", "plan") && ix.has("WORK", "Plan") && !ix.has("home", "Plan"));
+    CHECK(ix == st.index());
+    st.create_note("home", "Garden", "", made);
+    CHECK(!(ix == st.index()));  // a new note is noticed
+    fs::remove_all(root);
+
+    auto probs = link_problems({
+        "[[Plan]] and [[work/plan|the plan]] are fine",
+        "[[Plam]] is a typo, [[nothing like it]] isn't",
+        "`[[in code]]` and [[#heading only]]",
+        "```",
+        "[[fenced]]",
+        "```",
+        "[[hme/Groceries]] [[work/Groceries]]",
+    }, ix);
+    CHECK_EQ(probs.size(), (size_t)4);
+    if (probs.size() == 4) {
+        CHECK(probs[0].line == 1 && probs[0].col0 == 2 && probs[0].col1 == 6);  // just the target
+        CHECK_EQ(probs[0].msg, std::string("no note with this name yet; did you mean Plan?"));
+        CHECK_EQ(probs[1].msg, std::string("no note with this name yet"));
+        CHECK_EQ(probs[2].line, 6);
+        CHECK_EQ(probs[2].msg, std::string("no space with this name yet; did you mean home?"));
+        CHECK_EQ(probs[3].msg, std::string("no note with this name yet"));  // it's in home, not work
+    }
+
+    // Several marks on a line, errors and spelling, draw without trouble and
+    // clear away.
+    Editor e = fresh("one two three");
+    e.set_diagnostics({{0, 0, 3, "first"}, {0, 4, 7, "second"}, {0, 8, 13, "", Diagnostic::Kind::Spelling}});
+    frame(e);
+    e.set_diagnostics({});
+    for (int i = 0; i < 60; i++) frame(e);
+}
+
+// The words spellcheck would look at in a line, joined with |.
+static std::string spelled(const std::string& line) {
+    std::string out;
+    for (auto& w : spell_words(line)) out += (out.empty() ? "" : "|") + spell_form(line, w);
+    return out;
+}
+
+static void test_spell_words() {
+    auto words = spell_words("hi there");
+    CHECK(words.size() == 2 && words[1].begin == 3 && words[1].end == 8);
+
+    // Prose, in all its shapes.
+    CHECK_EQ(spelled("The quick brown fox."), std::string("The|quick|brown|fox"));
+    CHECK_EQ(spelled("don't, don\xE2\x80\x99t and 'quoted' words"), std::string("don't|don't|and|quoted|words"));
+    CHECK_EQ(spelled("well-known em\xE2\x80\x94" "dash"), std::string("well|known|em|dash"));
+    CHECK_EQ(spelled("caf\xC3\xA9 na\xC3\xAFve \xF0\x9F\x8E\x89party"), std::string("caf\xC3\xA9|na\xC3\xAFve|party"));
+    CHECK_EQ(spelled("# Heading here"), std::string("Heading|here"));
+    CHECK_EQ(spelled("- [ ] buy milk"), std::string("buy|milk"));
+    CHECK_EQ(spelled("1. first item"), std::string("first|item"));
+    CHECK_EQ(spelled("> quoted text"), std::string("quoted|text"));
+    CHECK_EQ(spelled("**bold** and *italic* ==marked=="), std::string("bold|and|italic|marked"));
+
+    // Not prose: code, links' targets, addresses, names.
+    CHECK_EQ(spelled("`code here` then text"), std::string("then|text"));
+    CHECK_EQ(spelled("[link text](http://x.com/page) and https://example.com/foo bar"), std::string("link|text|and|bar"));
+    CHECK_EQ(spelled("[[Some Note]] and [[target|shown words]]"), std::string("and|shown|words"));
+    CHECK_EQ(spelled("mail me@example.com or @alice about #tag"), std::string("mail|or|about"));
+    CHECK_EQ(spelled("see C:\\dir\\file or src/main.cpp and file.txt, e.g. this"), std::string("see|or|and|this"));
+    CHECK_EQ(spelled("snake_case camelCase iPhone NASA HTML5 3rd mp3 x I"), std::string());
+    CHECK_EQ(spelled("<span class=\"x\">inside</span> after"), std::string("inside|after"));
+    CHECK_EQ(spelled("![alt text](img.png)"), std::string());
+    CHECK_EQ(spelled("---"), std::string());
+
+    // Whole lines skipped: front matter and fenced code.
+    auto skipped = [](std::vector<std::string> lines) {
+        std::string out;
+        for (bool b : spell_skipped(lines)) out += b ? '1' : '0';
+        return out;
+    };
+    CHECK_EQ(skipped({"---", "title: x", "---", "prose", "```", "code", "```", "after"}), std::string("11101110"));
+    CHECK_EQ(skipped({"---", "prose"}), std::string("00"));  // unclosed: just a rule
+    CHECK_EQ(skipped({"prose", "---", "more", "---"}), std::string("0000"));  // not at the top
+}
+
+static bool wait_ready(Speller& sp) {
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!sp.ready() && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    return sp.ready();
+}
+
+static void test_speller() {
+    Speller sp;
+    CHECK(!sp.ready() && !sp.loading());
+    sp.load({"en_US", "xx_XX"}, {}, {});
+    CHECK(sp.missing() == std::vector<std::string>{"xx_XX"});
+    CHECK(wait_ready(sp));
+    CHECK(sp.correct("hello") && sp.correct("Hello") && sp.correct("don't") && sp.correct("color"));
+    CHECK(!sp.correct("helo") && !sp.correct("colour"));
+
+    // Marks for a note: prose only, by line and byte range.
+    std::vector<Diagnostic> d;
+    CHECK(sp.check({"Teh cat sat.", "```", "teh code", "```", "Fine words here", "and teh"}, d, 1.0));
+    CHECK_EQ(d.size(), (size_t)2);
+    if (d.size() == 2) {
+        CHECK(d[0].line == 0 && d[0].col0 == 0 && d[0].col1 == 3 && d[0].kind == Diagnostic::Kind::Spelling);
+        CHECK(d[1].line == 5 && d[1].col0 == 4 && d[1].col1 == 7);
+    }
+    // Out of time, it still gets through a new line each call, and says
+    // when it's done.
+    std::vector<std::string> fresh_lines = {"alpha wrongg", "beta wrongg", "gamma wrongg"};
+    int calls = 1;
+    while (!sp.check(fresh_lines, d, 0.0) && calls < 10) calls++;
+    CHECK_EQ(calls, 3);
+    CHECK_EQ(d.size(), (size_t)3);
+
+    // Suggestions, best first.
+    auto sug = sp.suggest("recieve");
+    CHECK(!sug.empty() && sug[0] == "receive");
+
+    // British, and both at once.
+    sp.load({"en_GB"}, {}, {});
+    CHECK(wait_ready(sp));
+    CHECK(sp.correct("colour") && sp.correct("organise") && !sp.correct("color"));
+    sp.load({"en_US", "en_GB"}, {}, {});
+    CHECK(wait_ready(sp));
+    CHECK(sp.correct("colour") && sp.correct("color") && !sp.correct("helo"));
+
+    // Your own words: given at load, or added later; capitalised at the
+    // start of a sentence too. Answers change, and the generation says so.
+    sp.load({"en_US"}, {}, {"deltanote"});
+    CHECK(wait_ready(sp));
+    CHECK(sp.correct("deltanote") && sp.correct("Deltanote") && !sp.correct("frobnicat"));
+    uint64_t gen = sp.generation();
+    CHECK(sp.check({"a frobnicat here"}, d, 1.0) && d.size() == 1);
+    sp.add_word("frobnicat");
+    CHECK(sp.generation() != gen);
+    CHECK(sp.check({"a frobnicat here"}, d, 1.0) && d.empty());
+
+    // Off: nothing is checked.
+    sp.unload();
+    CHECK(!sp.ready() && !sp.loading());
+
+    // Dictionaries of your own, found by name in a folder. An ISO8859-1 one
+    // is read as UTF-8 (flags past ASCII included); other encodings are
+    // refused, saying why.
+    fs::path dir = fs::temp_directory_path() / "delta_test_dicts";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    atomic_write(dir / "xx_Latin.aff", "SET ISO8859-1\nPFX \xC5 Y 1\nPFX \xC5 0 re .\n", nullptr);
+    atomic_write(dir / "xx_Latin.dic", "2\ncaf\xE9/\xC5\nword\n", nullptr);
+    atomic_write(dir / "xx_Koi.aff", "SET KOI8-R\n", nullptr);
+    atomic_write(dir / "xx_Koi.dic", "1\nword\n", nullptr);
+    atomic_write(dir / "lonely.aff", "SET UTF-8\n", nullptr);  // no .dic: not a dictionary
+    auto avail = Speller::available(dir);
+    CHECK(avail == (std::vector<std::string>{"en_US", "en_GB", "xx_Koi", "xx_Latin"}));
+    sp.load({"XX_latin", "xx_Koi"}, dir, {});
+    CHECK(wait_ready(sp));
+    CHECK(sp.correct("caf\xC3\xA9") && sp.correct("recaf\xC3\xA9") && sp.correct("word") && !sp.correct("wurd"));
+    CHECK(sp.errors().size() == 1 && sp.errors()[0].find("KOI8-R") != std::string::npos);
+    fs::remove_all(dir);
+}
+
+static void test_spell_config() {
+    Config c;
+    std::vector<ConfigIssue> is;
+    parse_config("[spell]\nenabled = no\nlanguages = en_GB, de_DE\nspace.Recipes = de_DE\nspace. = en_US\nlanguage = en_US\n", c, is);
+    CHECK(!c.spell);
+    CHECK_EQ(c.spell_languages, std::string("en_GB, de_DE"));
+    CHECK(split_list(c.spell_languages) == (std::vector<std::string>{"en_GB", "de_DE"}));
+    CHECK(c.spell_spaces.size() == 1 && c.spell_spaces["recipes"] == "de_DE");
+    CHECK_EQ(is.size(), (size_t)2);
+    if (is.size() == 2) {
+        CHECK(is[0].line == 4 && is[0].msg == "name a space after space.");
+        CHECK(is[1].line == 5 && is[1].msg == "unknown setting; did you mean languages?");
+    }
+    Config d;
+    parse_config("", d, is);
+    CHECK(d.spell && d.spell_languages == "en_US" && d.spell_spaces.empty());
+
+    auto hints = config_hints({"[spell]", "space.recipes = de_DE", "languages = en_US"}, "dark", {});
+    CHECK_EQ(hints[1], std::string("dictionaries for this space"));
+    CHECK_EQ(hints[2], std::string("dictionaries, comma-separated (default)"));
+
+    // One undoable swap, as a fix makes.
+    Editor e = fresh("I recieve it");
+    e.replace_range({0, 2}, {0, 9}, "receive");
+    CHECK_EQ(e.text(), std::string("I receive it"));
+    CHECK(e.cursor() == (TextPos{0, 9}) && !e.has_selection());
+    e.undo();
+    CHECK_EQ(e.text(), std::string("I recieve it"));
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -1871,6 +2079,10 @@ int main() {
     test_navigation_pass();
     test_writing_pass();
     test_undo_history();
+    test_link_problems();
+    test_spell_words();
+    test_speller();
+    test_spell_config();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
