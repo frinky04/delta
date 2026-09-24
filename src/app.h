@@ -162,9 +162,14 @@ private:
     int shown_hold_ = -2;                     // the line held back then
     TextPos shown_held_{-2, 0};               // and the word
     // The status line's echo (see update_echo): what it says, and what's
-    // showing (kept while it fades out).
+    // showing (kept while it fades out). A part can be clicked to act.
     enum class Tone : uint8_t { Plain, Strong, Quiet };  // message, the words that matter, asides
-    std::vector<std::pair<std::string, Tone>> echo_, echo_shown_;
+    struct Echo {
+        std::string text;
+        Tone tone = Tone::Plain;
+        enum class Act : uint8_t { None, QuickFix, FixSpelling } act = Act::None;
+    };
+    std::vector<Echo> echo_, echo_shown_;
     float echo_a_ = 0;
     NoteIndex note_index_;                    // where [[links]] can lead
     double next_problem_check_ = 0;           // a held-back problem shows then

@@ -362,17 +362,20 @@ void App::update_echo() {
         // keeping the word) is an aside.
         const std::string& s = editor_.lines()[d->line];
         const auto& sug = speller_.suggest(spell_form(s, {d->col0, d->col1}));
+        using Act = Echo::Act;
         if (sug.empty()) {
             echo_.push_back({"no suggestions", Tone::Plain});
         } else {
-            echo_.push_back({sug[0], Tone::Strong});
-            echo_.push_back({"?", Tone::Plain});
+            echo_.push_back({sug[0], Tone::Strong, Act::QuickFix});
+            echo_.push_back({"?", Tone::Plain, Act::QuickFix});
         }
         // The keys: "alt+. fix · ctrl+. more" (either may be unbound).
-        std::string keys;
-        if (std::string k = chord_for("edit.quick_fix"); !k.empty() && !sug.empty()) keys = k + " fix";
-        if (std::string k = chord_for("edit.fix_spelling"); !k.empty()) keys += (keys.empty() ? "" : " \xC2\xB7 ") + k + (keys.empty() ? "" : " more");
-        if (!keys.empty()) echo_.push_back({"   " + keys, Tone::Quiet});
+        std::string quick = sug.empty() ? "" : chord_for("edit.quick_fix");
+        std::string more = chord_for("edit.fix_spelling");
+        if (!quick.empty() || !more.empty()) echo_.push_back({"   ", Tone::Quiet});
+        if (!quick.empty()) echo_.push_back({quick + " fix", Tone::Quiet, Act::QuickFix});
+        if (!quick.empty() && !more.empty()) echo_.push_back({" \xC2\xB7 ", Tone::Quiet});
+        if (!more.empty()) echo_.push_back({quick.empty() ? more : more + " more", Tone::Quiet, Act::FixSpelling});
     } else if (!is_config() && c.line != shown_hold_) {
         // The config's problems say it at the ends of their lines, which are
         // short and right beside them.
@@ -1621,30 +1624,51 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
         return;
     }
 
+    // What the keys (and clicks) do.
+    int n = (int)fix_.sugg.size();
+    auto fix_with = [&](const std::string& v) {
+        TextPos after{fix_.line, fix_.col1};
+        if (!v.empty() && v != fix_.word) {
+            editor_.replace_range({fix_.line, fix_.col0}, {fix_.line, fix_.col1}, v);
+            // Where the pass began moves with the text before it.
+            int delta = (int)v.size() - (int)fix_.word.size();
+            if (fix_.line == fix_origin_.line && fix_.col0 < fix_origin_.col) fix_origin_.col += delta;
+            after.col = fix_.col0 + (int)v.size();
+        }
+        fix_next(after);
+    };
+    auto skip = [&] { fix_next({fix_.line, fix_.col1}); };
+    auto add = [&] {
+        add_to_dictionary(spell_form(lines[fix_.line], {fix_.col0, fix_.col1}));
+        fix_next({fix_.line, fix_.col1});
+    };
+    auto guess = [&](int dir) {
+        fix_.pick = (fix_.pick + (dir > 0 ? 1 : n - 1)) % n;
+        fix_field(fix_.sugg[fix_.pick]);
+    };
+
     // No key repeat: holding enter mustn't race through fixes.
     bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
     if (enter) {
-        TextPos after{fix_.line, fix_.col1};
-        if (io.KeyCtrl) {
-            add_to_dictionary(spell_form(lines[fix_.line], {fix_.col0, fix_.col1}));
-        } else if (!io.KeyShift) {
-            std::string v = trim(bar_buf_);
-            if (!v.empty() && v != fix_.word) {
-                editor_.replace_range({fix_.line, fix_.col0}, {fix_.line, fix_.col1}, v);
-                // Where the pass began moves with the text before it.
-                int delta = (int)v.size() - (int)fix_.word.size();
-                if (fix_.line == fix_origin_.line && fix_.col0 < fix_origin_.col) fix_origin_.col += delta;
-                after.col = fix_.col0 + (int)v.size();
-            }
-        }
-        fix_next(after);
+        if (io.KeyCtrl) add();
+        else if (io.KeyShift) skip();
+        else fix_with(trim(bar_buf_));
         return;
     }
-    int n = (int)fix_.sugg.size();
-    if (n && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
-        fix_.pick = (fix_.pick + (io.KeyShift ? n - 1 : 1)) % n;
-        fix_field(fix_.sugg[fix_.pick]);
-    }
+    if (n && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) guess(io.KeyShift ? -1 : 1);
+
+    // Anything that names an action can be clicked: it lights up under the
+    // pointer, and the click runs once the bar is drawn.
+    std::function<void()> clicked;
+    auto hot = [&](float x0, float x1) {
+        ImVec2 m = io.MousePos;
+        bool over = m.x >= x0 && m.x < x1 && m.y >= min.y && m.y < max.y;
+        if (over) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return 2;
+        }
+        return over ? 1 : 0;
+    };
 
     // Left: the field, wide enough for the longest suggestion.
     float widest = W(fix_.word);
@@ -1657,29 +1681,50 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     float rx = max.x - pad;
     std::string v = trim(bar_buf_);
     std::string count = !n ? "no suggestions" : v == fix_.sugg[fix_.pick] ? std::to_string(fix_.pick + 1) + "/" + std::to_string(n) : "your own";
-    std::string keys = "tab next \xC2\xB7 shift+enter skip \xC2\xB7 ctrl+enter add";
-    if (!n) keys = "shift+enter skip \xC2\xB7 ctrl+enter add";
-    if (rx - W(keys) - s * 1.6f - W(count) > x + s * 8) {
-        rx -= W(keys);
-        dl->AddText(mono_, s, ImVec2(rx, ty), col_mix(T.faint, T.dim, 0.6f), keys.c_str());
-        rx -= s * 1.6f;
+    const char* sep = " \xC2\xB7 ";  // " · "
+    std::vector<std::pair<std::string, std::function<void()>>> keys;
+    if (n) keys.push_back({"tab next", [&] { guess(1); }});
+    keys.push_back({"shift+enter skip", skip});
+    keys.push_back({"ctrl+enter add", add});
+    float keys_w = 0;
+    for (auto& [label, act] : keys) keys_w += W(label) + (keys_w > 0 ? W(sep) : 0);
+    if (rx - keys_w - s * 1.6f - W(count) > x + s * 8) {
+        float kx = rx - keys_w;
+        ImU32 quiet = col_mix(T.faint, T.dim, 0.6f);
+        for (size_t i = 0; i < keys.size(); i++) {
+            if (i) {
+                dl->AddText(mono_, s, ImVec2(kx, ty), quiet, sep);
+                kx += W(sep);
+            }
+            int h = hot(kx, kx + W(keys[i].first));
+            if (h == 2) clicked = keys[i].second;
+            dl->AddText(mono_, s, ImVec2(kx, ty), h ? T.text : quiet, keys[i].first.c_str());
+            kx += W(keys[i].first);
+        }
+        rx -= keys_w + s * 1.6f;
     }
     rx -= W(count);
     dl->AddText(mono_, s, ImVec2(rx, ty), T.dim, count.c_str());
     rx -= s * 1.6f;
 
-    // Middle: all the suggestions, the one in the field brighter.
+    // Middle: all the suggestions, the one in the field brighter. A click
+    // fixes the word with it, as enter would.
     dl->PushClipRect(ImVec2(x, min.y), ImVec2(std::max(x, rx), max.y), true);
     for (int i = 0; i < n; i++) {
         if (i) {
-            dl->AddText(mono_, s, ImVec2(x, ty), T.faint, " \xC2\xB7 ");
-            x += W(" \xC2\xB7 ");
+            dl->AddText(mono_, s, ImVec2(x, ty), T.faint, sep);
+            x += W(sep);
         }
-        bool in_field = i == fix_.pick && v == fix_.sugg[i];
-        dl->AddText(mono_, s, ImVec2(x, ty), in_field ? T.text : T.dim, fix_.sugg[i].c_str());
-        x += W(fix_.sugg[i]);
+        const std::string& g = fix_.sugg[i];
+        int h = x < rx ? hot(x, std::min(x + W(g), rx)) : 0;
+        if (h == 2) clicked = [&fix_with, g] { fix_with(g); };
+        bool in_field = i == fix_.pick && v == g;
+        dl->AddText(mono_, s, ImVec2(x, ty), h ? T.bright : in_field ? T.text : T.dim, g.c_str());
+        x += W(g);
     }
     dl->PopClipRect();
+
+    if (clicked) clicked();
 }
 
 // Go to line: "42", "42:10" (line and column) or "+5" / "-5" from where you
@@ -1906,15 +1951,28 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
     if (status_.empty() && echo_a_ > 0.0f && !echo_shown_.empty()) {
         // Centred in the room between the note's name and the counts.
         float w = 0;
-        for (auto& [text, tone] : echo_shown_) w += W(text);
+        for (auto& e : echo_shown_) w += W(e.text);
         float ex = std::max(left_end, std::round((left_end + rx - w) * 0.5f));
+        // The fix and the keys can be clicked: they light up under the pointer.
+        ImVec2 mouse = ImGui::GetIO().MousePos;
+        bool can_click = !echo_.empty() && !palette_.visible() && !viewer_.open;
+        Echo::Act act = Echo::Act::None;
         dl->PushClipRect(ImVec2(left_end, min.y), ImVec2(rx, max.y), true);
-        for (auto& [text, tone] : echo_shown_) {
-            ImU32 col = tone == Tone::Strong ? T.text : tone == Tone::Quiet ? col_mix(T.faint, T.dim, 0.6f) : T.dim;
-            dl->AddText(mono_, s, ImVec2(ex, ty), col_alpha(col, echo_a_), text.c_str());
-            ex += W(text);
+        for (auto& e : echo_shown_) {
+            float x1 = std::min(ex + W(e.text), rx);
+            bool over = can_click && e.act != Echo::Act::None && mouse.x >= ex && mouse.x < x1 && mouse.y >= min.y && mouse.y < max.y;
+            if (over) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) act = e.act;
+            }
+            ImU32 col = e.tone == Tone::Strong ? T.text : e.tone == Tone::Quiet ? col_mix(T.faint, T.dim, 0.6f) : T.dim;
+            if (over) col = e.tone == Tone::Strong ? T.bright : T.text;
+            dl->AddText(mono_, s, ImVec2(ex, ty), col_alpha(col, echo_a_), e.text.c_str());
+            ex += W(e.text);
         }
         dl->PopClipRect();
+        if (act == Echo::Act::QuickFix) quick_fix();
+        if (act == Echo::Act::FixSpelling) fix_spelling();
     }
 }
 
@@ -1972,11 +2030,13 @@ void App::frame() {
                 break;
             }
             // "mouse:<x>:<y>" moves the pointer (window pixels); "down" and
-            // "up" press and let go of the left button.
-            if (id.rfind("mouse:", 0) == 0 || id == "down" || id == "up") {
+            // "up" press and let go of the left button, "rdown" and "rup"
+            // the right.
+            if (id.rfind("mouse:", 0) == 0 || id == "down" || id == "up" || id == "rdown" || id == "rup") {
                 ImGuiIO& mio = ImGui::GetIO();
                 float mx = 0, my = 0;
                 if (id[0] == 'm' && std::sscanf(id.c_str() + 6, "%f:%f", &mx, &my) == 2) mio.AddMousePosEvent(mx, my);
+                else if (id[0] == 'r') mio.AddMouseButtonEvent(ImGuiMouseButton_Right, id == "rdown");
                 else if (id[0] != 'm') mio.AddMouseButtonEvent(ImGuiMouseButton_Left, id == "down");
                 run_after_ = now + 0.05;
                 pending_run_.assign(run.begin() + k + 1, run.end());
@@ -2085,6 +2145,17 @@ void App::frame() {
         if (p.mouse && !editor_.over_image_handle() && editor_.image_at(io.MousePos, img_line, img_tile) &&
             (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || (editor_.reader() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))
             open_viewer(img_line, img_tile);
+        // Right-click a misspelt word to fix it: the status-line fix tool,
+        // on that word (where other apps put their suggestions menu).
+        if (p.mouse && editing() && !is_config() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            TextPos at = editor_.position_at(io.MousePos);
+            for (auto& d : spelling_)
+                if (d.line == at.line && d.col0 <= at.col && at.col <= d.col1) {
+                    editor_.jump_to({d.line, d.col0});
+                    fix_spelling();
+                    break;
+                }
+        }
     } else {
         draw_empty(min, max, col_x, column, top_pad, page);
     }
