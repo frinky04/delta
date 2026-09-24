@@ -28,7 +28,26 @@ target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USE_WCHAR32)
 target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 
-# --- embedded fonts ----------------------------------------------------------
+# --- hunspell (vendored, see third_party/hunspell/DELTA.md) -------------------
+set(HUNSPELL_DIR ${CMAKE_SOURCE_DIR}/third_party/hunspell/src)
+add_library(hunspell STATIC
+  ${HUNSPELL_DIR}/affentry.cxx
+  ${HUNSPELL_DIR}/affixmgr.cxx
+  ${HUNSPELL_DIR}/csutil.cxx
+  ${HUNSPELL_DIR}/filemgr.cxx
+  ${HUNSPELL_DIR}/hashmgr.cxx
+  ${HUNSPELL_DIR}/hunspell.cxx
+  ${HUNSPELL_DIR}/hunzip.cxx
+  ${HUNSPELL_DIR}/phonet.cxx
+  ${HUNSPELL_DIR}/replist.cxx
+  ${HUNSPELL_DIR}/suggestmgr.cxx)
+target_include_directories(hunspell PUBLIC ${HUNSPELL_DIR})
+target_compile_definitions(hunspell PUBLIC HUNSPELL_STATIC)
+if(NOT MSVC)
+  target_compile_options(hunspell PRIVATE -w)  # not our code to tidy
+endif()
+
+# --- embedded fonts and dictionaries -----------------------------------------
 function(embed_file src name out_var)
   set(out ${CMAKE_BINARY_DIR}/generated/${name}.cpp)
   add_custom_command(
@@ -42,6 +61,10 @@ embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-Regular.ttf g_font_sans FONT_SANS
 embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-Medium.ttf g_font_mono FONT_MONO_CPP)
 embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-SemiBold.ttf g_font_sans_bold FONT_SANS_BOLD_CPP)
 embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-SemiBold.ttf g_font_mono_bold FONT_MONO_BOLD_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.aff g_dict_en_us_aff DICT_EN_US_AFF_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.dic g_dict_en_us_dic DICT_EN_US_DIC_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.aff g_dict_en_gb_aff DICT_EN_GB_AFF_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.dic g_dict_en_gb_dic DICT_EN_GB_DIC_CPP)
 
 # --- app ---------------------------------------------------------------------
 add_library(delta_core STATIC
@@ -60,11 +83,15 @@ add_library(delta_core STATIC
   ${FONT_SANS_CPP}
   ${FONT_MONO_CPP}
   ${FONT_SANS_BOLD_CPP}
-  ${FONT_MONO_BOLD_CPP})
+  ${FONT_MONO_BOLD_CPP}
+  ${DICT_EN_US_AFF_CPP}
+  ${DICT_EN_US_DIC_CPP}
+  ${DICT_EN_GB_AFF_CPP}
+  ${DICT_EN_GB_DIC_CPP})
 target_include_directories(delta_core PUBLIC src)
 target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/deps)
 find_package(Threads REQUIRED)
-target_link_libraries(delta_core PUBLIC imgui Threads::Threads)
+target_link_libraries(delta_core PUBLIC imgui hunspell Threads::Threads)
 if(WIN32)
   target_link_libraries(delta_core PUBLIC dwmapi shell32 wininet)
 endif()
