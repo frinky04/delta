@@ -8,15 +8,14 @@ static void mark(std::vector<Style>& st, size_t a, size_t b, Style f) {
     for (size_t i = a; i < b && i < st.size(); i++) st[i] |= f;
 }
 
-static bool is_hex_colour(const std::string& v) {
+bool is_hex_colour(const std::string& v) {
     if (v.size() != 7 || v[0] != '#') return false;
     for (size_t i = 1; i < 7; i++)
         if (!std::isxdigit((unsigned char)v[i])) return false;
     return true;
 }
 
-// Start of a " ; comment" tail, or npos.
-static size_t inline_comment(const std::string& s, size_t from) {
+size_t ini_comment(const std::string& s, size_t from) {
     for (size_t i = from; i < s.size(); i++)
         if (s[i] == ';' && i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t')) return i;
     return std::string::npos;
@@ -41,7 +40,7 @@ void ini_analyze(const std::string& s, LineInfo& info, std::vector<Style>& st) {
         if (close == std::string::npos) { mark(st, i + 1, n, I_Section); return; }
         mark(st, i + 1, close, I_Section);
         mark(st, close, close + 1, I_Bracket);
-        size_t c = inline_comment(s, close);
+        size_t c = ini_comment(s, close);
         if (c != std::string::npos) mark(st, c, n, I_Comment);
         return;
     }
@@ -49,7 +48,7 @@ void ini_analyze(const std::string& s, LineInfo& info, std::vector<Style>& st) {
     if (eq == std::string::npos) { mark(st, i, n, I_Key); return; }
     mark(st, i, eq, I_Key);
     mark(st, eq, eq + 1, I_Eq);
-    size_t c = inline_comment(s, eq + 1);
+    size_t c = ini_comment(s, eq + 1);
     size_t vend = c == std::string::npos ? n : c;
     if (c != std::string::npos) mark(st, c, n, I_Comment);
     size_t va = eq + 1;

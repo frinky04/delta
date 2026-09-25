@@ -7,6 +7,7 @@
 #include <sstream>
 #include <tuple>
 
+#include "ini_syntax.h"
 #include "theme.h"
 #include "util.h"
 
@@ -132,12 +133,9 @@ static bool parse_bool_value(const std::string& v, bool& out) {
     return false;
 }
 
-static bool is_hex_colour(const std::string& v) {
-    if (v.size() != 7 || v[0] != '#') return false;
-    return std::all_of(v.begin() + 1, v.end(), [](char c) { return std::isxdigit((unsigned char)c); });
-}
-
-bool same_value(const Setting& s, const std::string& value, const std::string& def) {
+// Does `value` say the same as `def` for this kind of setting (1 == 1.0,
+// yes == true, BLOCK == block)?
+static bool same_value(const Setting& s, const std::string& value, const std::string& def) {
     switch (s.kind) {
         case K::Bool: {
             bool a, b;
@@ -214,12 +212,20 @@ static std::string check(const Setting& s, const std::string& v, std::string& us
     return {};
 }
 
-// Strips " ; comment" tails. A '#' is left alone so colours like #e0851e work.
-static std::string strip_inline_comment(const std::string& v) {
-    for (size_t i = 1; i < v.size(); i++)
-        if (v[i] == ';' && (v[i - 1] == ' ' || v[i - 1] == '\t')) return trim(v.substr(0, i));
-    return trim(v);
+// Where the value after the = at `eq` ends: at a " ; comment", or the line's end.
+static size_t value_end(const std::string& s, size_t eq) {
+    size_t c = ini_comment(s, eq + 1);
+    return c == std::string::npos ? s.size() : c;
 }
+
+// A value written in quotes, without them.
+static std::string unquote(std::string v) {
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+    return v;
+}
+
+// The name in a "[name]" line (already trimmed), lower-cased.
+static std::string section_of(const std::string& line) { return lower(trim(line.substr(1, line.size() - 2))); }
 
 ConfigIssue issue_at(const Config& c, const std::string& section_key, bool value, std::string msg) {
     auto it = c.where.find(section_key);
@@ -261,7 +267,7 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
         auto issue = [&](std::string msg, std::pair<int, int> span) { issues.push_back({lineno, std::move(msg), span.first, span.second}); };
         if (line.front() == '[') {
             if (line.back() != ']') { issue("missing ] after the section name", {l0, l1}); continue; }
-            section = lower(trim(line.substr(1, line.size() - 2)));
+            section = section_of(line);
             if (std::find(sections.begin(), sections.end(), section) == sections.end()) {
                 std::string near = suggest(section, sections);
                 issue(near.empty() ? "unknown section; use general, editor, appearance, spell, colors or keys"
@@ -272,10 +278,7 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
         }
         size_t eq = raw.find('=');
         if (eq == std::string::npos) { issue("expected key = value", {l0, l1}); continue; }
-        // The value ends at a " ; comment", as strip_inline_comment reads it.
-        size_t vend = raw.size();
-        for (size_t i = eq + 2; i < raw.size(); i++)
-            if (raw[i] == ';' && (raw[i - 1] == ' ' || raw[i - 1] == '\t')) { vend = i; break; }
+        size_t vend = value_end(raw, eq);
         Config::Where w;
         w.line = lineno;
         std::tie(w.key0, w.key1) = trim_span(raw, 0, eq);
@@ -283,9 +286,8 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
         std::pair<int, int> key_span{w.key0, w.key1}, val_span{w.val0, w.val1};
         if (w.val1 <= w.val0) val_span = key_span;
 
-        std::string key = lower(trim(line.substr(0, line.find('='))));
-        std::string val = strip_inline_comment(line.substr(line.find('=') + 1));
-        if (val.size() >= 2 && val.front() == '"' && val.back() == '"') val = val.substr(1, val.size() - 2);
+        std::string key = lower(trim(raw.substr(0, eq)));
+        std::string val = unquote(trim(raw.substr(eq + 1, vend - eq - 1)));
         if (section.empty()) { issue("setting outside any [section]", key_span); continue; }
         c.where[section + "." + key] = w;
         if (section == "keys") { c.keys[key] = val; continue; }  // checked against the commands
@@ -368,12 +370,12 @@ std::vector<ConfigEntry> scan_config(const std::vector<std::string>& lines) {
         std::string line = trim(lines[i]);
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
         if (line.front() == '[') {
-            if (line.back() == ']') section = lower(trim(line.substr(1, line.size() - 2)));
+            if (line.back() == ']') section = section_of(line);
             continue;
         }
         size_t eq = line.find('=');
         if (eq == std::string::npos || section.empty()) continue;
-        out.push_back({i, section, lower(trim(line.substr(0, eq))), strip_inline_comment(line.substr(eq + 1))});
+        out.push_back({i, section, lower(trim(line.substr(0, eq))), trim(line.substr(eq + 1, value_end(line, eq) - eq - 1))});
     }
     return out;
 }
@@ -412,10 +414,8 @@ std::map<int, std::string> config_hints(const std::vector<std::string>& lines, c
         }
         const Setting* s = find_setting(e.section, e.key);
         if (!s) continue;  // the problem shows instead
-        std::string v = e.value;
-        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
         std::string def = s->default_for(theme);
-        hints[e.line] = hint(s->desc, same_value(*s, v, def), def);
+        hints[e.line] = hint(s->desc, same_value(*s, unquote(e.value), def), def);
     }
     return hints;
 }
@@ -427,7 +427,7 @@ int config_insert_line(const std::vector<std::string>& lines, const std::string&
     for (int i = 0; i < (int)lines.size(); i++) {
         std::string line = trim(lines[i]);
         if (!line.empty() && line.front() == '[' && line.back() == ']') {
-            cur = lower(trim(line.substr(1, line.size() - 2)));
+            cur = section_of(line);
             if (cur == section && at < 0) at = i + 1;
             continue;
         }
@@ -454,9 +454,7 @@ ConfigEdit config_set(const std::vector<std::string>& lines, const std::string& 
     if (set) {
         // The value as parse_config reads it: after the =, up to a " ; comment".
         const std::string& raw = lines[set->line];
-        size_t eq = raw.find('='), vend = raw.size();
-        for (size_t i = eq + 2; i < raw.size(); i++)
-            if (raw[i] == ';' && (raw[i - 1] == ' ' || raw[i - 1] == '\t')) { vend = i; break; }
+        size_t eq = raw.find('='), vend = value_end(raw, eq);
         auto [a, b] = trim_span(raw, eq + 1, vend);
         if (a == b) {  // no value yet: whatever's after the = becomes " value"
             a = (int)eq + 1;

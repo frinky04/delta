@@ -56,10 +56,6 @@ struct Config {
     // and the value), so later checks (key chords, folders) can point at it.
     struct Where { int line = -1, key0 = 0, key1 = 0, val0 = 0, val1 = 0; };
     std::map<std::string, Where> where;
-    int line_of(const std::string& section_key) const {
-        auto it = where.find(section_key);
-        return it == where.end() ? -1 : it->second.line;
-    }
 };
 
 // A problem in the file. line is 0-based, or -1 when it isn't tied to a
@@ -96,10 +92,6 @@ std::vector<std::string> split_list(const std::string& v);
 
 // The closest known name to a mistyped one, or "" if nothing is close.
 std::string suggest(const std::string& typo, const std::vector<std::string>& names);
-
-// Does `value` say the same as `def` for this kind of setting (1 == 1.0,
-// yes == true, BLOCK == block)?
-bool same_value(const Setting& s, const std::string& value, const std::string& def);
 
 // Returns false only if the file couldn't be read. Value problems land in
 // `issues` but still produce a usable config.

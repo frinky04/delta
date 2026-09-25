@@ -37,7 +37,6 @@ public:
     void forget(const fs::path& note);    // deleted
 
     int size() const { return (int)places_.size(); }
-    int pos() const { return pos_; }
 
 private:
     std::vector<Place> places_;

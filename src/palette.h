@@ -118,6 +118,7 @@ public:
 private:
     enum class Kind { Query, Pick, Prompt };
     void set_text(const std::string& t);
+    void set_query(const std::string& t);  // a query's text, mode prefix included
     void commit(int row);  // close after a pick: the chosen row lingers a beat
     static int input_callback(ImGuiInputTextCallbackData* d);
 

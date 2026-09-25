@@ -81,11 +81,8 @@ bool match_command(const std::string& query, const std::string& title, const std
         for (size_t i = 0; i < t.size(); i++) {
             bool word_start = i == 0 || !std::isalnum((unsigned char)t[i - 1]);
             if (!word_start || t.compare(i, w.size(), w) != 0) continue;
-            int s = 300 - (int)std::min<size_t>(i, 40);
-            if (s > best) {
-                best = s, best_pos.clear(), best_via.clear();
-                for (size_t k = 0; k < w.size(); k++) best_pos.push_back((int)(i + k));
-            }
+            best = 300 - (int)std::min<size_t>(i, 40);
+            for (size_t k = 0; k < w.size(); k++) best_pos.push_back((int)(i + k));
             break;
         }
         if (!best) {

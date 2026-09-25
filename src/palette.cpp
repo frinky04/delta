@@ -47,13 +47,19 @@ void Palette::set_text(const std::string& t) {
     std::snprintf(buf_, sizeof buf_, "%s", t.c_str());
     pending_text_ = t;
     apply_text_ = true;
-    built_for_ = "\x01";
+    rebuild();
+}
+
+void Palette::set_query(const std::string& t) {
+    // A mode prefix becomes the prompt instead of sitting in the text box.
+    mode_ = !t.empty() && std::strchr(kModes, t[0]) ? t[0] : 0;
+    set_text(mode_ ? t.substr(1) : t);
 }
 
 void Palette::set_wide(bool w) {
     if (w == wide_) return;
     wide_ = w;
-    built_for_ = "\x01";
+    rebuild();
 }
 
 void Palette::open(const std::string& text, bool wide) {
@@ -79,10 +85,8 @@ void Palette::open(const std::string& text, bool wide) {
     focus_ = true;
     close_t_ = 1.0f;
     title_.clear();
-    // A mode prefix becomes the prompt instead of sitting in the text box.
-    mode_ = !text.empty() && std::strchr(kModes, text[0]) ? text[0] : 0;
     wide_ = wide;
-    set_text(mode_ ? text.substr(1) : text);
+    set_query(text);
 }
 
 void Palette::pick(const std::string& prompt, std::vector<PaletteItem> items, PickOptions opts) {
@@ -113,7 +117,7 @@ void Palette::update_items(std::vector<PaletteItem> items) {
     if (!open_ || kind_ != Kind::Pick) return;
     if (sel_ >= 0 && sel_ < (int)items_.size()) keep_sel_ = items_[sel_].label;
     fixed_ = std::move(items);
-    built_for_ = "\x01";  // filtered again next frame
+    rebuild();  // filtered again next frame
 }
 
 void Palette::close() {
@@ -141,17 +145,24 @@ int Palette::input_callback(ImGuiInputTextCallbackData* d) {
     return 0;
 }
 
-// Matched characters are drawn in the bold weight and their own colour; the
-// first `dim` bytes (a note's space, say) in `dim_col` where they aren't.
-static void draw_label(ImDrawList* dl, ImFont* font, ImFont* bold, float size, ImVec2 pos, const std::string& s,
-                       const std::vector<int>& hl, ImU32 col, ImU32 hl_col, int dim = 0, ImU32 dim_col = 0) {
-    std::vector<char> mask(s.size(), 0);  // 0 plain, 1 matched, 2 dim
+// Each byte of a label: 0 plain, 1 matched, 2 in the first `dim` bytes and
+// not matched.
+static std::vector<char> label_mask(const std::string& s, const std::vector<int>& hl, int dim) {
+    std::vector<char> mask(s.size(), 0);
     for (int k = 0; k < std::min(dim, (int)s.size()); k++) mask[k] = 2;
     for (int h : hl) {
         if (h < 0 || h >= (int)s.size()) continue;
         int e = utf8::next(s, h);
         for (int k = h; k < e; k++) mask[k] = 1;
     }
+    return mask;
+}
+
+// Matched characters are drawn in the bold weight and their own colour; the
+// first `dim` bytes (a note's space, say) in `dim_col` where they aren't.
+static void draw_label(ImDrawList* dl, ImFont* font, ImFont* bold, float size, ImVec2 pos, const std::string& s,
+                       const std::vector<int>& hl, ImU32 col, ImU32 hl_col, int dim = 0, ImU32 dim_col = 0) {
+    std::vector<char> mask = label_mask(s, hl, dim);
     float x = pos.x;
     for (size_t i = 0; i < s.size();) {
         size_t j = i;
@@ -166,12 +177,7 @@ static void draw_label(ImDrawList* dl, ImFont* font, ImFont* bold, float size, I
 
 // Width of a label as draw_label() sets it (matched characters are bold).
 static float label_width(ImFont* font, ImFont* bold, float size, const std::string& s, const std::vector<int>& hl) {
-    std::vector<char> mask(s.size(), 0);
-    for (int h : hl) {
-        if (h < 0 || h >= (int)s.size()) continue;
-        int e = utf8::next(s, h);
-        for (int k = h; k < e; k++) mask[k] = 1;
-    }
+    std::vector<char> mask = label_mask(s, hl, 0);
     float w = 0;
     for (size_t i = 0; i < s.size();) {
         size_t j = i;
@@ -220,7 +226,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     // Backspace on an empty query leaves the mode, like a minibuffer.
     if (open_ && kind_ == Kind::Query && mode_ && buf_[0] == 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
         mode_ = 0;
-        built_for_ = "\x01";
+        rebuild();
     }
     // Rebuild the list whenever the text changes.
     if (open_ && built_for_ != text()) {
@@ -237,7 +243,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
             for (auto& it : fixed_) {
                 PaletteItem c = it;
                 c.hl.clear();
-                if (fuzzy_match(q, c.label, c.score, &c.hl)) items_.push_back(c);
+                if (fuzzy_match(q, c.label, c.score, &c.hl)) items_.push_back(std::move(c));
             }
             if (!q.empty())
                 std::stable_sort(items_.begin(), items_.end(), [](auto& a, auto& b) { return a.score > b.score; });
@@ -256,7 +262,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
                 auto submit = submit_;
                 it.action = [submit, v] { submit(v); };
             }
-            items_.push_back(it);
+            items_.push_back(std::move(it));
         }
         sel_ = 0;
         // The row you were on, if the list changed under you; else where you are.
@@ -376,9 +382,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     // Taking a row: its action, or (for a row that fills the query) its text.
     auto take = [&](int k) {
         if (!items_[k].fill.empty()) {
-            const std::string& t = items_[k].fill;
-            mode_ = !t.empty() && std::strchr(kModes, t[0]) ? t[0] : 0;
-            set_text(mode_ ? t.substr(1) : t);
+            set_query(items_[k].fill);
             return;
         }
         chosen = items_[k].action;

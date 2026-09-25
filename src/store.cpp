@@ -16,6 +16,21 @@ static bool is_note_file(const fs::directory_entry& e) {
     return lower(path_u8(e.path().extension())) == ".md";
 }
 
+static NoteRef note_at(const fs::directory_entry& e, const std::string& space) {
+    NoteRef n;
+    n.space = space;
+    n.name = path_u8(e.path().stem());
+    n.path = e.path();
+    std::error_code ec;
+    auto t = e.last_write_time(ec);
+    if (!ec) n.mtime = to_time_t(t);
+    return n;
+}
+
+static void newest_first(std::vector<NoteRef>& notes) {
+    std::sort(notes.begin(), notes.end(), [](const NoteRef& a, const NoteRef& b) { return a.mtime > b.mtime; });
+}
+
 std::string Store::check_name(const std::string& raw, const char* what) {
     std::string name = trim(raw);
     if (name.empty()) return std::string("type a ") + what + " name";
@@ -45,18 +60,9 @@ std::vector<std::string> Store::spaces() const {
 std::vector<NoteRef> Store::notes(const std::string& space) const {
     std::vector<NoteRef> out;
     std::error_code ec;
-    for (auto& e : fs::directory_iterator(root_ / u8path(space), ec)) {
-        if (!is_note_file(e)) continue;
-        NoteRef n;
-        n.space = space;
-        n.name = path_u8(e.path().stem());
-        n.path = e.path();
-        std::error_code ec2;
-        auto t = e.last_write_time(ec2);
-        if (!ec2) n.mtime = to_time_t(t);
-        out.push_back(std::move(n));
-    }
-    std::sort(out.begin(), out.end(), [](const NoteRef& a, const NoteRef& b) { return a.mtime > b.mtime; });
+    for (auto& e : fs::directory_iterator(root_ / u8path(space), ec))
+        if (is_note_file(e)) out.push_back(note_at(e, space));
+    newest_first(out);
     return out;
 }
 
@@ -66,7 +72,7 @@ std::vector<NoteRef> Store::all_notes() const {
         auto n = notes(s);
         out.insert(out.end(), n.begin(), n.end());
     }
-    std::sort(out.begin(), out.end(), [](const NoteRef& a, const NoteRef& b) { return a.mtime > b.mtime; });
+    newest_first(out);
     return out;
 }
 
@@ -217,19 +223,10 @@ std::vector<NoteRef> Store::trashed() const {
         std::error_code ec2;
         if (!d.is_directory(ec2)) continue;
         std::string space = path_u8(d.path().filename());
-        for (auto& e : fs::directory_iterator(d.path(), ec2)) {
-            if (!is_note_file(e)) continue;
-            NoteRef n;
-            n.space = space;
-            n.name = path_u8(e.path().stem());
-            n.path = e.path();
-            std::error_code ec3;
-            auto t = e.last_write_time(ec3);
-            if (!ec3) n.mtime = to_time_t(t);
-            out.push_back(std::move(n));
-        }
+        for (auto& e : fs::directory_iterator(d.path(), ec2))
+            if (is_note_file(e)) out.push_back(note_at(e, space));
     }
-    std::sort(out.begin(), out.end(), [](const NoteRef& a, const NoteRef& b) { return a.mtime > b.mtime; });
+    newest_first(out);
     return out;
 }
 

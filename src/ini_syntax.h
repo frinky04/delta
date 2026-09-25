@@ -24,3 +24,8 @@ void ini_analyze(const std::string& s, LineInfo& info, std::vector<Style>& style
 
 // "[name]" lines, for the @ palette.
 bool ini_section(const std::string& s, std::string& name);
+
+// Where a " ; comment" tail starts at or after `from`, or npos. A '#' is
+// left alone so colours like #e0851e work.
+size_t ini_comment(const std::string& s, size_t from);
+bool is_hex_colour(const std::string& v);  // #rrggbb
