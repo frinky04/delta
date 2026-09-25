@@ -29,6 +29,11 @@ Text delta puts on screen is lowercase fragments, like editor chrome: `open a no
 
 `README.md` is embedded at build time as the in-app manual ("open manual"), so it's for users only, and in markdown delta renders: no tables, no `#anchor` links.
 
+## Code
+
+- Big classes are split by feature: `App` across `app.cpp` and `app_*.cpp`, `Editor` across `editor.cpp` and `editor_*.cpp`. Each file's head comment says what it holds, and `app.h`/`editor.h` group declarations under the file that defines them. New feature code goes in its feature's file, or a new one.
+- Logic that doesn't need the window lives in `delta_core` modules, where tests reach it; `App` wires it up.
+
 ## Build and check
 
 ```
