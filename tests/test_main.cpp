@@ -2334,10 +2334,19 @@ static void test_ui_voice() {
         if (*s.desc && !in_voice(s.desc)) { CHECK(!"setting description in voice"); std::printf("   %s.%s: %s\n", s.section, s.key, s.desc); }
 
     const std::regex title(R"re(\badd\("[a-z_.]+", "([^"]*)")re");
-    const std::regex said(R"re(\b(?:status|prompt|pick)\((.*))re");
+    const std::regex said(R"re(\b(?:status|prompt|pick|confirm)\((.*))re");
     const std::regex literal(R"re("((?:[^"\\]|\\.)*)")re");
     int titles = 0;
-    for (auto* file : {"app.cpp", "app_images.cpp"}) {
+    // App's source is split by feature: app.cpp, app_images.cpp and the rest.
+    std::vector<std::string> files;
+    for (auto& e : fs::directory_iterator(DELTA_SRC_DIR)) {
+        std::string name = path_u8(e.path().filename());
+        if (name.rfind("app", 0) == 0 && e.path().extension() == ".cpp") files.push_back(name);
+    }
+    std::sort(files.begin(), files.end());
+    CHECK(files.size() >= 2);
+    for (auto& name : files) {
+        const char* file = name.c_str();
         std::string src = read_src(file);
         CHECK(!src.empty());
         std::istringstream lines(src);

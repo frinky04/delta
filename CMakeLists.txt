@@ -114,7 +114,8 @@ if(MSVC)
   target_compile_options(delta_core PUBLIC /utf-8)
 endif()
 
-add_executable(delta WIN32 src/main.cpp src/app.cpp src/app_images.cpp src/image_cache.cpp)
+add_executable(delta WIN32 src/main.cpp src/app.cpp src/app_bars.cpp src/app_images.cpp src/app_script.cpp
+                            src/app_settings.cpp src/app_spell.cpp src/app_tags.cpp src/image_cache.cpp)
 target_include_directories(delta PRIVATE third_party/glfw/deps)
 target_link_libraries(delta PRIVATE delta_core)
 if(WIN32)

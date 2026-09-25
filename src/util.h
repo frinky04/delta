@@ -183,3 +183,9 @@ inline std::string plain_msg(std::string_view s) {
         t[0] = (char)std::tolower((unsigned char)t[0]);
     return t;
 }
+
+// A name in curly quotes, for messages.
+inline std::string quote(const std::string& s) { return "\xE2\x80\x9C" + s + "\xE2\x80\x9D"; }
+
+// "1 note", "3 notes".
+inline std::string count_of(int n, const std::string& thing) { return std::to_string(n) + " " + thing + (n == 1 ? "" : "s"); }

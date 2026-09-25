@@ -71,41 +71,9 @@ private:
         std::vector<Chord> chords;
     };
 
-    // setup
+    // Setup, commands and where their keys work (app.cpp).
     void register_commands();
-    void load_settings();
     void apply_bindings();
-    void check_settings(const Config& c, std::vector<ConfigIssue>& issues) const;
-    void set_problems(std::vector<ConfigIssue> issues);
-    void refresh_problems();
-    void apply_spelling(bool force = false);
-    void check_spelling();
-    TextPos spell_held();
-    void show_problems(double now);
-    void update_echo();
-    const Diagnostic* misspelt_at_caret() const;
-    void goto_misspelling(int dir);
-    void fix_spelling();
-    void quick_fix();
-    void quick_apply();
-    void fix_load(const Diagnostic& d);
-    void fix_field(const std::string& text);
-    void fix_next(TextPos from);
-    void add_to_dictionary(const std::string& word);
-    void goto_problem(int dir);
-    void open_config();
-    void add_setting();
-    void publish_problems(bool announce);
-    ImFont* load_font(const FontBytes& bytes, int index, const unsigned char* noto, std::size_t noto_size);
-    void install_fonts(FontLoader::Pair& in);
-    std::vector<PaletteItem> font_rows(bool mono);
-    bool font_picker_open() const { return font_picker_ && palette_.visible() && palette_.generation() == font_picker_gen_; }
-    void choose_font(bool mono);
-    void set_font(bool mono, const std::string& value);
-    void set_setting(const std::string& section, const std::string& key, const std::string& value);
-    bool theme_picker_open() const { return palette_.is_open() && palette_.generation() == theme_picker_gen_; }
-    void choose_theme();
-    void show_theme(const std::string& name);
     bool is_config() const { return note_ && note_->path == cfg_path_; }
     // The README, built in and read only: always in reader mode, never saved.
     // Its path is one no file can have.
@@ -121,7 +89,46 @@ private:
     // mode it works in; "" when it has no key.
     std::string key_hint(const std::string& id, const std::string& what) const;
 
-    // notes
+    // Settings: the config and its problems, fonts and themes, a setting
+    // written back (app_settings.cpp, with apply_fonts above).
+    void load_settings();
+    void check_settings(const Config& c, std::vector<ConfigIssue>& issues) const;
+    void set_problems(std::vector<ConfigIssue> issues);
+    void publish_problems(bool announce);
+    void open_config();
+    void add_setting();
+    ImFont* load_font(const FontBytes& bytes, int index, const unsigned char* noto, std::size_t noto_size);
+    void install_fonts(FontLoader::Pair& in);
+    std::vector<PaletteItem> font_rows(bool mono);
+    bool font_picker_open() const { return font_picker_ && palette_.visible() && palette_.generation() == font_picker_gen_; }
+    void choose_font(bool mono);
+    void set_font(bool mono, const std::string& value);
+    void set_setting(const std::string& section, const std::string& key, const std::string& value);
+    bool theme_picker_open() const { return palette_.is_open() && palette_.generation() == theme_picker_gen_; }
+    void choose_theme();
+    void show_theme(const std::string& name);
+
+    // Marks in the note: spelling and problems, the echo, fixing a word
+    // (app_spell.cpp, with the fix bar).
+    void refresh_problems();
+    void apply_spelling(bool force = false);
+    void check_spelling();
+    TextPos spell_held();
+    void show_problems(double now);
+    void update_echo();
+    const Diagnostic* misspelt_at_caret() const;
+    void goto_misspelling(int dir);
+    void goto_problem(int dir);
+    void fix_spelling();
+    void quick_fix();
+    void quick_apply();
+    void fix_load(const Diagnostic& d);
+    void fix_field(const std::string& text);
+    void fix_next(TextPos from);
+    void add_to_dictionary(const std::string& word);
+    void draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+
+    // Notes (app.cpp).
     void open_note(const NoteRef& n, bool push_history = true);
     void close_note();
     // Writes the note. While it's in conflict with disk, only `over_disk`
@@ -137,20 +144,10 @@ private:
     void open_link(const LinkSpan& link);
     void open_by_name(std::string target);
     void rename_note();
-    // Tags: the index kept fresh (at most every couple of seconds, unless
-    // `now`), completing them and [[links]] as you write, the palette's #
-    // mode, and renaming one in every note.
-    void refresh_tags(bool now);
-    void tags_now();  // fresh now, the open note as it is in the editor
-    std::vector<CompletionItem> complete_tags(const std::string& word);
-    std::vector<CompletionItem> complete_links(const std::string& word);
-    void build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total);
-    bool tag_at_caret(std::string* name = nullptr) const;
-    void pick_tag_rename();  // the tag at the caret, else one picked
-    void open_tag_rename(const std::string& tag);
-    void confirm_tag_rename(const std::string& from, const std::string& to);
-    void apply_tag_rename(const std::string& from, const std::string& to);
     void move_note();
+    // The open note, renamed or moved from `old_path`, is `n` now: its view
+    // is forgotten, and history and recent follow it.
+    void note_relocated(const std::string& old_path, const NoteRef& n);
     void delete_note();
     void new_space();
     void rename_space();
@@ -163,7 +160,21 @@ private:
     struct Jump;
     void set_title();
 
-    // images
+    // Tags: the index kept fresh (at most every couple of seconds, unless
+    // `now`), completing them and [[links]] as you write, the palette's #
+    // mode, and renaming one in every note (app_tags.cpp).
+    void refresh_tags(bool now);
+    void tags_now();  // fresh now, the open note as it is in the editor
+    std::vector<CompletionItem> complete_tags(const std::string& word);
+    std::vector<CompletionItem> complete_links(const std::string& word);
+    void build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total);
+    bool tag_at_caret(std::string* name = nullptr) const;
+    void pick_tag_rename();  // the tag at the caret, else one picked
+    void open_tag_rename(const std::string& tag);
+    void confirm_tag_rename(const std::string& from, const std::string& to);
+    void apply_tag_rename(const std::string& from, const std::string& to);
+
+    // Images (app_images.cpp).
     void paste(bool plain);
     void copy_out(bool cut);
     std::string import_image(const std::string& bytes, std::string& err);  // -> the line for it, "" if not
@@ -175,16 +186,29 @@ private:
     void open_viewer(int line, int tile);
     void draw_viewer();
 
-    // ui
+    // The palette, the page and the status line (app.cpp).
     void dispatch_keys(bool& fired);
     void build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total);
     const std::vector<std::string>& note_lines(const NoteRef& n);
     void open_palette(const std::string& prefix, bool wide = false);
+    // Asks in the palette before `action`: `yes_label` (`yes_meta` beside
+    // it) goes ahead, "keep it" doesn't.
+    void confirm(const std::string& prompt, const std::string& yes_label, const std::string& yes_meta,
+                 std::function<void()> action);
     void draw_status(ImVec2 min, ImVec2 max);
     void draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float top_pad, float page);
+    void status(const std::string& msg, bool error = false);
+    void poll_files(double now);
+    float base_size() const;
+    bool editing() const { return note_.has_value() && !editor_.reader(); }
+    void toggle_fullscreen();
+
+    // The --run script, a step at a time as frames go by (app_script.cpp).
+    void run_pending(double now);
+
     // The status line as a minibuffer: tools that act on the note in view
     // happen down there, so the note stays in sight. (Choosing from a list,
-    // headings included, stays in the palette.)
+    // headings included, stays in the palette.) See app_bars.cpp.
     enum class Bar { None, Find, Line, Prompt, Fix };
     void open_bar(Bar kind);
     void close_bar();                   // keeps where the tool left you
@@ -192,11 +216,11 @@ private:
     void draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     bool bar_input(const char* id, char* buf, size_t size, int which, float x, float y, float w);
     static int bar_input_callback(ImGuiInputTextCallbackData* d);
+    static bool enter_pressed(bool repeat = true);
     void open_find(bool replace);
     void draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void open_line(const std::string& text = "");
     void draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
-    void draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     // A prompt: one field seeded with a name, checked as you type, and enter
     // to act on it (rename note, rename tag).
     struct BarPrompt {
@@ -208,11 +232,6 @@ private:
     } prompt_;
     void open_prompt(BarPrompt p, const std::string& initial);
     void draw_prompt_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
-    void status(const std::string& msg, bool error = false);
-    void poll_files(double now);
-    float base_size() const;
-    bool editing() const { return note_.has_value() && !editor_.reader(); }
-    void toggle_fullscreen();
 
     GLFWwindow* win_ = nullptr;
     Config cfg_;
@@ -222,7 +241,9 @@ private:
     // The config's problems: from the file, or checked live from the text
     // while it's open in delta.
     std::vector<ConfigIssue> config_problems_;
-    // The open document's problems, in line order (see refresh_problems).
+
+    // Marks in the note: problems and spelling (app_spell.cpp). The open
+    // document's problems, in line order (see refresh_problems).
     std::vector<Diagnostic> problems_;
     Speller speller_;
     fs::path dict_dir_, words_path_;          // <config dir>/dictionaries, <config dir>/words.txt
@@ -249,11 +270,14 @@ private:
     };
     std::vector<Echo> echo_, echo_shown_;
     float echo_a_ = 0;
+    double next_problem_check_ = 0;           // a held-back problem shows then
+
+    // Tags (app_tags.cpp), and where [[links]] can lead.
     NoteIndex note_index_;                    // where [[links]] can lead
     TagIndex tags_;                           // which notes have which #tags
     double tags_time_ = -100;                 // when it was last brought up to date
     int tags_gen_ = -1;                       // ...for the palette as it opened this time
-    double next_problem_check_ = 0;           // a held-back problem shows then
+
     uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
     bool reader_pref_ = false;                // reader mode to restore after the config or manual
     bool sort_recent_ = false;                // the note list by recent, not by name (kept in state)
@@ -263,6 +287,7 @@ private:
     ImageCache images_;       // what the editor draws images with
     ImageStore image_store_;  // where they're kept: <notes>/.delta/images
 
+    // Images (app_images.cpp).
     struct Drop { std::vector<std::string> paths; ImVec2 at; };
     std::vector<Drop> drops_;
 
@@ -294,11 +319,14 @@ private:
         ImVec2 press_at;
         int opened_frame = -1;       // the key or click that opened it isn't also a close
     } viewer_;
+
+    // Commands (app.cpp) and the --run script (app_script.cpp).
     std::vector<Command> cmds_;
     std::vector<std::string> pending_run_;
     double run_after_ = 0;             // --run steps wait until this time
     ImGuiKey release_key_ = ImGuiKey_None;  // scripted key press to release next frame
 
+    // Fonts and themes (app_settings.cpp).
     ImFont* sans_ = nullptr;
     ImFont* mono_ = nullptr;
     ImFont* sans_bold_ = nullptr;  // SemiBold weights
@@ -369,7 +397,7 @@ private:
     int win_x_ = 0, win_y_ = 0, win_w_ = 0, win_h_ = 0;
     bool quit_ = false;
 
-    // Status-line bar.
+    // Status-line bar (app_bars.cpp); fix_ and quick_ are spelling's (app_spell.cpp).
     Bar bar_ = Bar::None;
     int bar_field_ = 1;               // which field has focus (find: 1 find, 2 replace)
     bool bar_focus_ = false;          // focus bar_field_ this frame
@@ -411,4 +439,18 @@ private:
     char find_buf_[256] = {};
     char repl_buf_[256] = {};
     std::string find_last_;
+};
+
+// A jump, for back and forward: where you were when it began and where it
+// left you go in the history. Nested (a search result opening its note),
+// only the outermost one counts.
+struct App::Jump {
+    App& app;
+    History::Kind kind;
+    explicit Jump(App& a, History::Kind k = History::Other) : app(a), kind(k) {
+        if (app.jump_depth_++ == 0) app.jump_from_ = app.here();
+    }
+    ~Jump() {
+        if (--app.jump_depth_ == 0) app.history_.jumped(app.jump_from_, app.here(), kind);
+    }
 };

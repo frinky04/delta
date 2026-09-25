@@ -163,6 +163,12 @@ bool read_file(const fs::path& p, std::string& out) {
     return true;
 }
 
+fs::file_time_type mtime_of(const fs::path& p) {
+    std::error_code ec;
+    auto t = fs::last_write_time(p, ec);
+    return ec ? fs::file_time_type{} : t;
+}
+
 bool atomic_write(const fs::path& p, const std::string& data, std::string* err) {
     fs::path tmp = p;
     tmp += ".delta-tmp";

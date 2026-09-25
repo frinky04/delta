@@ -24,6 +24,8 @@ bool open_url(const std::string& url); // http(s) and mailto only
 bool web_search(const std::string& text);
 
 bool read_file(const fs::path& p, std::string& out);
+// When the file was last written; the zero time if that can't be read.
+fs::file_time_type mtime_of(const fs::path& p);
 bool atomic_write(const fs::path& p, const std::string& data, std::string* err);
 
 // Dark title bar + caption colour on Windows 11; no-op elsewhere.
