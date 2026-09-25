@@ -192,7 +192,6 @@ private:
     bool bar_input(const char* id, char* buf, size_t size, int which, float x, float y, float w);
     static int bar_input_callback(ImGuiInputTextCallbackData* d);
     void open_find(bool replace);
-    void close_find() { if (bar_ == Bar::Find) close_bar(); }
     void draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void open_line(const std::string& text = "");
     void draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);

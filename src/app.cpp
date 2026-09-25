@@ -30,6 +30,16 @@ extern const std::size_t g_manual_size;
 
 namespace {
 
+std::tm local_tm(std::time_t t) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    return tm;
+}
+
 std::string ago(std::time_t t) {
     if (!t) return {};
     long long d = (long long)(std::time(nullptr) - t);
@@ -39,17 +49,48 @@ std::string ago(std::time_t t) {
     if (d < 86400 * 14) return std::to_string(d / 86400) + "d";
     if (d < 86400 * 90) return std::to_string(d / (86400 * 7)) + "w";
     char buf[32];
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &t);
-#else
-    localtime_r(&t, &tm);
-#endif
+    std::tm tm = local_tm(t);
     std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm);
     return buf;
 }
 
 std::string quote(const std::string& s) { return "\xE2\x80\x9C" + s + "\xE2\x80\x9D"; }
+
+// "1 note", "3 notes".
+std::string count_of(int n, const std::string& thing) { return std::to_string(n) + " " + thing + (n == 1 ? "" : "s"); }
+
+// A file's text as lines (without their line endings), and back.
+std::vector<std::string> text_lines(const std::string& text) {
+    std::vector<std::string> lines(1);
+    for (char ch : text) {
+        if (ch == '\r') continue;
+        if (ch == '\n') lines.emplace_back();
+        else lines.back() += ch;
+    }
+    return lines;
+}
+
+std::string join_lines(const std::vector<std::string>& lines, bool crlf) {
+    std::string out;
+    for (size_t i = 0; i < lines.size(); i++) out += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
+    return out;
+}
+
+// Stepping through marks in text order from the selection (`a` to `b`):
+// the first after it, or the last before it, wrapping round.
+const Diagnostic& step_from(const std::vector<Diagnostic>& marks, TextPos a, TextPos b, int dir) {
+    auto pos = [](const Diagnostic& d) { return TextPos{d.line, std::max(0, d.col0)}; };
+    if (dir > 0) {
+        TextPos from = std::max(a, b);
+        for (auto& d : marks)
+            if (from < pos(d)) return d;
+        return marks.front();
+    }
+    TextPos from = std::min(a, b);
+    for (auto it = marks.rbegin(); it != marks.rend(); ++it)
+        if (pos(*it) < from) return *it;
+    return marks.back();
+}
 
 // Completing as you type, a match has to begin where a word does: "#r" is
 // #rust, not #draft (the palette is looser; it's asked, not offered).
@@ -181,7 +222,7 @@ void App::load_settings() {
     }
     Config c;
     if (!load_config(cfg_path_, c, issues)) issues.push_back({-1, "couldn't read " + path_u8(cfg_path_)});
-    cfg_ = c;
+    cfg_ = std::move(c);
     cfg_mtime_ = mtime_of(cfg_path_);
 
     show_theme(cfg_.theme);
@@ -291,8 +332,7 @@ void App::apply_fonts() {
         preview_error_ = pl.problem;
         preview_bytes_ = pl.regular;
         if (pl.problem.empty())
-            preview_font_ = mono ? load_font(pl.regular, pl.pick.regular.index, g_font_mono, g_font_mono_size)
-                                 : load_font(pl.regular, pl.pick.regular.index, g_font_sans, g_font_sans_size);
+            preview_font_ = load_font(pl.regular, pl.pick.regular.index, mono ? g_font_mono : g_font_sans, mono ? g_font_mono_size : g_font_sans_size);
         preview_loaded_ = preview_want_;
     }
 
@@ -352,6 +392,13 @@ void App::install_fonts(FontLoader::Pair& in) {
 // Problems the rest of delta finds in a config: key chords and command ids
 // (checked against the commands) and space names.
 void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) const {
+    // Underlines just `part` of the setting's value `v`.
+    auto underline = [&](ConfigIssue& is, const std::string& key, const std::string& v, const std::string& part) {
+        auto w = c.where.find(key);
+        if (w == c.where.end() || is.line < 0) return;
+        size_t at = v.find(part);
+        if (at != std::string::npos) { is.col0 = w->second.val0 + (int)at; is.col1 = is.col0 + (int)part.size(); }
+    };
     std::vector<std::string> ids;
     for (auto& cmd : cmds_) ids.push_back(cmd.id);
     for (auto& [id, v] : c.keys) {
@@ -364,12 +411,7 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
         parse_chords(v, &bad);
         for (auto& b : bad) {
             ConfigIssue is = issue_at(c, "keys." + id, true, "can't read the chord \"" + b + "\", ignored");
-            // Underline just that chord.
-            auto w = c.where.find("keys." + id);
-            if (w != c.where.end()) {
-                size_t at = v.find(b);
-                if (at != std::string::npos) { is.col0 = w->second.val0 + (int)at; is.col1 = is.col0 + (int)b.size(); }
-            }
+            underline(is, "keys." + id, v, b);
             issues.push_back(is);
         }
     }
@@ -411,12 +453,7 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
             std::string near = iequals(l, "en_UK") ? "en_GB" : suggest(l, dicts);  // en_US is nearer by letters
             ConfigIssue is = issue_at(c, key, true, near.empty() ? "no dictionary with this name; add " + l + ".aff and " + l + ".dic to " + path_u8(dict_dir_)
                                                                  : "no dictionary with this name; did you mean " + near + "?");
-            // Underline just that name.
-            auto w = c.where.find(key);
-            if (w != c.where.end() && is.line >= 0) {
-                size_t at = v.find(l);
-                if (at != std::string::npos) { is.col0 = w->second.val0 + (int)at; is.col1 = is.col0 + (int)l.size(); }
-            }
+            underline(is, key, v, l);
             issues.push_back(is);
         }
     };
@@ -519,11 +556,10 @@ TextPos App::spell_held() {
     }
     if (spell_hold_.line < 0) return {-1, 0};
     TextPos c = editor_.cursor();
-    for (auto& d : spelling_)
-        if (d.line == spell_hold_.line && d.col0 <= spell_hold_.col && spell_hold_.col <= d.col1) {
-            if (c.line == d.line && d.col0 <= c.col && c.col <= d.col1) return {d.line, d.col0};
-            break;
-        }
+    if (int i = misspelling_at(spelling_, spell_hold_); i >= 0) {
+        const Diagnostic& d = spelling_[i];
+        if (c.line == d.line && d.col0 <= c.col && c.col <= d.col1) return {d.line, d.col0};
+    }
     if (c != spell_hold_) spell_hold_.line = -1;  // moved on
     return {-1, 0};
 }
@@ -600,19 +636,8 @@ void App::goto_misspelling(int dir) {
         status(!cfg_.spell ? "spellcheck is off" : speller_.loading() || spell_pending_ ? "still checking the spelling" : "no misspelt words in this note");
         return;
     }
-    TextPos a = editor_.cursor(), b = editor_.anchor();
-    TextPos from = dir > 0 ? std::max(a, b) : std::min(a, b);
-    const Diagnostic* to = nullptr;
-    if (dir > 0) {
-        for (auto& d : spelling_)
-            if (from < TextPos{d.line, d.col0}) { to = &d; break; }
-        if (!to) to = &spelling_.front();  // wrap
-    } else {
-        for (auto it = spelling_.rbegin(); it != spelling_.rend(); ++it)
-            if (TextPos{it->line, it->col0} < from) { to = &*it; break; }
-        if (!to) to = &spelling_.back();
-    }
-    editor_.select_range({to->line, to->col0}, {to->line, to->col1});
+    const Diagnostic& to = step_from(spelling_, editor_.cursor(), editor_.anchor(), dir);
+    editor_.select_range({to.line, to.col0}, {to.line, to.col1});
 }
 
 // The quick fix: the misspelt word at the caret, or the nearest one before
@@ -734,21 +759,9 @@ void App::goto_problem(int dir) {
         if (is_config() || !config_has) { status(is_config() ? "no problems in the config" : "no problems in this note"); return; }
         open_config();
         if (!is_config() || problems_.empty()) return;
-        to = dir > 0 ? &problems_.front() : &problems_.back();
-    }
-    TextPos a = editor_.cursor(), b = editor_.anchor();
-    TextPos from = dir > 0 ? std::max(a, b) : std::min(a, b);
-    auto pos = [](const Diagnostic& d) { return TextPos{d.line, std::max(0, d.col0)}; };
-    if (to) {
-        // just opened: the first (or last) one
-    } else if (dir > 0) {
-        for (auto& d : problems_)
-            if (from < pos(d)) { to = &d; break; }
-        if (!to) to = &problems_.front();  // wrap
+        to = dir > 0 ? &problems_.front() : &problems_.back();  // just opened: the first (or last) one
     } else {
-        for (auto it = problems_.rbegin(); it != problems_.rend(); ++it)
-            if (pos(*it) < from) { to = &*it; break; }
-        if (!to) to = &problems_.back();
+        to = &step_from(problems_, editor_.cursor(), editor_.anchor(), dir);
     }
     // The part it's about comes selected, ready to retype.
     TextPos s{to->line, std::max(0, to->col0)}, e{to->line, to->col0 >= 0 ? to->col1 : 0};
@@ -889,18 +902,10 @@ void App::set_setting(const std::string& section, const std::string& key, const 
     std::string text;
     read_file(cfg_path_, text);  // none yet: written from scratch
     bool crlf = text.find("\r\n") != std::string::npos;
-    std::vector<std::string> lines;
-    std::istringstream in(text);
-    for (std::string line; std::getline(in, line);) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        lines.push_back(line);
-    }
-    if (text.empty() || text.back() == '\n') lines.emplace_back();  // the empty last line after a final newline
+    std::vector<std::string> lines = text_lines(text);
     apply_edit(lines, config_set(lines, section, key, value));
-    std::string out;
-    for (size_t i = 0; i < lines.size(); i++) out += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
     std::string err;
-    if (!atomic_write(cfg_path_, out, &err)) {
+    if (!atomic_write(cfg_path_, join_lines(lines, crlf), &err)) {
         status("couldn't save the config: " + err, true);
         return;
     }
@@ -1070,9 +1075,13 @@ void App::register_commands() {
         editor_.set_reader(!editor_.reader());  // morphs between the views
     });
     add("view.line_numbers", "toggle line numbers", "", [this] { cfg_.line_numbers = !cfg_.line_numbers; });
-    add("view.zoom_in", "zoom in", "ctrl+= ctrl+numpad+", [this] { zoom_ = std::min(3.0f, zoom_ * 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, Scope::App);
-    add("view.zoom_out", "zoom out", "ctrl+- ctrl+numpad-", [this] { zoom_ = std::max(0.5f, zoom_ / 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, Scope::App);
-    add("view.zoom_reset", "reset zoom", "ctrl+0", [this] { zoom_ = 1; status("zoom 100%"); }, false, Scope::App);
+    auto zoom = [this](float z) {
+        zoom_ = std::clamp(z, 0.5f, 3.0f);
+        status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%");
+    };
+    add("view.zoom_in", "zoom in", "ctrl+= ctrl+numpad+", [this, zoom] { zoom(zoom_ * 1.1f); }, true, Scope::App);
+    add("view.zoom_out", "zoom out", "ctrl+- ctrl+numpad-", [this, zoom] { zoom(zoom_ / 1.1f); }, true, Scope::App);
+    add("view.zoom_reset", "reset zoom", "ctrl+0", [zoom] { zoom(1); }, false, Scope::App);
     add("view.fullscreen", "toggle full screen", "f11", [this] { toggle_fullscreen(); }, false, Scope::App);
 
     // App
@@ -1331,13 +1340,7 @@ void App::create_note(const std::string& space, const std::string& raw) {
 }
 
 void App::open_daily() {
-    std::time_t now = std::time(nullptr);
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &now);
-#else
-    localtime_r(&now, &tm);
-#endif
+    std::tm tm = local_tm(std::time(nullptr));
     char buf[128];
     if (!std::strftime(buf, sizeof buf, cfg_.daily_format.c_str(), &tm)) std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm);
     std::string name = buf;
@@ -1395,7 +1398,6 @@ void App::open_by_name(std::string target) {
 }
 
 void App::rename_note() {
-    if (!note_) return;
     if (!need_note()) return;
     open_bar(Bar::Rename);  // see draw_rename_bar
     std::snprintf(bar_buf_, sizeof bar_buf_, "%s", note_->name.c_str());
@@ -1403,7 +1405,6 @@ void App::rename_note() {
 }
 
 void App::move_note() {
-    if (!note_) return;
     if (!need_note()) return;
     std::vector<PaletteItem> items;
     for (auto& sp : store_.spaces()) {
@@ -1432,7 +1433,6 @@ void App::move_note() {
 }
 
 void App::delete_note() {
-    if (!note_) return;
     if (!need_note()) return;
     NoteRef n = *note_;
     PaletteItem yes, no;
@@ -1602,7 +1602,7 @@ static PaletteItem line_item(const std::string& line, size_t at, size_t len) {
     PaletteItem it;
     it.label = trim(snippet);
     size_t first = snippet.find_first_not_of(" \t");
-    int lead = (int)(snippet.size() - snippet.substr(first == std::string::npos ? 0 : first).size());
+    int lead = first == std::string::npos ? 0 : (int)first;
     for (int k = 0; k < (int)len; k++) it.hl.push_back(hl0 - lead + k);
     return it;
 }
@@ -1613,13 +1613,7 @@ const std::vector<std::string>& App::note_lines(const NoteRef& n) {
     if (it == cache_text_.end()) {
         std::string text;
         read_file(n.path, text);
-        std::vector<std::string> lines(1);
-        for (char ch : text) {
-            if (ch == '\r') continue;
-            if (ch == '\n') lines.emplace_back();
-            else lines.back() += ch;
-        }
-        it = cache_text_.emplace(path_u8(n.path), std::move(lines)).first;
+        it = cache_text_.emplace(path_u8(n.path), text_lines(text)).first;
     }
     return it->second;
 }
@@ -1717,7 +1711,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             if (!fuzzy_match(q, sp, it.score, &it.hl)) continue;
             if (iequals(sp, q)) exact = true;
             int count = store_.note_count(sp);
-            it.meta = sp == space_ ? "current" : std::to_string(count) + (count == 1 ? " note" : " notes");
+            it.meta = sp == space_ ? "current" : count_of(count, "note");
             it.action = [this, sp] { switch_space(sp); };
             out.push_back(std::move(it));
         }
@@ -1859,8 +1853,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             std::string keys = cmd.chords.empty() ? "" : chord_str(cmd.chords.front());
             if (cmd.prefix) keys = std::string(1, cmd.prefix) + "  " + std::string(prefixed_w - std::min(prefixed_w, keys.size()), ' ') + keys;
             it.meta = keys;
-            auto run = cmd.run;
-            it.action = [run] { run(); };
+            it.action = cmd.run;
             out.push_back(std::move(it));
         }
         sort();
@@ -2007,7 +2000,7 @@ void App::draw_empty(ImVec2 min, ImVec2 max, float col_x, float column, float to
     auto W = [&](ImFont* f, const std::string& t) { return f->CalcTextSizeA(ms, FLT_MAX, 0, t.c_str()).x; };
     int n = store_.note_count(space_);
     std::string sub = space_ + "/ is empty";
-    if (n > 0) sub = space_ + "/ has " + std::to_string(n) + (n == 1 ? " note" : " notes") + ", none open";
+    if (n > 0) sub = space_ + "/ has " + count_of(n, "note") + ", none open";
 
     // title, blank, subtitle, blank, then the keys, centred on the page
     int block = 4 + (int)rows.size();
@@ -2601,7 +2594,7 @@ void App::build_tags(const std::string& query, std::vector<PaletteItem>& out, in
             if (!fuzzy_match(tq.word, t.name, it.score, &it.hl)) continue;
             for (int& h : it.hl) h++;
             it.label = "#" + t.name;
-            it.meta = std::to_string(t.notes) + (t.notes == 1 ? " note" : " notes");
+            it.meta = count_of(t.notes, "note");
             it.fill = "#" + tag_query_fill(query, t.name);
             it.action = [] {};
             rows.push_back(std::move(it));
@@ -2671,7 +2664,7 @@ void App::pick_tag_rename() {
     for (auto& [k, t] : all) {
         PaletteItem it;
         it.label = "#" + t.first;
-        it.meta = std::to_string(t.second) + (t.second == 1 ? " note" : " notes");
+        it.meta = count_of(t.second, "note");
         it.action = [this, name = t.first] { open_tag_rename(name); };
         items.push_back(std::move(it));
     }
@@ -2726,7 +2719,7 @@ void App::draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     std::string right = msg;
     if (right.empty()) {
         int n = notes_tagged(tag_from_);
-        std::string in = std::to_string(n) + (n == 1 ? " note" : " notes");
+        std::string in = count_of(n, "note");
         bool merge = !iequals(v, tag_from_) && notes_tagged(v) > 0;
         right = merge ? "enter to merge into #" + v + ", in " + in : "enter to rename, in " + in;
     }
@@ -2739,7 +2732,7 @@ void App::draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
 void App::confirm_tag_rename(const std::string& from, const std::string& to) {
     int n = notes_tagged(from);
     bool merge = !iequals(from, to) && notes_tagged(to) > 0;
-    std::string in = std::to_string(n) + (n == 1 ? " note" : " notes");
+    std::string in = count_of(n, "note");
     PaletteItem yes, no;
     yes.label = merge ? "merge #" + from + " into #" + to : "rename #" + from + " to #" + to;
     yes.meta = in + ", every space";
@@ -2763,18 +2756,10 @@ void App::apply_tag_rename(const std::string& from, const std::string& to) {
     for (auto& n : notes) {
         std::string text;
         if (!read_file(n.path, text)) { failed++; continue; }
-        bool crlf = text.find("\r\n") != std::string::npos;
-        std::vector<std::string> lines(1);
-        for (char ch : text) {
-            if (ch == '\r') continue;
-            if (ch == '\n') lines.emplace_back();
-            else lines.back() += ch;
-        }
+        std::vector<std::string> lines = text_lines(text);
         if (!rename_tag(lines, from, to)) continue;
-        std::string outs;
-        for (size_t i = 0; i < lines.size(); i++) outs += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
         std::string err;
-        if (!atomic_write(n.path, outs, &err)) { failed++; why = err; continue; }
+        if (!atomic_write(n.path, join_lines(lines, text.find("\r\n") != std::string::npos), &err)) { failed++; why = err; continue; }
         changed++;
     }
     if (is_note()) {
@@ -2788,8 +2773,7 @@ void App::apply_tag_rename(const std::string& from, const std::string& to) {
         tags_.set(*note_, editor_.lines());
     }
     refresh_tags(true);
-    std::string done = (merge ? "merged #" + from + " into #" : "renamed #" + from + " to #") + to + " in " +
-                       std::to_string(changed) + (changed == 1 ? " note" : " notes");
+    std::string done = (merge ? "merged #" + from + " into #" : "renamed #" + from + " to #") + to + " in " + count_of(changed, "note");
     if (failed) status(done + "; " + std::to_string(failed) + " couldn't be changed" + (why.empty() ? "" : ": " + why), true);
     else status(done);
 }
@@ -2851,13 +2835,13 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
         };
         int n = (int)problems_.size();
         if (n || is_config())
-            count(n == 0 ? "no problems" : std::to_string(n) + (n == 1 ? " problem" : " problems"), n > 0, T.error, [this] { goto_problem(1); });
+            count(n == 0 ? "no problems" : count_of(n, "problem"), n > 0, T.error, [this] { goto_problem(1); });
         int m = (int)spelling_.size() - (shown_held_.line >= 0 ? 1 : 0);  // not the word being typed
         if (m && !is_config())
-            count(std::to_string(m) + (m == 1 ? " misspelling" : " misspellings"), true, T.spelling, [this] { goto_misspelling(1); });
+            count(count_of(m, "misspelling"), true, T.spelling, [this] { goto_misspelling(1); });
         if (!is_config()) {
             int w = editor_.word_count();
-            put_right(std::to_string(w) + (w == 1 ? " word" : " words"), T.dim);
+            put_right(count_of(w, "word"), T.dim);
         }
         // (Not for a picked image: its markdown's length means nothing.)
         if (editor_.has_selection() && editor_.image_for_caret() < 0) put_right(std::to_string(editor_.selection_length()) + " selected", T.dim);
@@ -2956,20 +2940,23 @@ void App::frame() {
     // Commands passed on the command line (used for testing and scripting).
     // A scripted key press (see "key:" below) is released the frame after.
     if (release_key_ != ImGuiKey_None) {
-        ImGuiIO& kio = ImGui::GetIO();
-        kio.AddKeyEvent(release_key_, false);
-        for (ImGuiKey m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) kio.AddKeyEvent(m, false);
+        io.AddKeyEvent(release_key_, false);
+        for (ImGuiKey m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) io.AddKeyEvent(m, false);
         release_key_ = ImGuiKey_None;
     }
     // "wait:<seconds>" pauses the list, so later steps run once the page is up.
     if (!pending_run_.empty() && now >= run_after_) {
         auto run = std::move(pending_run_);
         pending_run_.clear();
+        // The steps after the k-th wait `secs`.
+        auto rest = [&](size_t k, double secs) {
+            run_after_ = now + secs;
+            pending_run_.assign(run.begin() + k + 1, run.end());
+        };
         for (size_t k = 0; k < run.size(); k++) {
             const std::string& id = run[k];
             if (id.rfind("wait:", 0) == 0) {
-                run_after_ = now + std::atof(id.c_str() + 5);
-                pending_run_.assign(run.begin() + k + 1, run.end());
+                rest(k, std::atof(id.c_str() + 5));
                 break;
             }
             if (id.rfind("open:", 0) == 0) { open_by_name(id.substr(5)); continue; }
@@ -2990,32 +2977,27 @@ void App::frame() {
             if (id.rfind("key:", 0) == 0) {
                 Chord c;
                 if (parse_chord(id.substr(4), c)) {
-                    ImGuiIO& kio = ImGui::GetIO();
-                    for (ImGuiKey m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) kio.AddKeyEvent(m, (c.mods & m) != 0);
-                    kio.AddKeyEvent(c.key, true);
+                    for (ImGuiKey m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) io.AddKeyEvent(m, (c.mods & m) != 0);
+                    io.AddKeyEvent(c.key, true);
                     release_key_ = c.key;
                 }
-                run_after_ = now + 0.1;
-                pending_run_.assign(run.begin() + k + 1, run.end());
+                rest(k, 0.1);
                 break;
             }
             // "mouse:<x>:<y>" moves the pointer (window pixels); "down" and
             // "up" press and let go of the left button, "rdown" and "rup"
             // the right.
             if (id.rfind("mouse:", 0) == 0 || id == "down" || id == "up" || id == "rdown" || id == "rup") {
-                ImGuiIO& mio = ImGui::GetIO();
                 float mx = 0, my = 0;
-                if (id[0] == 'm' && std::sscanf(id.c_str() + 6, "%f:%f", &mx, &my) == 2) mio.AddMousePosEvent(mx, my);
-                else if (id[0] == 'r') mio.AddMouseButtonEvent(ImGuiMouseButton_Right, id == "rdown");
-                else if (id[0] != 'm') mio.AddMouseButtonEvent(ImGuiMouseButton_Left, id == "down");
-                run_after_ = now + 0.05;
-                pending_run_.assign(run.begin() + k + 1, run.end());
+                if (id[0] == 'm' && std::sscanf(id.c_str() + 6, "%f:%f", &mx, &my) == 2) io.AddMousePosEvent(mx, my);
+                else if (id[0] == 'r') io.AddMouseButtonEvent(ImGuiMouseButton_Right, id == "rdown");
+                else if (id[0] != 'm') io.AddMouseButtonEvent(ImGuiMouseButton_Left, id == "down");
+                rest(k, 0.05);
                 break;
             }
             if (id.rfind("type:", 0) == 0) {
-                ImGui::GetIO().AddInputCharactersUTF8(id.c_str() + 5);
-                run_after_ = now + 0.1;
-                pending_run_.assign(run.begin() + k + 1, run.end());
+                io.AddInputCharactersUTF8(id.c_str() + 5);
+                rest(k, 0.1);
                 break;
             }
             if (Command* c = find_command(id)) c->run();
@@ -3150,13 +3132,10 @@ void App::frame() {
         // on that word (where other apps put their suggestions menu).
         if (p.mouse && editing() && !is_config() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             check_spelling();  // this frame's typing may have moved things
-            TextPos at = editor_.position_at(io.MousePos);
-            for (auto& d : spelling_)
-                if (d.line == at.line && d.col0 <= at.col && at.col <= d.col1) {
-                    editor_.jump_to({d.line, d.col0});
-                    fix_spelling();
-                    break;
-                }
+            if (int i = misspelling_at(spelling_, editor_.position_at(io.MousePos)); i >= 0) {
+                editor_.jump_to({spelling_[i].line, spelling_[i].col0});
+                fix_spelling();
+            }
         }
     } else {
         draw_empty(min, max, col_x, column, top_pad, page);
