@@ -34,6 +34,34 @@ std::vector<std::string> split_lines(const std::string& text) {
     return out;
 }
 
+std::string join_lines(const std::vector<std::string>& lines) {
+    size_t total = 0;
+    for (auto& l : lines) total += l.size() + 1;
+    std::string out;
+    out.reserve(total);
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (i) out += '\n';
+        out += lines[i];
+    }
+    return out;
+}
+
+// An image line's ![...](...) tokens (none if it isn't one), and a row
+// rebuilt from them, one space apart.
+std::vector<std::string> image_tokens(const std::string& line) {
+    std::vector<ImageRef> refs;
+    std::vector<std::string> out;
+    if (md_image_row(line, &refs))
+        for (auto& r : refs) out.push_back(line.substr(r.begin, r.end - r.begin));
+    return out;
+}
+
+std::string join_images(const std::vector<std::string>& tokens) {
+    std::string s;
+    for (auto& t : tokens) s += (s.empty() ? "" : " ") + t;
+    return s;
+}
+
 bool is_mono(Style f) { return f & (S_Code | S_CodeBlock | S_Tag); }
 
 }  // namespace
@@ -98,17 +126,7 @@ void Editor::reload_text(const std::string& text) {
     end_edit(false);
 }
 
-std::string Editor::text() const {
-    std::string out;
-    size_t total = 0;
-    for (auto& l : lines_) total += l.size() + 1;
-    out.reserve(total);
-    for (size_t i = 0; i < lines_.size(); i++) {
-        if (i) out += '\n';
-        out += lines_[i];
-    }
-    return out;
-}
+std::string Editor::text() const { return join_lines(lines_); }
 
 void Editor::clamp(TextPos& p) const {
     p.line = std::clamp(p.line, 0, (int)lines_.size() - 1);
@@ -274,25 +292,15 @@ void Editor::replace_selection(const std::string& text) {
 // ---------------------------------------------------------------------------
 // Commands
 
-void Editor::undo() {
-    if (undo_.empty()) return;
-    redo_.push_back(snapshot());
-    Snap s = std::move(undo_.back());
-    undo_.pop_back();
-    std::vector<std::string> before = std::move(lines_);
-    lines_ = std::move(s.lines);
-    cur_ = s.cur;
-    anchor_ = s.anchor;
-    last_edit_ = Edit::None;
-    end_edit();
-    pulse_changes(before);
-}
+void Editor::undo() { step_history(undo_, redo_); }
+void Editor::redo() { step_history(redo_, undo_); }
 
-void Editor::redo() {
-    if (redo_.empty()) return;
-    undo_.push_back(snapshot());
-    Snap s = std::move(redo_.back());
-    redo_.pop_back();
+// Back to the last snapshot in `from`, noting where it was in `to`.
+void Editor::step_history(std::vector<Snap>& from, std::vector<Snap>& to) {
+    if (from.empty()) return;
+    to.push_back(snapshot());
+    Snap s = std::move(from.back());
+    from.pop_back();
     std::vector<std::string> before = std::move(lines_);
     lines_ = std::move(s.lines);
     cur_ = s.cur;
@@ -323,7 +331,7 @@ void Editor::cut() {
     } else {
         int l = cur_.line;
         lines_.erase(lines_.begin() + l);
-        cur_ = anchor_ = {std::min(l, (int)lines_.size() - 1), cur_.col};
+        cur_ = {std::min(l, (int)lines_.size() - 1), cur_.col};
         clamp(cur_);
         anchor_ = cur_;
     }
@@ -492,17 +500,13 @@ int Editor::image_for_caret(int* tile) const {
 // Takes one image out of its line; a row closes up around the gap, and a
 // line left with nothing is left empty. The caret stays where it was.
 void Editor::delete_tile(int line, int tile) {
-    std::vector<ImageRef> refs;
-    if (!md_image_row(lines_[line], &refs) || tile < 0 || tile >= (int)refs.size()) return;
-    std::vector<std::string> keep;
-    for (int k = 0; k < (int)refs.size(); k++)
-        if (k != tile) keep.push_back(lines_[line].substr(refs[k].begin, refs[k].end - refs[k].begin));
-    std::string out;
-    for (auto& t : keep) out += (out.empty() ? "" : " ") + t;
-    lines_[line] = out;
+    std::vector<std::string> keep = image_tokens(lines_[line]);
+    if (tile < 0 || tile >= (int)keep.size()) return;
+    keep.erase(keep.begin() + tile);
+    lines_[line] = join_images(keep);
     // Where the gap is: before what followed the removed one.
     int col = 0;
-    if (tile >= (int)keep.size()) col = (int)out.size();
+    if (tile >= (int)keep.size()) col = (int)lines_[line].size();
     else for (int k = 0; k < tile; k++) col += (int)keep[k].size() + 1;
     cur_ = anchor_ = {line, col};
 }
@@ -525,15 +529,7 @@ TextPos Editor::position_at(ImVec2 screen) const {
 // for a pure deletion (the removed lines' fade already says what happened).
 void Editor::pulse_changes(const std::vector<std::string>& before) {
     pulse_.active = false;
-    auto join = [](const std::vector<std::string>& v) {
-        std::string s;
-        for (size_t i = 0; i < v.size(); i++) {
-            if (i) s += '\n';
-            s += v[i];
-        }
-        return s;
-    };
-    std::string o = join(before), n = join(lines_);
+    std::string o = join_lines(before), n = join_lines(lines_);
     size_t pre = 0, lim = std::min(o.size(), n.size());
     while (pre < lim && o[pre] == n[pre]) pre++;
     size_t suf = 0;
@@ -552,10 +548,15 @@ void Editor::pulse_changes(const std::vector<std::string>& before) {
         }
         return p;
     };
-    pulse_.spans = {{pos_of(pre), pos_of(end)}};
+    pulse({{pos_of(pre), pos_of(end)}});
+}
+
+// Light these spans up (none: no pulse), until the next edit.
+void Editor::pulse(std::vector<std::pair<TextPos, TextPos>> spans) {
+    pulse_.spans = std::move(spans);
     pulse_.start = anim::clock;
     pulse_.version = version_;
-    pulse_.active = true;
+    pulse_.active = !pulse_.spans.empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -636,28 +637,17 @@ void Editor::replace_range(TextPos a, TextPos b, const std::string& with) {
     TextPos e = insert(a, with);
     cur_ = anchor_ = e;
     end_edit();
-    pulse_.spans = {{a, e}};
-    pulse_.start = anim::clock;
-    pulse_.version = version_;
-    pulse_.active = e != a;
+    if (e != a) pulse({{a, e}});
+    else pulse_.active = false;
 }
 
 void Editor::replace_current(const std::string& with) {
     find_refresh();
     if (match_ < 0 || match_ >= (int)matches_.size()) return;
-    auto [a, b] = matches_[match_];
-    begin_edit(Edit::Other);
-    erase(a, b);
-    TextPos e = insert(a, with);
-    cur_ = anchor_ = e;
-    end_edit();
-    pulse_.spans = {{a, e}};
-    pulse_.start = anim::clock;
-    pulse_.version = version_;
-    pulse_.active = e != a;
+    replace_range(matches_[match_].first, matches_[match_].second, with);
     // On to the next match after what was just written.
-    find_origin_ = e;
-    find_recompute(e);
+    find_origin_ = cur_;
+    find_recompute(cur_);
     if (match_ >= 0) select_match();
 }
 
@@ -683,10 +673,8 @@ int Editor::replace_all(const std::string& with) {
     }
     cur_ = anchor_ = current;
     end_edit();
-    pulse_.spans = with.empty() ? std::vector<std::pair<TextPos, TextPos>>{} : spans;
-    pulse_.start = anim::clock;
-    pulse_.version = version_;
-    pulse_.active = !pulse_.spans.empty();
+    if (with.empty()) spans.clear();
+    pulse(std::move(spans));
     find_origin_ = current;
     find_recompute(current);
     return count;
@@ -1217,9 +1205,10 @@ void Editor::layout(int mode) {
     for (int i = 0; i < (int)lines_.size(); i++) {
         Line& L = V[i];
         const std::string& s = lines_[i];
-        if ((!same_text && L.hash != fnv(s)) || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
+        uint64_t hash = same_text ? L.hash : fnv(s);
+        if (L.hash != hash || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
             L.lh != P_.line_height || L.tab != P_.tab_size || L.blank != P_.blank_line || L.code != P_.code_size) {
-            L.hash = fnv(s);
+            L.hash = hash;
             L.in_code = in_code;
             L.wrap = P_.column;
             L.base = P_.size;
@@ -1487,17 +1476,12 @@ void Editor::vertical_picked(int line, int tile, int dir) {
         if (best < 0 || (dir > 0 ? y < L.tiles[best].y : y > L.tiles[best].y)) best = k;
     }
     if (best >= 0) {
-        float row_y = L.tiles[best].y, dist = 1e9f;
-        for (int k = 0; k < (int)L.tiles.size(); k++) {
-            const Line::Tile& o = L.tiles[k];
-            float dx = std::fabs(o.x + o.w * 0.5f - keep);
-            if (o.y == row_y && dx < dist) { dist = dx; best = k; }
-        }
-        pick(line, best);
+        pick(line, nearest_tile(L, keep, L.tiles[best].y));
     } else {
         int to = line + dir;
         if (to < 0 || to >= (int)lines_.size()) return;
-        if (is_img(to)) pick(to, nearest_tile(lay_[0][to], keep, dir < 0));
+        const Line& N = lay_[0][to];
+        if (is_img(to)) pick(to, nearest_tile(N, keep, dir < 0 ? N.tiles.back().y : N.tiles.front().y));
         else move_to({to, col_at_x(0, to, dir > 0 ? 0 : (int)lay_[0][to].rows.size() - 1, keep)}, false);
     }
     want_x_ = keep;
@@ -1515,9 +1499,9 @@ void Editor::remove_picked(int line, int tile, int dir) {
     end_edit();
 }
 
-// The image in a line's first (or last) row nearest x.
-int Editor::nearest_tile(const Line& L, float x, bool last_row) {
-    float row_y = last_row ? L.tiles.back().y : L.tiles.front().y, dist = 1e9f;
+// The image in the row at row_y nearest x.
+int Editor::nearest_tile(const Line& L, float x, float row_y) {
+    float dist = 1e9f;
     int best = 0;
     for (int k = 0; k < (int)L.tiles.size(); k++) {
         const Line::Tile& t = L.tiles[k];
@@ -2090,7 +2074,8 @@ void Editor::move_vertical(int n, bool select) {
     }
     float keep = want_x_;
     if (target.line < 0 && !select && line != cur_.line && is_img(line)) {  // onto an image: the nearest one
-        pick(line, nearest_tile(V[line], want_x_, n < 0));
+        const Line& L = V[line];
+        pick(line, nearest_tile(L, want_x_, n < 0 ? L.tiles.back().y : L.tiles.front().y));
         want_x_ = keep;
         return;
     }
@@ -2436,10 +2421,9 @@ void Editor::handle_keys() {
         if (K(ImGuiKey_PageUp)) { scroll_target_ -= page * row; move_vertical(-page, shift); }
         if (K(ImGuiKey_PageDown)) { scroll_target_ += page * row; move_vertical(page, shift); }
         if (K(ImGuiKey_Home)) {
-            float keep = -1;
             if (ctrl) move_to({0, 0}, shift);
             else move_to(smart_home(), shift);
-            want_x_ = keep;
+            want_x_ = -1;
         }
         if (K(ImGuiKey_End)) {
             if (ctrl) move_to({(int)lines_.size() - 1, (int)lines_.back().size()}, shift);
@@ -2748,12 +2732,9 @@ bool Editor::nudge_image(int dir) {
     int tile = 0;
     int line = image_for_caret(&tile);
     if (line < 0) return false;
-    std::vector<ImageRef> refs;
-    if (!md_image_row(lines_[line], &refs)) return false;
+    std::vector<std::string> tokens = image_tokens(lines_[line]);
     int other = tile + dir;
-    if (other < 0 || other >= (int)refs.size()) return false;  // at the end of the row
-    std::vector<std::string> tokens;
-    for (auto& r : refs) tokens.push_back(lines_[line].substr(r.begin, r.end - r.begin));
+    if (other < 0 || other >= (int)tokens.size()) return false;  // at the end of the row
     ImVec2 a, b;
     bool fly = tile_rect(line, tile, a, b);
     std::swap(tokens[tile], tokens[other]);
@@ -2804,33 +2785,21 @@ bool Editor::drop_changes() const {
 bool Editor::drag_preview(int line, std::string& out, int* slot) const {
     if (!img_drag_ || !drop_changes()) return false;
     int from = press_img_line_, tile = press_img_tile_;
-    auto tokens = [&](int l) {
-        std::vector<ImageRef> refs;
-        std::vector<std::string> t;
-        if (md_image_row(lines_[l], &refs))
-            for (auto& r : refs) t.push_back(lines_[l].substr(r.begin, r.end - r.begin));
-        return t;
-    };
-    auto join = [](const std::vector<std::string>& t) {
-        std::string s;
-        for (auto& x : t) s += (s.empty() ? "" : " ") + x;
-        return s;
-    };
     if (line != from && line != drop_line_) return false;
-    std::vector<std::string> rest = tokens(from);  // its line without it
+    std::vector<std::string> rest = image_tokens(lines_[from]);  // its line without it
     if (tile < 0 || tile >= (int)rest.size()) return false;
     rest.erase(rest.begin() + tile);
     if (line == drop_line_) {
-        std::vector<std::string> t = line == from ? rest : tokens(line);
+        std::vector<std::string> t = line == from ? rest : image_tokens(lines_[line]);
         int k = line == from ? (drop_stop_ > tile ? drop_stop_ - 1 : drop_stop_) : drop_stop_;
         k = std::clamp(k, 0, (int)t.size());
         t.insert(t.begin() + k, drag_token_);
-        out = join(t);
+        out = join_images(t);
         if (slot) *slot = k;
         return true;
     }
     if (rest.empty()) return false;  // alone on its line: the line stays, empty (drag_hides_source)
-    out = join(rest);
+    out = join_images(rest);
     if (slot) *slot = -1;
     return true;
 }
@@ -2884,16 +2853,7 @@ void Editor::let_go_image(bool drop) {
 void Editor::move_image() {
     int from = press_img_line_, tile = press_img_tile_;
     auto tokens = [&](int l) {
-        std::vector<ImageRef> refs;
-        std::vector<std::string> out;
-        if (l >= 0 && l < (int)lines_.size() && md_image_row(lines_[l], &refs))
-            for (auto& r : refs) out.push_back(lines_[l].substr(r.begin, r.end - r.begin));
-        return out;
-    };
-    auto join = [](const std::vector<std::string>& t) {
-        std::string s;
-        for (auto& x : t) s += (s.empty() ? "" : " ") + x;
-        return s;
+        return l >= 0 && l < (int)lines_.size() ? image_tokens(lines_[l]) : std::vector<std::string>{};
     };
     std::vector<std::string> src = tokens(from);
     if (tile < 0 || tile >= (int)src.size()) return;
@@ -2906,7 +2866,7 @@ void Editor::move_image() {
             src.erase(src.begin() + tile);
             int k = drop_stop_ > tile ? drop_stop_ - 1 : drop_stop_;
             src.insert(src.begin() + k, moving);
-            lines_[from] = join(src);
+            lines_[from] = join_images(src);
             int col = 0;
             for (int j = 0; j <= k; j++) col += (int)src[j].size() + (j ? 1 : 0);
             cur_ = anchor_ = {from, col};
@@ -2915,14 +2875,14 @@ void Editor::move_image() {
         } else {
             std::vector<std::string> dst = tokens(drop_line_);
             dst.insert(dst.begin() + std::clamp(drop_stop_, 0, (int)dst.size()), moving);
-            lines_[drop_line_] = join(dst);
+            lines_[drop_line_] = join_images(dst);
             int to = drop_line_;
             src.erase(src.begin() + tile);
             if (src.empty()) {
                 lines_.erase(lines_.begin() + from);
                 if (to > from) to--;
             } else {
-                lines_[from] = join(src);
+                lines_[from] = join_images(src);
             }
             int at = std::clamp(drop_stop_, 0, (int)dst.size() - 1);
             int col = 0;
@@ -2944,7 +2904,7 @@ void Editor::move_image() {
         lines_.erase(lines_.begin() + from);
         if (before > from) before--;
     } else {
-        lines_[from] = join(src);
+        lines_[from] = join_images(src);
     }
     before = std::clamp(before, 0, (int)lines_.size());
     lines_.insert(lines_.begin() + before, moving);
@@ -3349,9 +3309,8 @@ void Editor::rewrite(const std::vector<std::string>& lines, TextPos cur) {
     std::vector<std::string> before = lines_;
     begin_edit(Edit::Other);
     lines_ = lines.empty() ? std::vector<std::string>{""} : lines;
+    clamp(cur);
     cur_ = anchor_ = cur;
-    clamp(cur_);
-    anchor_ = cur_;
     last_edit_ = Edit::None;
     end_edit(false);
     pulse_changes(before);
@@ -3382,11 +3341,14 @@ void Editor::draw(const EditorParams& p) {
         if (!reader_ && lay_[0].size() == lines_.size()) shoot_tiles();
         drag_sig_ = sig;
     }
-    sync_edits();
-    layout(0);
-    resolve_pending();
-    if (mode || morph_.active) layout(1);
-    if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
+    auto relayout = [&] {
+        sync_edits();
+        layout(0);
+        resolve_pending();
+        if (mode || morph_.active) layout(1);
+        if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
+    };
+    relayout();
 
     if (sync_line_ >= 0 && sync_line_ < (int)lay_[mode].size()) {
         const Line& L = lay_[mode][sync_line_];
@@ -3420,13 +3382,7 @@ void Editor::draw(const EditorParams& p) {
         if (ImGui::IsKeyPressed(ImGuiKey_End)) scroll_target_ = 1e9f;
         io.InputQueueCharacters.resize(0);
     }
-    if (version_ != before) {
-        sync_edits();
-        layout(0);
-        resolve_pending();
-        if (mode || morph_.active) layout(1);
-        if (yoff_.size() != lines_.size()) yoff_.assign(lines_.size(), 0);
-    }
+    if (version_ != before) relayout();
     settle_on_images();
     // The completion list follows typing; it goes while the keys are elsewhere.
     if (!p.keyboard) comp_.open = false;
@@ -3567,18 +3523,7 @@ void Editor::draw(const EditorParams& p) {
                 if (L.img) continue;  // tinted over the image instead (draw_image)
                 float ly = origin_y_ + L.dy + L.pad + yoff_[l];
                 if (ly > p.max.y || ly + L.h < p.min.y) continue;
-                Metrics m = metrics(L.size);
-                int la = l == a.line ? a.col : 0;
-                int lb = l == b.line ? b.col : (int)lines_[l].size();
-                for (int r = 0; r < (int)L.rows.size(); r++) {
-                    int ra = L.rows[r];
-                    int rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)lines_[l].size();
-                    int sa = std::max(la, ra), sb = std::min(lb, rb);
-                    bool eol = l != b.line && r + 1 == (int)L.rows.size();
-                    if (sa > sb || (sa == sb && !eol)) continue;
-                    float t1 = row_x(L, r) + measure(lines_[l], L.style, ra, sa, m);
-                    float t2 = row_x(L, r) + measure(lines_[l], L.style, ra, sb, m);
-                    if (eol) t2 += m.sans->GetCharAdvance(' ');
+                span_rows(l, a, b, [&](int r, float t1, float t2) {
                     auto it = std::find_if(sel_rects_.begin(), sel_rects_.end(),
                                            [&](const SelRect& s) { return s.line == l && s.row == r; });
                     if (it == sel_rects_.end()) {
@@ -3594,7 +3539,7 @@ void Editor::draw(const EditorParams& p) {
                         it->a = 1.0f;
                         it->live = true;
                     }
-                }
+                });
             }
         }
         for (auto& r : sel_rects_) {
@@ -3645,10 +3590,9 @@ void Editor::draw(const EditorParams& p) {
                 if (to > from)
                     dl->AddRectFilled(ImVec2(col_x_ - pad_x, from), ImVec2(col_x_ + P_.column + pad_x, to), fade(T.code_bg));
             }
-            if (!g.show_text) continue;
+            if (!g.show_text || g.a <= 0.0f) continue;
             float saved = P_.alpha;
             P_.alpha *= g.a;
-            if (g.a <= 0.0f) { P_.alpha = saved; continue; }
             dl->PushClipRect(ImVec2(p.min.x, std::max(p.min.y, top)), ImVec2(p.max.x, std::min(p.max.y, top + g.h)), true);
             draw_line_body(dl, 0, g.lay, g.text, g.lay.style, top + g.lay.pad, -1, col_x_, g.full);
             dl->PopClipRect();
@@ -3677,7 +3621,7 @@ void Editor::draw(const EditorParams& p) {
             if (cur_.col < (int)line.size()) {
                 int len;
                 unsigned cp = utf8::decode(line.data() + cur_.col, line.data() + line.size(), &len);
-                tw = cp == '\t' ? m.tabw : advance(m, cp, L.style[cur_.col]);
+                tw = advance(m, cp, L.style[cur_.col]);
             } else {
                 tw = m.sans->GetCharAdvance(' ');
             }
@@ -3745,13 +3689,6 @@ void Editor::draw(const EditorParams& p) {
     dl->PopClipRect();
 }
 
-// The edit <-> reader transition. Every visible word exists in both views
-// (the reader text maps back to source bytes), so it's drawn at a position
-// eased between the two. Syntax that only the editor shows fades out where
-// it stands; decorations only the reader has (bullet, checkbox, quote bar)
-// fade in where they'll be. Each view keeps its own scroll, so lines ease
-// between their two screen positions. At t = 1 this draws exactly what the
-// normal reader (or editor) frame does, so the hand-off is invisible.
 // Fill the visual rows covering text a..b (edit view), as the selection does.
 void Editor::draw_span(ImDrawList* dl, TextPos a, TextPos b, ImU32 col) {
     auto& V = lay_[0];
@@ -3760,24 +3697,43 @@ void Editor::draw_span(ImDrawList* dl, TextPos a, TextPos b, ImU32 col) {
         if (L.img) continue;
         float ly = origin_y_ + L.dy + L.pad + yoff_[l];
         if (ly > P_.max.y || ly + L.dh < P_.min.y) continue;
-        Metrics m = metrics(L.size);
-        int la = l == a.line ? a.col : 0;
-        int lb = l == b.line ? b.col : (int)lines_[l].size();
-        for (int r = 0; r < (int)L.rows.size(); r++) {
-            int ra = L.rows[r];
-            int rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)lines_[l].size();
-            int sa = std::max(la, ra), sb = std::min(lb, rb);
-            bool eol = l != b.line && r + 1 == (int)L.rows.size();
-            if (sa > sb || (sa == sb && !eol)) continue;
-            float x1 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sa, m);
-            float x2 = col_x_ + row_x(L, r) + measure(lines_[l], L.style, ra, sb, m);
-            if (eol) x2 += m.sans->GetCharAdvance(' ');
+        span_rows(l, a, b, [&](int r, float x1, float x2) {
             float ry = ly + r * L.row_h;
-            dl->AddRectFilled(ImVec2(std::round(x1), ry), ImVec2(std::round(x2), ry + L.row_h), col);
-        }
+            dl->AddRectFilled(ImVec2(std::round(col_x_ + x1), ry), ImVec2(std::round(col_x_ + x2), ry + L.row_h), col);
+        });
     }
 }
 
+// The visual rows of text line l (edit view) that a..b covers: f(row, x1,
+// x2), x from the column's left. A row the span runs on past the end of
+// takes a space more, for the line break.
+template <class F>
+void Editor::span_rows(int l, TextPos a, TextPos b, F&& f) const {
+    const Line& L = lay_[0][l];
+    const std::string& s = lines_[l];
+    Metrics m = metrics(L.size);
+    int la = l == a.line ? a.col : 0;
+    int lb = l == b.line ? b.col : (int)s.size();
+    for (int r = 0; r < (int)L.rows.size(); r++) {
+        int ra = L.rows[r];
+        int rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)s.size();
+        int sa = std::max(la, ra), sb = std::min(lb, rb);
+        bool eol = l != b.line && r + 1 == (int)L.rows.size();
+        if (sa > sb || (sa == sb && !eol)) continue;
+        float x1 = row_x(L, r) + measure(s, L.style, ra, sa, m);
+        float x2 = row_x(L, r) + measure(s, L.style, ra, sb, m);
+        if (eol) x2 += m.sans->GetCharAdvance(' ');
+        f(r, x1, x2);
+    }
+}
+
+// The edit <-> reader transition. Every visible word exists in both views
+// (the reader text maps back to source bytes), so it's drawn at a position
+// eased between the two. Syntax that only the editor shows fades out where
+// it stands; decorations only the reader has (bullet, checkbox, quote bar)
+// fade in where they'll be. Each view keeps its own scroll, so lines ease
+// between their two screen positions. At t = 1 this draws exactly what the
+// normal reader (or editor) frame does, so the hand-off is invisible.
 bool Editor::draw_morph(ImDrawList* dl, float s) {
     const EditorParams& p = P_;
     // Every part is its own exponential (Unreal's FInterpTo shape: fast out
@@ -4231,14 +4187,14 @@ namespace {
 
 struct Look {
     ImU32 col;
-    bool bold = false, italic = false, strike = false, underline = false;
+    bool italic = false, strike = false, underline = false;
 };
 
 Look resolve(Style f, const LineInfo& info, bool reader) {
     Look k{T.text};
-    if (f & S_Heading) { k.col = T.bright; k.bold = true; }
+    if (f & S_Heading) k.col = T.bright;
     if (f & S_Quote) { k.col = col_mix(T.text, T.dim, 0.35f); k.italic = true; }
-    if (f & S_Bold) { k.col = T.bright; k.bold = true; }
+    if (f & S_Bold) k.col = T.bright;
     if (f & S_Italic) k.italic = true;
     if (f & S_Strike) { k.strike = true; k.col = T.dim; }
     if (f & S_Highlight) k.col = T.bright;
@@ -4248,13 +4204,13 @@ Look resolve(Style f, const LineInfo& info, bool reader) {
     // A tag is one token, # and all: set in mono (see is_mono), a step
     // quieter than the text around it (it says what the note is, not what
     // it says).
-    if (f & S_Tag) { k.col = col_mix(T.text, T.dim, 0.4f); k.bold = k.italic = false; }
-    if (f & (S_Code | S_CodeBlock)) { k.col = T.code; k.bold = k.italic = false; }
+    if (f & S_Tag) { k.col = col_mix(T.text, T.dim, 0.4f); k.italic = false; }
+    if (f & (S_Code | S_CodeBlock)) { k.col = T.code; k.italic = false; }
     if (f & S_TaskDone) { k.col = T.dim; k.strike = !(f & S_Marker); }
     if (f & S_ListMark) k.col = structural;
     if (f & S_Marker) {
         k.col = T.dim;
-        k.bold = k.underline = k.strike = k.italic = false;
+        k.underline = k.strike = k.italic = false;
         if (f & (S_ListMark | S_QuoteMark | S_TaskBox)) k.col = structural;
         if ((f & S_TaskBox) && info.done) k.col = T.dim;
     }
@@ -4267,7 +4223,7 @@ Look resolve(Style f, const LineInfo& info, bool reader) {
 Look resolve_ini(Style f) {
     Look k{T.text};
     if (f & I_Comment) k.col = T.dim;
-    else if (f & I_Section) { k.col = T.bright; k.bold = true; }
+    else if (f & I_Section) k.col = T.bright;
     else if (f & (I_Bracket | I_Eq)) k.col = T.dim;
     else if (f & I_Value) k.col = T.bright;
     else if (f & I_Key) k.col = col_mix(T.text, T.dim, 0.2f);

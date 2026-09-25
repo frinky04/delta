@@ -226,7 +226,6 @@ public:
         b = pulse_.spans.front().second;
         return true;
     }
-    int pulse_spans() const { return pulse_.active ? (int)pulse_.spans.size() : 0; }
 
     // When the caret next changes blink state (for the idle loop).
     double next_blink(double now) const;
@@ -284,6 +283,7 @@ private:
         size_t bytes = 0;  // roughly what it holds in memory
     };
     Snap snapshot() const;
+    void step_history(std::vector<Snap>& from, std::vector<Snap>& to);  // undo / redo
     enum class Edit { None, Type, Delete, Other };
 
     // layout
@@ -322,7 +322,7 @@ private:
     void step_picked(int line, int tile, int dir);
     void vertical_picked(int line, int tile, int dir);
     void remove_picked(int line, int tile, int dir);
-    static int nearest_tile(const Line& L, float x, bool last_row);
+    static int nearest_tile(const Line& L, float x, float row_y);
     int img_col_at(const Line& L, int len, float x, float y) const;
     int img_tile_at(const Line& L, float x, float y) const;     // -1 if none there
     void delete_tile(int line, int tile);
@@ -357,6 +357,7 @@ private:
     void select_word_at(TextPos p);
     void toggle_task_line(int line);
     void pulse_changes(const std::vector<std::string>& before);
+    void pulse(std::vector<std::pair<TextPos, TextPos>> spans);
 
     // editing primitives
     void begin_edit(Edit kind);
@@ -519,6 +520,7 @@ private:
     TextPos paragraph_move(int dir) const;
     void renumber_lists(int l0, int l1);          // ordered lists touching these lines
     void draw_span(ImDrawList* dl, TextPos a, TextPos b, ImU32 col);
+    template <class F> void span_rows(int l, TextPos a, TextPos b, F&& f) const;
 
     // Space opening and closing. Each line's drawn height chases its real
     // height, and lines are stacked by drawn heights, so whatever opens or
