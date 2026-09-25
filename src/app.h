@@ -29,6 +29,7 @@ struct AppOptions {
     fs::path config_path;               // empty = default location
     std::vector<std::string> run;       // command ids to run after start-up
     bool sandbox = false;               // config_path is a sandbox's (see make_sandbox)
+    fs::path open;                      // a doc or folder to open, as if dropped (the command line's path)
 };
 
 class App {
@@ -62,6 +63,7 @@ private:
         Page,    // the note or the empty page has the keys: no palette or tool open
         Tag,     //   ...with the caret on a #tag
         Slip,    //   ...with the caret on a style slip (and not a misspelt word)
+        Visit,   //   ...with a doc from outside the notes visiting (not the manual)
         Scoped,  // the palette in a mode with a scope (Palette::kScoped)
         Notes,   //   ...listing notes
     };
@@ -81,11 +83,15 @@ private:
     void register_commands();
     void apply_bindings();
     bool is_config() const { return note_ && note_->path == cfg_path_; }
-    // The README, built in and read only: always in reader mode, never saved.
-    // Its path is one no file can have.
+    // A doc that's only visiting (NoteRef::visit): the manual, or a file from
+    // outside the notes (see app_import.cpp). Read only, always in reader
+    // mode and never saved; not in the notes' index, search, tags, links or
+    // recent notes. Leaving it just drops it.
+    bool is_visiting() const { return note_ && note_->visit; }
+    // The README, built in: a visitor whose path is one no file can have.
     static inline const fs::path kManual{"<manual>"};
     bool is_manual() const { return note_ && note_->path == kManual; }
-    bool is_note() const { return note_ && !is_config() && !is_manual(); }
+    bool is_note() const { return note_ && !is_config() && !is_visiting(); }
     bool need_note();  // is_note(), else says why the note command can't run
     void open_manual();
     std::vector<BindingDoc> binding_docs() const;
@@ -192,14 +198,28 @@ private:
     // Images (app_images.cpp).
     void paste(bool plain);
     void copy_out(bool cut);
+    std::string store_image(const std::string& bytes, std::string& err);   // -> the link to it, "" if not
     std::string import_image(const std::string& bytes, std::string& err);  // -> the line for it, "" if not
     std::vector<std::string> import_files(const std::vector<fs::path>& files, int& skipped);
     static std::string as_row(const std::vector<std::string>& lines);
     void fetch_image(const std::string& url);
     void poll_downloads();
-    void handle_drops();
+    void drop_images(const std::vector<fs::path>& files, ImVec2 at);  // into the open note
     void open_viewer(int line, int tile);
     void draw_viewer();
+
+    // Docs from outside: drops and the command line's path, visiting a doc,
+    // and keeping or importing docs as notes (app_import.cpp).
+    void handle_drops();
+    void open_paths(const std::vector<fs::path>& paths, ImVec2 at);
+    void visit(const fs::path& file);
+    void keep_note();
+    // Asks in the palette which space `docs` go to; `folder` (when one was
+    // dropped alone) can become a space of its own. `left`: files not taken.
+    void pick_import(std::vector<fs::path> docs, const fs::path& folder, int left);
+    struct ImportTally;
+    void import_docs(const std::vector<fs::path>& docs, const std::string& space, int left, bool keep);
+    bool import_doc(const fs::path& file, const std::string& space, ImportTally& t, NoteRef& out);
 
     // The palette, the page and the status line (app.cpp).
     void dispatch_keys(bool& fired);

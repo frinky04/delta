@@ -37,7 +37,7 @@ void App::refresh_problems() {
     if (is_config()) {
         for (auto& is : config_problems_)
             if (is.line >= 0) problems_.push_back({is.line, is.col0, is.col1, is.msg});
-    } else if (note_) {
+    } else if (note_ && !is_visiting()) {  // a visitor's links aren't the notes' business
         problems_ = link_problems(editor_.lines(), note_index_);
     }
     std::stable_sort(problems_.begin(), problems_.end(), [](const Diagnostic& a, const Diagnostic& b) {

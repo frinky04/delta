@@ -244,7 +244,9 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
     auto same = [](const Chord& a, const Chord& b) { return a.key == b.key && a.mods == b.mods; };
     auto overlap = [](Scope a, Scope b) {
         if (a > b) std::swap(a, b);
-        return a == b || a == Scope::App || (a == Scope::Page && (b == Scope::Tag || b == Scope::Slip)) || (a == Scope::Tag && b == Scope::Slip) || (a == Scope::Scoped && b == Scope::Notes);
+        // (A doc visiting is in reader mode, where no tag or slip is at the caret.)
+        return a == b || a == Scope::App || (a == Scope::Page && (b == Scope::Tag || b == Scope::Slip || b == Scope::Visit)) ||
+               (a == Scope::Tag && b == Scope::Slip) || (a == Scope::Scoped && b == Scope::Notes);
     };
     for (size_t i = 0; i < cmds_.size(); i++) {
         auto set = c.keys.find(cmds_[i].id);

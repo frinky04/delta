@@ -30,6 +30,22 @@ std::string path_u8(const fs::path& p) {
     return std::string(reinterpret_cast<const char*>(u.data()), u.size());
 }
 
+std::vector<std::string> utf8_args(int argc, char** argv) {
+    std::vector<std::string> out;
+#ifdef _WIN32
+    // argv is in the ANSI code page; the wide command line has every name.
+    int n = 0;
+    if (LPWSTR* w = CommandLineToArgvW(GetCommandLineW(), &n)) {
+        for (int i = 0; i < n; i++) out.push_back(path_u8(fs::path(w[i])));
+        LocalFree(w);
+        if (n == argc) return out;
+        out.clear();
+    }
+#endif
+    for (int i = 0; i < argc; i++) out.push_back(argv[i]);
+    return out;
+}
+
 #ifdef _WIN32
 static fs::path env_path(const wchar_t* name) {
     const wchar_t* v = _wgetenv(name);

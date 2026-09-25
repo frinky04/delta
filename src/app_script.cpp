@@ -2,6 +2,7 @@
 // For testing and scripting UI checks: command ids, "open:<note>" and
 // "palette:<text>", and steps that type, press keys and move the mouse as
 // a user would.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -33,9 +34,18 @@ void App::run_pending(double now) {
                 break;
             }
             if (id.rfind("open:", 0) == 0) { open_by_name(id.substr(5)); continue; }
-            // "drop:<path>" drops a file at the caret; "fetch:<url>" pastes
-            // an address as if it were on the clipboard.
-            if (id.rfind("drop:", 0) == 0) { on_drop({id.substr(5)}, ImVec2(-1, -1)); continue; }
+            // "drop:<path>" drops a file (or several, "a|b") at the caret;
+            // "fetch:<url>" pastes an address as if it were on the clipboard.
+            if (id.rfind("drop:", 0) == 0) {
+                std::vector<std::string> paths;
+                for (size_t a = 5; a <= id.size();) {
+                    size_t b = std::min(id.find('|', a), id.size());
+                    if (b > a) paths.push_back(id.substr(a, b - a));
+                    a = b + 1;
+                }
+                on_drop(std::move(paths), ImVec2(-1, -1));
+                continue;
+            }
             if (id.rfind("fetch:", 0) == 0) { if (editing()) fetch_image(id.substr(6)); continue; }
             if (id.rfind("palette:", 0) == 0) { open_palette(id.substr(8)); continue; }
             if (id.rfind("find:", 0) == 0 || id.rfind("replace:", 0) == 0) {

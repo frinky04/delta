@@ -25,6 +25,7 @@ const char* command_keywords(const std::string& id) {
         {"note.restore", "trash undelete recover"},
         {"note.save", "write"},
         {"note.reload", "revert disk discard conflict"},
+        {"note.keep", "import save copy visiting"},
         {"view.reader", "preview read"},
         {"view.zoom_in", "bigger larger"},
         {"view.zoom_out", "smaller"},

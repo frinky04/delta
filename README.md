@@ -86,6 +86,22 @@ Paste or drop an image into a note to add it. Drag its right edge to resize it. 
 
 Images are saved in the notes folder, once each, and linked with standard markdown.
 
+## Docs from elsewhere
+
+Drop a `.md` or `.txt` file on the window to read it without adding it to your notes. It opens in reader mode, and the status line shows `visiting / report.md`. A visiting doc is read only: it is never saved, and it stays out of search, tags, links and recent notes. Images beside it show as they would in its own folder. Open another note and it's gone. Opening a file with delta (`delta report.md`, or "open with" in your file manager) works the same way.
+
+To keep a visiting doc, use "keep note" (`ctrl+s` while visiting) and pick a space. delta copies the file in as a note and opens it. The original is never moved or changed.
+
+Drop several files, or a folder, to import them in one go: pick a space, or type a new space's name. A dropped folder can also become a space of its own, named after the folder. Only the `.md` and `.txt` files at the folder's top level come in; sub-folders are passed over, since spaces don't nest.
+
+When a doc comes in:
+
+- A `.txt` file becomes a `.md` note with its text as it was. Front matter stays as it is.
+- If the name is taken, the note gets the next free one, like "report 2". The status line says so.
+- Images it shows from files beside it, like `![](img/chart.png)`, are copied into your notes and relinked. Web images and absolute paths are left as they are. An image that can't be found stays as written, and the status line counts it.
+
+Images dropped along with docs go into the open note, as ever. Other files are skipped, and the status line says how many.
+
 ## Config
 
 Press `ctrl+,` to open the config. It holds only the settings you change. Each line shows its default, and mistakes are marked as you type. Use "add setting" to list every setting and key.

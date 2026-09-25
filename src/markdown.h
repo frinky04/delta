@@ -71,6 +71,7 @@ struct ImageRef {
     int begin = 0, end = 0;   // the whole ![...](...) in the line
     std::string alt;          // without the size
     std::string src;
+    int src_at = 0;           // where src is written in the line
     int w = 0, h = 0;         // size asked for, 0 = none
 };
 // Is this line nothing but images, one ![alt](src) or several separated by
@@ -79,6 +80,8 @@ struct ImageRef {
 bool md_image_row(const std::string& s, std::vector<ImageRef>* out = nullptr);
 // The same, for callers that care about the first (or only) image.
 bool md_image_line(const std::string& s, std::string* alt = nullptr, std::string* src = nullptr);
+// The one image starting at s[at] ("!["), wherever it is in the line.
+bool md_image_at(const std::string& s, size_t at, ImageRef& ref);
 // An image as markdown, with its size in the alt text (w = 0: no size).
 std::string md_image_text(const std::string& alt, const std::string& src, int w, int h = 0);
 // The same image with a different width asked for (0: its own size).

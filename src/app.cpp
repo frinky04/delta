@@ -129,8 +129,11 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     }
     if (opts.sandbox) status("sandbox: " + path_u8(cfg_path_.parent_path()));
     // The first launch opens the manual, over whatever else would open (back
-    // returns to it), with the ways out in the status line.
-    if (first_launch) {
+    // returns to it), with the ways out in the status line. A path to open
+    // (delta.exe report.md) is opened instead, as if it were dropped.
+    if (!opts.open.empty()) {
+        open_paths({opts.open}, ImVec2(-1, -1));
+    } else if (first_launch) {
         open_manual();
         std::string tip;
         for (auto [id, what] : {std::pair{"note.new", "new note"}, {"palette.notes", "find a note"}})
@@ -171,6 +174,7 @@ bool App::in_scope(Scope s) const {
         case Scope::Page: return page;
         case Scope::Tag: return page && tag_at_caret();
         case Scope::Slip: return page && slip_at_caret();
+        case Scope::Visit: return page && is_visiting() && !is_manual();
         case Scope::Scoped: return palette_.is_open() && palette_.scoped();
         case Scope::Notes: return palette_.in_mode('.');
     }
@@ -268,6 +272,7 @@ void App::register_commands() {
         if (save(true)) status("saved");
     });
     add("note.reload", "reload note", "", [this] { reload_note(); });
+    add("note.keep", "keep note", "ctrl+s", [this] { keep_note(); }, false, Scope::Visit);
     add("space.new", "new space", "", [this] { new_space(); });
     add("space.rename", "rename this space", "", [this] { rename_space(); });
     add("space.delete", "delete this space", "", [this] { delete_space(); });
@@ -276,6 +281,7 @@ void App::register_commands() {
     add("view.reader", "toggle reader mode", "ctrl+e", [this] {
         if (!note_ || is_config()) return;
         if (is_manual()) { status("the manual is read only"); return; }
+        if (is_visiting()) { status("visiting docs are read only; " + key_hint("note.keep", "keep it as a note")); return; }
         editor_.set_reader(!editor_.reader());  // morphs between the views
     });
     add("view.line_numbers", "toggle line numbers", "", [this] { cfg_.line_numbers = !cfg_.line_numbers; });
@@ -370,7 +376,7 @@ std::string App::text_to_save() const {
 }
 
 bool App::save(bool over_disk) {
-    if (!note_ || is_manual()) return true;
+    if (!note_ || is_visiting()) return true;
     std::string err;
     switch (file_.save(text_to_save(), editor_.version(), over_disk, &err)) {
     case NoteFile::Save::Clean: return true;
@@ -386,7 +392,7 @@ bool App::save(bool over_disk) {
 
 // The note as it is on disk, in place of what's in the editor.
 void App::reload_note() {
-    if (!note_ || is_manual()) return;
+    if (!note_ || is_visiting()) return;
     std::string text;
     if (!file_.reload(text, nullptr)) {
         status("couldn't read " + note_->name + "; it may have been moved or deleted", true);
@@ -422,10 +428,18 @@ void App::open_note(const NoteRef& n, bool push_history) {
     keep_yours();
     save();
     remember_view();
-    bool config = n.path == cfg_path_, manual = n.path == kManual;
+    bool config = n.path == cfg_path_, visit = n.visit;
     std::string text;
-    if (manual) {
+    if (n.path == kManual) {
         text.assign((const char*)g_manual, g_manual_size);
+        file_.close();
+    } else if (visit) {
+        // Read, never written: no file of its own to keep in step with.
+        if (!read_file(n.path, text)) {
+            status("couldn't open " + n.name + "; it may have been moved, deleted or locked by another app", true);
+            return;
+        }
+        if (text.rfind("\xEF\xBB\xBF", 0) == 0) text.erase(0, 3);  // a byte order mark isn't text
         file_.close();
     } else if (!file_.load(n.path, text, nullptr)) {
         status("couldn't open " + n.name + "; it may have been moved, deleted or locked by another app", true);
@@ -433,17 +447,17 @@ void App::open_note(const NoteRef& n, bool push_history) {
     }
 
     // The config is edited like a note, but as ini text and never in reader
-    // mode; the manual is only ever in reader mode. The reader preference
-    // comes back when you return to notes.
-    bool was_fixed = is_config() || is_manual();
-    if ((config || manual) && !was_fixed) reader_pref_ = editor_.reader();
-    if (config || manual) editor_.set_reader(manual, false);
+    // mode; a visiting doc (the manual too) is only ever in reader mode. The
+    // reader preference comes back when you return to notes.
+    bool was_fixed = is_config() || is_visiting();
+    if ((config || visit) && !was_fixed) reader_pref_ = editor_.reader();
+    if (config || visit) editor_.set_reader(visit, false);
     else if (was_fixed) editor_.set_reader(reader_pref_, false);
     editor_.set_syntax(config ? Syntax::Ini : Syntax::Markdown);
-    images_.set_note_dir(n.path.parent_path());  // images are found from the note's folder
+    images_.set_note_dir(n.path.parent_path());  // images are found from the note's (or doc's) folder
     editor_.set_text(text);
     note_ = n;
-    if (!config && !manual) {
+    if (!config && !visit) {
         space_ = n.space;
         note_index_ = store_.index();  // a note just made by following a link counts at once
     }
@@ -461,13 +475,14 @@ void App::open_note(const NoteRef& n, bool push_history) {
     seen_version_ = editor_.version();
     if (auto it = views_.find(path_u8(n.path)); it != views_.end()) editor_.restore_view(it->second.first, it->second.second);
     fade_start_ = anim::clock;
-    if (!config && !manual) recent_.visit(n);
+    if (!config && !visit) recent_.visit(n);
     set_title();
 }
 
 bool App::need_note() {
     if (is_config()) status("open a note first; the config stays where it is");
     else if (is_manual()) status("open a note first; the manual is read only");
+    else if (is_visiting()) status("keep it as a note first; this doc is only visiting");
     return is_note();
 }
 
@@ -476,6 +491,7 @@ void App::open_manual() {
     r.space = "delta";
     r.name = "manual";
     r.path = kManual;
+    r.visit = true;
     open_note(r);
 }
 
@@ -1100,6 +1116,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             if (!match_command(q, cmd.title, cmd.id, command_keywords(cmd.id), it.score, &it.hl, &it.aside)) continue;
             if (cmd.scope == Scope::Tag && !tag_at_caret()) it.score -= 50;  // "rename" is the note's, off a tag
             if (cmd.scope == Scope::Slip && !slip_at_caret()) it.score -= 50;
+            if (cmd.scope == Scope::Visit && !(is_visiting() && !is_manual())) it.score -= 50;  // "keep" is for visitors
             // Prefixes sit in a column of their own: the palette is mono, so
             // padding the keys to the widest a prefixed command has lines them up.
             std::string keys = cmd.chords.empty() ? "" : chord_str(cmd.chords.front());
