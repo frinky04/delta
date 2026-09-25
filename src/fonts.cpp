@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <fstream>
+#include <unordered_map>
 #include <vector>
 
 #include "config.h"
+#include "imgui.h"
+#include "imgui_freetype.h"
+#include "imgui_internal.h"
 #include "util.h"
 
 bool is_font_path(const std::string& v) {
@@ -57,6 +61,49 @@ std::string pick_font(const std::string& value, const std::string& builtin, Font
     FontFace bold;
     if (find_system_font(value, 600, bold) && real_bold(regular, bold) && is_font_file(bold.file)) out.bold = bold;
     return {};
+}
+
+// ---------------------------------------------------------------------------
+// Letter spacing
+
+// Each spaced font's ems. Glyphs are made on the UI thread, as they're first
+// drawn or measured at a size.
+static std::unordered_map<const ImFont*, float> g_spacing;
+
+float letter_spacing(const ImFont* font) {
+    auto it = g_spacing.find(font);
+    return it == g_spacing.end() ? 0.0f : it->second;
+}
+
+bool set_letter_spacing(ImFont* font, float em) {
+    if (!font || letter_spacing(font) == em) return false;
+    if (em == 0) g_spacing.erase(font);
+    else g_spacing[font] = em;
+    font->ClearOutputData();  // every size it's been made at
+    return true;
+}
+
+// FreeType's glyph, then the spacing on its advance (the outline stays put,
+// so the space falls after each letter, as in CSS).
+static bool spaced_load_glyph(ImFontAtlas* atlas, ImFontConfig* src, ImFontBaked* baked, void* data, ImWchar cp,
+                              ImFontGlyph* out_glyph, float* out_advance_x) {
+    if (!ImGuiFreeType::GetFontLoader()->FontBakedLoadGlyph(atlas, src, baked, data, cp, out_glyph, out_advance_x)) return false;
+    float extra = letter_spacing(baked->OwnerFont) * baked->Size;
+    if (out_glyph) out_glyph->AdvanceX += extra;
+    if (out_advance_x) *out_advance_x += extra;
+    return true;
+}
+
+const ImFontLoader* spaced_font_loader() {
+    static const ImFontLoader loader = [] {
+        ImFontLoader l = *ImGuiFreeType::GetFontLoader();
+        l.Name = "FreeType, spaced";
+        l.LoaderInit = nullptr;  // the atlas's loader sets FreeType up
+        l.LoaderShutdown = nullptr;
+        l.FontBakedLoadGlyph = spaced_load_glyph;
+        return l;
+    }();
+    return &loader;
 }
 
 // ---------------------------------------------------------------------------

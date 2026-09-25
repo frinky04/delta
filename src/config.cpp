@@ -50,6 +50,8 @@ const std::vector<Setting>& all_settings() {
         {"editor", "mono_font", K::Text, "Noto Sans Mono", 0, 0, nullptr, "for code; a name or a file", &Config::mono_font},
         {"editor", "font_size", K::Float, "14", 8, 48, nullptr, "px", &Config::font_size},
         {"editor", "line_height", K::Float, "1.5", 1, 3, nullptr, "x font size", &Config::line_height},
+        {"editor", "letter_spacing", K::Float, "0", -0.1f, 0.5f, nullptr, "x font size; between letters", &Config::letter_spacing},
+        {"editor", "mono_letter_spacing", K::Float, "0", -0.1f, 0.5f, nullptr, "x font size; text set in mono", &Config::mono_letter_spacing},
         {"editor", "code_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; code", &Config::code_size},
         {"editor", "small_size", K::Float, "0.8", 0.5f, 1.5f, nullptr, "x font size; line numbers, image labels", &Config::small_size},
         {"editor", "column_width", K::Int, "72", 20, 400, nullptr, "characters", &Config::column_width},

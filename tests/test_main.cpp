@@ -2805,6 +2805,33 @@ static void test_fonts() {
     CHECK(!is_font_path("JetBrains Mono") && !is_font_path("Iosevka Term"));
 }
 
+// Letter spacing is in the glyphs: every measure grows by ems x the size,
+// after each letter, and a change remakes the glyphs already made.
+static void test_letter_spacing() {
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    ImFontConfig fc;
+    fc.FontDataOwnedByAtlas = false;
+    fc.FontLoader = spaced_font_loader();
+    ImFont* f = atlas->AddFontFromMemoryTTF((void*)g_font_mono, (int)g_font_mono_size, 17, &fc);
+    auto W = [&](float size, const char* t) { return f->CalcTextSizeA(size, FLT_MAX, 0, t).x; };
+    auto near = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
+    const float plain20 = W(20, "abc"), plain40 = W(40, "abc");
+    CHECK(near(plain20, g_mono->CalcTextSizeA(20, FLT_MAX, 0, "abc").x));  // none until it's set
+
+    CHECK(set_letter_spacing(f, 0.1f));
+    CHECK(!set_letter_spacing(f, 0.1f));  // unchanged: nothing to remake
+    CHECK(near(letter_spacing(f), 0.1f));
+    CHECK(near(W(20, "abc"), plain20 + 3 * 2.0f));
+    CHECK(near(W(40, "abc"), plain40 + 3 * 4.0f));  // ems: twice the size, twice the space
+    CHECK(near(f->GetFontBaked(20)->GetCharAdvance('a') * 3, W(20, "abc")));
+    CHECK(set_letter_spacing(f, -0.05f));  // tighter
+    CHECK(near(W(20, "abc"), plain20 - 3 * 1.0f));
+    CHECK(set_letter_spacing(f, 0));
+    CHECK(letter_spacing(f) == 0);
+    CHECK(near(W(20, "abc"), plain20));
+    atlas->RemoveFont(f);
+}
+
 // The font worker: fonts found and read off the UI thread, the newest request
 // winning, and each file read once while anything holds it.
 static void test_font_loader() {
@@ -3388,6 +3415,7 @@ int main() {
     test_config_set();
     test_text_file();
     test_font_loader();
+    test_letter_spacing();
     test_tags();
     test_completion();
     test_complete_sources();

@@ -33,6 +33,20 @@ bool real_bold(const FontFace& regular, const FontFace& bold);
 // what's wrong ("" if nothing), and then `out` is the embedded font.
 std::string pick_font(const std::string& value, const std::string& builtin, FontPick& out);
 
+// Letter spacing, in ems as in CSS letter-spacing: each glyph's advance
+// grows by `em` x the size it's drawn at. It's part of the glyph, so every
+// measure (CalcTextSize, GetCharAdvance) agrees with what's drawn. A font
+// takes it when all its sources are added with spaced_font_loader() (FreeType
+// underneath, as the atlas's own loader must be).
+struct ImFont;
+struct ImFontLoader;
+const ImFontLoader* spaced_font_loader();
+// Sets a font's spacing, returning whether it changed; its glyphs are then
+// dropped, to be made again at the new width, so only between frames. 0
+// forgets the font (do that before removing it).
+bool set_letter_spacing(ImFont* font, float em);
+float letter_spacing(const ImFont* font);
+
 // A font file's bytes, shared by every font made from it.
 using FontBytes = std::shared_ptr<const std::string>;
 

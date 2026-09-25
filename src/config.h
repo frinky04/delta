@@ -22,6 +22,8 @@ struct Config {
     std::string mono_font = "Noto Sans Mono";  // the same, for code
     float font_size = 14.0f;     // px, as in CSS (the em size)
     float line_height = 1.5f;    // multiple of font_size, as in CSS
+    float letter_spacing = 0.0f;       // ems between letters, as in CSS letter-spacing
+    float mono_letter_spacing = 0.0f;  // the same for mono: code, palette, status line
     float code_size = 0.9f;      // multiple of font_size: code in notes
     float small_size = 0.8f;     // multiple of font_size: line numbers, image labels
     int column_width = 72;       // measured in "ch" (width of the digit 0)

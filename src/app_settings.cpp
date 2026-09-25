@@ -96,6 +96,7 @@ ImFont* App::load_font(const FontBytes& bytes, int index, const unsigned char* n
         // Light hinting snaps glyphs to the pixel grid vertically only, so
         // stems and edges are crisp without bending the letter shapes.
         c.FontLoaderFlags = ImGuiFreeTypeLoaderFlags_LightHinting | ImGuiFreeTypeLoaderFlags_LoadColor;
+        c.FontLoader = spaced_font_loader();  // letter_spacing
         ImFont* f = atlas->AddFontFromMemoryTTF(const_cast<void*>(data), (int)size, 17.0f, &c);
         if (!font) font = f;
     };
@@ -116,6 +117,11 @@ void App::apply_fonts() {
     } else if (font_loader_.take(in)) {
         install_fonts(in);
     }
+    // Letter spacing is in the glyphs, so a change makes them again.
+    bool spaced = false;
+    for (ImFont* f : {sans_, sans_bold_}) spaced |= set_letter_spacing(f, cfg_.letter_spacing);
+    for (ImFont* f : {mono_, mono_bold_}) spaced |= set_letter_spacing(f, cfg_.mono_letter_spacing);
+    if (spaced) editor_.fonts_changed();
 
     if (preview_want_ != preview_asked_) {
         preview_asked_ = preview_want_;
@@ -126,7 +132,10 @@ void App::apply_fonts() {
     }
     // Nothing wanted any more (the palette closed), or something else now.
     if (!preview_loaded_.empty() && preview_loaded_ != preview_want_) {
-        if (preview_font_) ImGui::GetIO().Fonts->RemoveFont(preview_font_);
+        if (preview_font_) {
+            set_letter_spacing(preview_font_, 0);
+            ImGui::GetIO().Fonts->RemoveFont(preview_font_);
+        }
         preview_font_ = nullptr;
         preview_bytes_.reset();
         preview_error_.clear();
@@ -138,8 +147,10 @@ void App::apply_fonts() {
         bool mono = preview_want_[0] == 'm';
         preview_error_ = pl.problem;
         preview_bytes_ = pl.regular;
-        if (pl.problem.empty())
+        if (pl.problem.empty()) {
             preview_font_ = load_font(pl.regular, pl.pick.regular.index, mono ? g_font_mono : g_font_sans, mono ? g_font_mono_size : g_font_sans_size);
+            set_letter_spacing(preview_font_, mono ? cfg_.mono_letter_spacing : cfg_.letter_spacing);
+        }
         preview_loaded_ = preview_want_;
     }
 
@@ -176,6 +187,8 @@ void App::install_fonts(FontLoader::Pair& in) {
     fonts_key_ = key;
 
     ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    // Their spacing is forgotten first (apply_fonts spaces the new ones).
+    for (ImFont* f : {sans_, sans_bold_, mono_, mono_bold_}) set_letter_spacing(f, 0);
     // A bold may be its regular font again: remove each only once.
     if (sans_bold_ != sans_) atlas->RemoveFont(sans_bold_);
     if (mono_bold_ != mono_) atlas->RemoveFont(mono_bold_);
