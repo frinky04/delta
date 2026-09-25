@@ -31,6 +31,7 @@
 #include "keys.h"
 #include "commands.h"
 #include "tags.h"
+#include "complete.h"
 
 extern const unsigned char g_font_sans[];
 extern const std::size_t g_font_sans_size;
@@ -2782,6 +2783,15 @@ static void test_tags() {
     CHECK(ix.notes().size() == 2 && with("x") == 0);
     ix.set(a, {"#w"});  // as it is in the editor
     CHECK(with("w") == 1 && with("z") == 0);
+
+    // Counted: each tag's notes, under its name as first written.
+    store.create_note("home", "d", "#Y #w", c);
+    ix.refresh(store.all_notes());
+    auto all = ix.tally();
+    CHECK(all.size() == 2 && all["y"].name == "Y" && all["y"].notes == 2 && all["w"].notes == 2);
+    CHECK(ix.notes_with("W") == 2 && ix.notes_with("nope") == 0);
+    auto work = ix.tally([](const TagIndex::Entry& e) { return e.note.space == "work"; });
+    CHECK(work.size() == 2 && work["y"].name == "y" && work["y"].notes == 1);
 }
 
 // Completion as you type: the list comes up for a word being written, enter
@@ -2857,6 +2867,76 @@ static void test_completion() {
     CHECK(e3.completing());
     key(e3, ImGuiKey_Enter);
     CHECK_EQ(e3.text(), std::string("[[work/Other]]"));
+}
+
+// What the editor completes to: every tag, ranked, and the notes to link to.
+static void test_complete_sources() {
+    TempDir tmp("delta_test_complete");
+    Store store;
+    store.set_root(tmp.path);
+    NoteRef a, b, c, open;
+    store.create_note("work", "a", "#rust #draft", a);
+    store.create_note("work", "b", "#rust #rum", b);
+    store.create_note("home", "c", "#Rust #ruby", c);
+    store.create_note("work", "open", "#rx", open);
+    TagIndex ix;
+    ix.refresh(store.all_notes());
+    auto labels = [](const std::vector<CompletionItem>& v) {
+        std::string s;
+        for (auto& it : v) s += (s.empty() ? "" : " ") + it.label;
+        return s;
+    };
+    // The open note as it is in the editor, less the tag being written; a
+    // used tag outranks a shorter one; "#r" is #rust, not #draft.
+    std::vector<std::string> lines = {"#rustic #re"};
+    auto tags = complete_tags(ix, open.path, lines, TextPos{0, 11}, "r");
+    CHECK_EQ(labels(tags), std::string("#Rust #rum #ruby #rustic"));
+    CHECK(tags.size() == 4 && tags[0].insert == "Rust" && tags[0].meta == "3" && tags[0].hl == std::vector<int>{1});
+    CHECK(tags[3].meta == "1" && tags[3].dim == 0);
+    // No note open: every note as it is on disk.
+    CHECK_EQ(labels(complete_tags(ix, {}, {}, {}, "rx")), std::string("#rx"));
+    CHECK(complete_tags(ix, open.path, lines, TextPos{0, 11}, "rx").empty());
+    // At most 50.
+    std::string many;
+    for (int i = 0; i < 60; i++) many += "#t" + std::to_string(i) + " ";
+    CHECK_EQ(complete_tags(TagIndex{}, open.path, {many}, TextPos{0, 0}, "t").size(), size_t(50));
+
+    NoteIndex nx;
+    nx.spaces["work"] = {"work", {{"alpha", "Alpha"}, {"beta", "Beta"}, {"me", "Me"}}};
+    nx.spaces["home"] = {"Home", {{"alpha", "alpha"}, {"alps", "Alps"}}};
+    // This space's by name, others' as "space/name", with the space dim.
+    auto links = complete_links(nx, "work", "me", "al");
+    CHECK_EQ(labels(links), std::string("Alpha Home/Alps Home/alpha"));
+    CHECK(links[0].dim == 0 && links[0].hl == (std::vector<int>{0, 1}) && links[0].insert == "Alpha");
+    CHECK(links[1].dim == 5 && links[1].hl == (std::vector<int>{5, 6}) && links[1].insert == "Home/Alps");
+    // Among equals, this space's first, then by name; not to itself.
+    CHECK_EQ(labels(complete_links(nx, "work", "me", "")), std::string("Alpha Beta Home/alpha Home/Alps"));
+    CHECK_EQ(labels(complete_links(nx, "work", "", "m")), std::string("Me"));  // "hoMe/..." begins no word
+    CHECK(complete_links(nx, "work", "me", "lp").empty());  // a match begins a word
+    NoteIndex big;
+    for (int i = 0; i < 60; i++) big.spaces["s"].notes["n" + std::to_string(i)] = "n" + std::to_string(i);
+    big.spaces["s"].name = "s";
+    CHECK_EQ(complete_links(big, "s", "", "").size(), size_t(50));
+}
+
+// Go to line: "42", "42:10", "+5" / "-5" from where you were.
+static void test_line_target() {
+    std::vector<std::string> lines = {"one", "two", "thr\xc3\xa9\xc3\xa9", "four"};
+    TextPos to;
+    auto at = [&](const std::string& q, int origin, int line, int col) {
+        to = {};
+        return parse_line_target(q, origin, lines, to) && to.line == line && to.col == col;
+    };
+    CHECK(at("2", 0, 1, 0));
+    CHECK(at("2:3", 0, 1, 2));
+    CHECK(at("2:", 0, 1, 0));
+    CHECK(at("3:5", 0, 2, 5));   // columns count characters
+    CHECK(at("3:99", 0, 2, 7));
+    CHECK(at("+1", 1, 2, 0));
+    CHECK(at("-5", 1, 0, 0));
+    CHECK(at("99", 0, 3, 0));
+    CHECK(at("-0", 2, 2, 0));
+    for (const char* bad : {"", "0", "2x", ":3", "+", "2:x", " 2"}) CHECK(!parse_line_target(bad, 0, lines, to));
 }
 
 // A palette row that fills the query (a tag, in the # mode) keeps the
@@ -2970,6 +3050,8 @@ int main() {
     test_font_loader();
     test_tags();
     test_completion();
+    test_complete_sources();
+    test_line_target();
     test_palette_fill();
 
     ImGui::DestroyContext();

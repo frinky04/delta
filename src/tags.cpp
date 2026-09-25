@@ -141,3 +141,25 @@ void TagIndex::refresh(const std::vector<NoteRef>& notes) {
 void TagIndex::set(const NoteRef& n, const std::vector<std::string>& lines) {
     notes_[path_u8(n.path)] = {n, tags_of(lines), stamp_of(n.path)};
 }
+
+void count_tags(TagTally& into, const TagSet& tags) {
+    for (auto& [k, v] : tags) {
+        TagCount& t = into[k];
+        if (t.name.empty()) t.name = v;
+        t.notes++;
+    }
+}
+
+TagTally TagIndex::tally(const std::function<bool(const Entry&)>& include) const {
+    TagTally out;
+    for (auto& [path, e] : notes_)
+        if (!include || include(e)) count_tags(out, e.tags);
+    return out;
+}
+
+int TagIndex::notes_with(const std::string& tag) const {
+    std::string key = lower(tag);
+    int n = 0;
+    for (auto& [path, e] : notes_) n += e.tags.count(key) ? 1 : 0;
+    return n;
+}

@@ -2,6 +2,7 @@
 // #tags: finding them in a note's lines, which notes have which, the
 // palette's tag queries, and renaming a tag in every note.
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -50,6 +51,15 @@ bool tag_query_match(const TagQuery& q, const TagSet& tags);
 // the next). The first term goes without its #: the prompt has it.
 std::string tag_query_fill(const std::string& text, const std::string& name);
 
+// A tag counted across notes: its name as first written, and how many have it.
+struct TagCount {
+    std::string name;
+    int notes = 0;
+};
+using TagTally = std::map<std::string, TagCount>;  // by lower-cased name
+// One more note with these tags.
+void count_tags(TagTally& into, const TagSet& tags);
+
 // Which notes have which tags. Notes are read once, then again only when
 // they change on disk.
 class TagIndex {
@@ -66,6 +76,9 @@ public:
     // saved).
     void set(const NoteRef& n, const std::vector<std::string>& lines);
     const std::map<std::string, Entry>& notes() const { return notes_; }  // by path
+    // Every tag on the notes `include` takes (all, without one).
+    TagTally tally(const std::function<bool(const Entry&)>& include = {}) const;
+    int notes_with(const std::string& tag) const;  // any case
 
 private:
     std::map<std::string, Entry> notes_;

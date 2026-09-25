@@ -2,6 +2,7 @@
 // Getting around between notes: where you've been (back and forward, like a
 // browser) and which notes you've had open lately (the switcher, ctrl+tab).
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "editor.h"
@@ -56,3 +57,7 @@ public:
 private:
     std::vector<NoteRef> notes_;
 };
+
+// Go to line: where "42", "42:10" (line and column, in characters) or
+// "+5" / "-5" (from line `origin`) lands in `lines`. False if it isn't one.
+bool parse_line_target(const std::string& q, int origin, const std::vector<std::string>& lines, TextPos& to);

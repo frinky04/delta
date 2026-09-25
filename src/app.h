@@ -141,6 +141,7 @@ private:
     // `now`), completing them and [[links]] as you write, the palette's #
     // mode, and renaming one in every note.
     void refresh_tags(bool now);
+    void tags_now();  // fresh now, the open note as it is in the editor
     std::vector<CompletionItem> complete_tags(const std::string& word);
     std::vector<CompletionItem> complete_links(const std::string& word);
     void build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total);
@@ -149,7 +150,6 @@ private:
     void open_tag_rename(const std::string& tag);
     void confirm_tag_rename(const std::string& from, const std::string& to);
     void apply_tag_rename(const std::string& from, const std::string& to);
-    int notes_tagged(const std::string& tag) const;  // in every space
     void move_note();
     void delete_note();
     void new_space();

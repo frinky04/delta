@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "util.h"
+
 static constexpr size_t kMaxPlaces = 200, kMaxRecent = 200;
 
 static bool somewhere(const Place& p) { return !p.note.path.empty(); }
@@ -84,4 +86,33 @@ void Recent::update(const std::function<void(NoteRef&)>& fn) {
 
 void Recent::forget(const fs::path& note) {
     notes_.erase(std::remove_if(notes_.begin(), notes_.end(), [&](const NoteRef& n) { return n.path == note; }), notes_.end());
+}
+
+bool parse_line_target(const std::string& q, int origin, const std::vector<std::string>& lines, TextPos& to) {
+    if (q.empty()) return false;
+    size_t i = 0;
+    int sign = 0;
+    if (q[0] == '+' || q[0] == '-') { sign = q[0] == '+' ? 1 : -1; i = 1; }
+    auto number = [&](long& n) {
+        size_t start = i;
+        n = 0;
+        while (i < q.size() && q[i] >= '0' && q[i] <= '9' && n < 10000000) n = n * 10 + (q[i++] - '0');
+        return i > start;
+    };
+    long line = 0, col = 1;
+    if (!number(line)) return false;
+    if (i < q.size() && q[i] == ':') {
+        i++;
+        if (i < q.size() && !number(col)) return false;
+    }
+    if (i != q.size()) return false;
+    long target = sign ? origin + sign * line : line - 1;
+    if (!sign && line < 1) return false;
+    to.line = (int)std::clamp<long>(target, 0, (long)lines.size() - 1);
+    // Columns count characters, like the status bar's.
+    const std::string& s = lines[to.line];
+    int b = 0;
+    for (long c = 1; c < col && b < (int)s.size(); c++) b = utf8::next(s, b);
+    to.col = b;
+    return true;
 }
