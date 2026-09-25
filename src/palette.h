@@ -40,8 +40,8 @@ public:
     // Characters that switch mode when typed first. No prefix is commands,
     // the root that every other mode backspaces out to.
     static constexpr const char* kModes = ".@:?/[#";
-    // Modes with a scope, which tab widens from this space to every space
-    // (notes, text search and tags).
+    // Modes with a scope, which set_wide widens from this space to every
+    // space (notes, text search and tags). App binds it to tab.
     static constexpr const char* kScoped = ".?#";
 
     // Extras a pick can have.
@@ -83,6 +83,9 @@ public:
     // A word beside the count about how the list is shown ("by name"),
     // set by the builder; empty for none.
     void set_tag(std::string t) { tag_ = std::move(t); }
+    // The keys of the mode's own commands ("ctrl+r to sort"), shown before the
+    // tag until something is typed. Set by the builder; empty for none.
+    void set_hint(std::string t) { hint_ = std::move(t); }
     // What an empty list says instead of "no matches": why it's empty and
     // where to go from there. Set by the builder; empty for the default.
     void set_empty(std::string t) { empty_ = std::move(t); }
@@ -130,7 +133,7 @@ private:
     std::string pending_text_;
     bool apply_text_ = false;
     bool focus_ = false;
-    std::string title_, action_label_, tag_, empty_;
+    std::string title_, action_label_, tag_, hint_, empty_;
     std::vector<PaletteItem> fixed_, items_;
     PickOptions opts_;
     int generation_ = 0;

@@ -46,13 +46,27 @@ public:
     void apply_fonts();
 
 private:
+    // Where a command's keys work. Scopes nest, and a key goes to the
+    // innermost one that binds it: f2 on a #tag renames the tag, anywhere
+    // else on the page the note. What's under the caret is a scope only
+    // when a command of its own acts on it.
+    enum class Scope {
+        App,     // anywhere, the palette and status-line tools too
+        Page,    // the note or the empty page has the keys: no palette or tool open
+        Tag,     //   ...with the caret on a #tag
+        Scoped,  // the palette in a mode with a scope (Palette::kScoped)
+        Notes,   //   ...listing notes
+    };
+    static int depth(Scope s) { return s == Scope::App ? 0 : s == Scope::Page || s == Scope::Scoped ? 1 : 2; }
+    bool in_scope(Scope s) const;
+
     struct Command {
         std::string id, title, defaults;
         std::function<void()> run;
         bool repeat = false;     // fires on key repeat (line moves, undo...)
-        bool global = false;     // also works while the palette is open
+        Scope scope = Scope::Page;
         bool in_palette = true;
-        char prefix = 0;         // the palette mode it opens, typed first
+        char prefix = 0;         // the palette mode it opens or works in, typed first
         std::vector<Chord> chords;
     };
 
@@ -102,6 +116,9 @@ private:
     std::vector<BindingDoc> binding_docs() const;
     Command* find_command(const std::string& id);
     std::string chord_for(const std::string& id) const;
+    // "ctrl+r sort": a command's key and what it does, for the palette
+    // mode it works in; "" when it has no key.
+    std::string key_hint(const std::string& id, const std::string& what) const;
 
     // notes
     void open_note(const NoteRef& n, bool push_history = true);
@@ -126,7 +143,9 @@ private:
     std::vector<CompletionItem> complete_tags(const std::string& word);
     std::vector<CompletionItem> complete_links(const std::string& word);
     void build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total);
-    void rename_tag_at_caret();
+    bool tag_at_caret(std::string* name = nullptr) const;
+    void pick_tag_rename();  // the tag at the caret, else one picked
+    void open_tag_rename(const std::string& tag);
     void confirm_tag_rename(const std::string& from, const std::string& to);
     void apply_tag_rename(const std::string& from, const std::string& to);
     int notes_tagged(const std::string& tag) const;  // in every space

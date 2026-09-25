@@ -222,9 +222,6 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         mode_ = 0;
         built_for_ = "\x01";
     }
-    // Tab widens a scoped mode to every space, and narrows it back.
-    if (open_ && !hold_ && scoped() && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) set_wide(!wide_);
-
     // Rebuild the list whenever the text changes.
     if (open_ && built_for_ != text()) {
         built_for_ = text();
@@ -233,6 +230,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
         empty_.clear();
         if (kind_ == Kind::Query) {
             tag_.clear();
+            hint_.clear();
             build(text(), items_, total_);
         } else if (kind_ == Kind::Pick) {
             std::string q = trim(buf_);
@@ -325,6 +323,7 @@ std::function<void()> Palette::draw(const Frame& f, const Builder& build, const 
     if (kind_ != Kind::Prompt && total_ != -2)
         count = total_ >= 0 ? std::to_string(matches) + "/" + std::to_string(total_) : std::to_string(matches);
     if (kind_ == Kind::Query && !tag_.empty()) count = tag_ + (count.empty() ? "" : "  " + count);
+    if (kind_ == Kind::Query && !hint_.empty() && !buf_[0]) count = hint_ + (count.empty() ? "" : "   " + count);
     float count_w = count.empty() ? 0 : W(mono, count);
     if (!count.empty())
         dl->AddText(mono, ms, ImVec2(std::round(x0 + cw - count_w), text_y), col_alpha(T.dim, vis), count.c_str());

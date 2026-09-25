@@ -373,6 +373,31 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
             issues.push_back(is);
         }
     }
+    // A key you gave a command that another has where both work: the inner
+    // scope's runs, or in one scope the first listed (see dispatch_keys).
+    auto chords_of = [&](const Command& cmd) {
+        auto it = c.keys.find(cmd.id);
+        return parse_chords(it != c.keys.end() ? it->second : cmd.defaults);
+    };
+    auto same = [](const Chord& a, const Chord& b) { return a.key == b.key && a.mods == b.mods; };
+    auto overlap = [](Scope a, Scope b) {
+        if (a > b) std::swap(a, b);
+        return a == b || a == Scope::App || (a == Scope::Page && b == Scope::Tag) || (a == Scope::Scoped && b == Scope::Notes);
+    };
+    for (size_t i = 0; i < cmds_.size(); i++) {
+        auto set = c.keys.find(cmds_[i].id);
+        if (set == c.keys.end() || set->second == cmds_[i].defaults) continue;
+        for (auto& ch : chords_of(cmds_[i]))
+            for (size_t j = 0; j < cmds_.size(); j++) {
+                if (j == i || !overlap(cmds_[i].scope, cmds_[j].scope)) continue;
+                auto theirs = chords_of(cmds_[j]);
+                if (std::none_of(theirs.begin(), theirs.end(), [&](const Chord& o) { return same(ch, o); })) continue;
+                int di = depth(cmds_[i].scope), dj = depth(cmds_[j].scope);
+                const std::string& wins = di != dj ? (di > dj ? cmds_[i].id : cmds_[j].id) : cmds_[std::min(i, j)].id;
+                issues.push_back(issue_at(c, "keys." + cmds_[i].id, true,
+                                          chord_str(ch) + " is also the key for " + cmds_[j].id + "; " + wins + " runs where both work"));
+            }
+    }
     if (!Store::check_name(c.default_space, "space").empty())
         issues.push_back(issue_at(c, "general.default_space", true, "not a valid folder name, using default"));
     if (!Store::check_name(c.daily_space, "space").empty())
@@ -931,6 +956,23 @@ std::string App::chord_for(const std::string& id) const {
     return {};
 }
 
+std::string App::key_hint(const std::string& id, const std::string& what) const {
+    std::string k = chord_for(id);
+    return k.empty() ? "" : k + " to " + what;
+}
+
+bool App::in_scope(Scope s) const {
+    bool page = !palette_.is_open() && bar_ == Bar::None;
+    switch (s) {
+        case Scope::App: return true;
+        case Scope::Page: return page;
+        case Scope::Tag: return page && tag_at_caret();
+        case Scope::Scoped: return palette_.is_open() && palette_.scoped();
+        case Scope::Notes: return palette_.in_mode('.');
+    }
+    return false;
+}
+
 // Unreadable chords are skipped (check_settings reports them).
 void App::apply_bindings() {
     for (auto& c : cmds_) {
@@ -940,32 +982,38 @@ void App::apply_bindings() {
 }
 
 void App::register_commands() {
-    auto add = [&](const char* id, const char* title, const char* keys, std::function<void()> fn, bool repeat = false, bool global = false) {
+    auto add = [&](const char* id, const char* title, const char* keys, std::function<void()> fn, bool repeat = false, Scope scope = Scope::Page) {
         Command c;
         c.id = id;
         c.title = title;
         c.defaults = keys;
         c.run = std::move(fn);
         c.repeat = repeat;
-        c.global = global;
+        c.scope = scope;
         cmds_.push_back(std::move(c));
     };
     auto ed = [this](void (Editor::*fn)()) { return [this, fn] { if (editing()) (editor_.*fn)(); }; };
 
     // Navigation
-    add("palette.notes", "find note in this space", "ctrl+o", [this] { open_palette("."); }, false, true);
-    add("palette.all", "find note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, true);
+    add("palette.notes", "find note in this space", "ctrl+o", [this] { open_palette("."); }, false, Scope::App);
+    add("palette.all", "find note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, Scope::App);
+    // A palette mode's own commands. Their keys work in the mode; picked
+    // from the list of commands, they open it first.
     add("palette.sort", "sort notes by name or recent", "ctrl+r", [this] {
         sort_recent_ = !sort_recent_;
         if (palette_.in_mode('.')) palette_.rebuild();
-        else status(sort_recent_ ? "notes sorted by recent" : "notes sorted by name");
-    }, false, true);
-    add("palette.commands", "show all commands", "ctrl+p", [this] { open_palette(""); }, false, true);
-    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, true);
-    add("palette.headings", "jump to heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, true);
-    add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, true);
-    add("find.open", "find in this note", "ctrl+f", [this] { open_find(false); }, false, true);
-    add("find.replace", "find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, true);
+        else open_palette(".");
+    }, false, Scope::Notes);
+    add("palette.widen", "widen to every space, or back", "tab", [this] {
+        if (palette_.is_open() && palette_.scoped()) palette_.set_wide(!palette_.wide());
+        else open_palette(".", true);
+    }, false, Scope::Scoped);
+    add("palette.commands", "show all commands", "ctrl+p", [this] { open_palette(""); }, false, Scope::App);
+    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, Scope::App);
+    add("palette.headings", "jump to heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, Scope::App);
+    add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, Scope::App);
+    add("find.open", "find in this note", "ctrl+f", [this] { open_find(false); }, false, Scope::App);
+    add("find.replace", "find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, Scope::App);
     add("nav.heading_next", "next heading", "ctrl+alt+down", [this] {
         if (!editing()) return;
         Jump j(*this, History::Heading);
@@ -991,9 +1039,9 @@ void App::register_commands() {
     add("palette.search", "search notes in this space", "ctrl+shift+f", [this] {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
-    }, false, true);
-    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, true);
-    add("palette.tags", "find notes by tag", "ctrl+t", [this] { open_palette("#"); }, false, true);
+    }, false, Scope::App);
+    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, Scope::App);
+    add("palette.tags", "find notes by tag", "ctrl+t", [this] { open_palette("#"); }, false, Scope::App);
     add("nav.back", "go back", "alt+left", [this] { history_step(-1); });
     add("nav.forward", "go forward", "alt+right", [this] { history_step(1); });
     add("nav.switch", "switch to recent note", "ctrl+tab", [this] { switch_note(1); }, true);
@@ -1004,12 +1052,8 @@ void App::register_commands() {
         palette_.prompt("new note: " + space_ + "/", "", "+ new note", [this](const std::string& v) { create_note(space_, v); });
     });
     add("note.daily", "open today's daily note", "alt+d", [this] { open_daily(); });
-    // On a #tag, the tag; anywhere else, the note.
-    add("note.rename", "rename note", "f2", [this] {
-        LinkSpan l;
-        if (editing() && is_note() && editor_.link_at_caret(l) && l.tag) rename_tag_at_caret();
-        else rename_note();
-    });
+    add("note.rename", "rename note", "f2", [this] { rename_note(); });
+    add("tag.rename", "rename tag", "f2", [this] { pick_tag_rename(); }, false, Scope::Tag);
     add("note.move", "move note to another space", "", [this] { move_note(); });
     add("note.delete", "delete note", "", [this] { delete_note(); });
     add("note.restore", "restore deleted note", "", [this] { restore_note(); });
@@ -1024,12 +1068,12 @@ void App::register_commands() {
         if (!note_ || is_config()) return;
         if (is_manual()) { status("the manual is read only"); return; }
         editor_.set_reader(!editor_.reader());  // morphs between the views
-    }, false, false);
+    });
     add("view.line_numbers", "toggle line numbers", "", [this] { cfg_.line_numbers = !cfg_.line_numbers; });
-    add("view.zoom_in", "zoom in", "ctrl+= ctrl+numpad+", [this] { zoom_ = std::min(3.0f, zoom_ * 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
-    add("view.zoom_out", "zoom out", "ctrl+- ctrl+numpad-", [this] { zoom_ = std::max(0.5f, zoom_ / 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, true);
-    add("view.zoom_reset", "reset zoom", "ctrl+0", [this] { zoom_ = 1; status("zoom 100%"); }, false, true);
-    add("view.fullscreen", "toggle full screen", "f11", [this] { toggle_fullscreen(); }, false, true);
+    add("view.zoom_in", "zoom in", "ctrl+= ctrl+numpad+", [this] { zoom_ = std::min(3.0f, zoom_ * 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, Scope::App);
+    add("view.zoom_out", "zoom out", "ctrl+- ctrl+numpad-", [this] { zoom_ = std::max(0.5f, zoom_ / 1.1f); status("zoom " + std::to_string((int)std::lround(zoom_ * 100)) + "%"); }, true, Scope::App);
+    add("view.zoom_reset", "reset zoom", "ctrl+0", [this] { zoom_ = 1; status("zoom 100%"); }, false, Scope::App);
+    add("view.fullscreen", "toggle full screen", "f11", [this] { toggle_fullscreen(); }, false, Scope::App);
 
     // App
     add("config.open", "edit config", "ctrl+,", [this] { open_config(); });
@@ -1054,7 +1098,7 @@ void App::register_commands() {
     add("config.reload", "reload config", "", [this] { load_settings(); status("config reloaded"); });
     add("app.open_folder", "show this space's folder", "", [this] { open_with_default_app(store_.root() / u8path(space_)); });
     add("app.manual", "open manual", "f1", [this] { open_manual(); });
-    add("app.quit", "quit", "ctrl+q", [this] { quit_ = true; }, false, true);
+    add("app.quit", "quit", "ctrl+q", [this] { quit_ = true; }, false, Scope::App);
 
     // Editing
     add("edit.undo", "undo", "ctrl+z", ed(&Editor::undo), true);
@@ -1084,11 +1128,11 @@ void App::register_commands() {
     add("edit.indent", "indent", "ctrl+]", ed(&Editor::indent), true);
     add("edit.outdent", "outdent", "ctrl+[", ed(&Editor::outdent), true);
 
-    // The palette mode each opens, shown beside its shortcut in the list so
-    // the prefixes can be learnt there.
+    // The palette mode each opens or works in, shown beside its shortcut in
+    // the list so the prefixes can be learnt there.
     for (auto [id, p] : {std::pair{"palette.notes", '.'}, {"palette.all", '.'}, {"palette.spaces", '/'},
                          {"palette.headings", '@'}, {"palette.line", ':'}, {"palette.search", '?'}, {"palette.backlinks", '['},
-                         {"palette.tags", '#'}})
+                         {"palette.tags", '#'}, {"palette.sort", '.'}, {"palette.widen", '.'}})
         if (Command* c = find_command(id)) c->prefix = p;
 }
 
@@ -1587,6 +1631,12 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
     auto sort = [&] {
         if (!q.empty()) std::stable_sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.score > b.score; });
     };
+    // The keys of the mode's own commands (see Scope).
+    if (prefixed && std::strchr(Palette::kScoped, c)) {
+        std::string sort_key = c == '.' ? key_hint("palette.sort", "sort") : "";
+        std::string widen = key_hint("palette.widen", "widen");
+        palette_.set_hint(sort_key + (sort_key.empty() || widen.empty() ? "" : "  ") + widen);
+    }
 
     // Notes: this space's, or every space's when widened. "work/plan"
     // narrows to one space from either (and makes the note there).
@@ -1803,6 +1853,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             PaletteItem it;
             it.label = cmd.title;
             if (!match_command(q, cmd.title, cmd.id, command_keywords(cmd.id), it.score, &it.hl, &it.aside)) continue;
+            if (cmd.scope == Scope::Tag && !tag_at_caret()) it.score -= 50;  // "rename" is the note's, off a tag
             // Prefixes sit in a column of their own: the palette is mono, so
             // padding the keys to the widest a prefixed command has lines them up.
             std::string keys = cmd.chords.empty() ? "" : chord_str(cmd.chords.front());
@@ -1916,16 +1967,16 @@ void App::toggle_fullscreen() {
 void App::dispatch_keys(bool& fired) {
     fired = false;
     if (viewer_.open) return;  // the viewer takes the keys it uses, and nothing else runs
-    bool pal = palette_.is_open() || bar_ != Bar::None;  // modal: only global commands
+    // The innermost scope that binds the key; among equals, the first listed.
+    Command* hit = nullptr;
     for (auto& c : cmds_) {
-        if (pal && !c.global) continue;
-        for (auto& ch : c.chords) {
-            if (chord_pressed(ch, c.repeat)) {
-                c.run();
-                fired = true;
-                return;
-            }
-        }
+        if (hit && depth(c.scope) <= depth(hit->scope)) continue;
+        bool pressed = std::any_of(c.chords.begin(), c.chords.end(), [&](const Chord& ch) { return chord_pressed(ch, c.repeat); });
+        if (pressed && in_scope(c.scope)) hit = &c;
+    }
+    if (hit) {
+        hit->run();
+        fired = true;
     }
 }
 
@@ -2594,14 +2645,46 @@ void App::build_tags(const std::string& query, std::vector<PaletteItem>& out, in
     palette_.set_empty("no notes with " + terms + elsewhere);
 }
 
-void App::rename_tag_at_caret() {
+bool App::tag_at_caret(std::string* name) const {
     LinkSpan l;
-    if (!editing() || !is_note() || !editor_.link_at_caret(l) || !l.tag) return;
+    if (!editing() || !is_note() || !editor_.link_at_caret(l) || !l.tag) return false;
+    if (name) *name = l.target;
+    return true;
+}
+
+// Every tag, in every space, listed to pick one: tags mean the same
+// everywhere.
+void App::pick_tag_rename() {
+    std::string at;
+    if (tag_at_caret(&at)) { open_tag_rename(at); return; }
     refresh_tags(true);
-    tags_.set(*note_, editor_.lines());
-    tag_from_ = l.target;
+    if (is_note()) tags_.set(*note_, editor_.lines());
+    std::map<std::string, std::pair<std::string, int>> all;  // lower-cased: as written, notes
+    for (auto& [path, e] : tags_.notes())
+        for (auto& [k, v] : e.tags) {
+            auto& t = all[k];
+            if (t.first.empty()) t.first = v;
+            t.second++;
+        }
+    if (all.empty()) { status("no tags yet; write #name in a note to add one"); return; }
+    std::vector<PaletteItem> items;
+    for (auto& [k, t] : all) {
+        PaletteItem it;
+        it.label = "#" + t.first;
+        it.meta = std::to_string(t.second) + (t.second == 1 ? " note" : " notes");
+        it.action = [this, name = t.first] { open_tag_rename(name); };
+        items.push_back(std::move(it));
+    }
+    std::sort(items.begin(), items.end(), [](auto& a, auto& b) { return natural_less(a.label, b.label); });
+    palette_.pick("rename tag: ", std::move(items));
+}
+
+void App::open_tag_rename(const std::string& tag) {
+    refresh_tags(true);
+    if (is_note()) tags_.set(*note_, editor_.lines());
+    tag_from_ = tag;
     open_bar(Bar::Tag);  // see draw_tag_bar
-    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", l.target.c_str());
+    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", tag.c_str());
     bar_last_ = bar_buf_;
 }
 
@@ -2610,7 +2693,6 @@ void App::rename_tag_at_caret() {
 void App::draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
-    if (!note_) { close_bar(); return; }
     auto value = [&] {
         std::string v = trim(bar_buf_);
         while (!v.empty() && v[0] == '#') v.erase(0, 1);

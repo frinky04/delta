@@ -2337,8 +2337,8 @@ static void test_ui_voice() {
     CHECK(titles > 50);  // the pattern still finds the command table
 }
 
-// The palette's modes: tab widens a scoped one (notes, search) to every
-// space and back, and does nothing elsewhere; backspace on an empty query
+// The palette's modes: a scoped one (notes, search, tags) widens to every
+// space and back, and no other does; backspace on an empty query
 // leaves a mode for the root, commands.
 static int g_builds = 0;
 
@@ -2361,17 +2361,17 @@ static void test_palette_modes() {
     palette_frame(p);
     CHECK(p.in_mode('.') && p.scoped() && !p.wide());
     int builds = g_builds;
-    palette_frame(p, ImGuiKey_Tab);
-    CHECK(p.wide() && g_builds == builds + 1);  // widened, and the list built again
+    p.set_wide(true);  // palette.widen, bound to tab by App
     palette_frame(p);
-    palette_frame(p, ImGuiKey_Tab);
+    CHECK(p.wide() && g_builds == builds + 1);  // widened, and the list built again
+    p.set_wide(false);
+    palette_frame(p);
     CHECK(!p.wide());
-    palette_frame(p);  // lets tab go before it's pressed again
 
     p.open("@");
-    palette_frame(p, ImGuiKey_Tab);
-    CHECK(p.in_mode('@') && !p.scoped() && !p.wide());
+    p.set_wide(true);
     palette_frame(p);
+    CHECK(p.in_mode('@') && !p.scoped() && !p.wide());
 
     p.open("?", true);
     palette_frame(p);
@@ -2379,16 +2379,11 @@ static void test_palette_modes() {
 
     p.open("#");
     palette_frame(p);
-    palette_frame(p, ImGuiKey_Tab);
-    CHECK(p.in_mode('#') && p.scoped() && p.wide());  // tags widen too
-    palette_frame(p);
-
-    palette_frame(p);
+    CHECK(p.in_mode('#') && p.scoped());  // tags widen too
 
     p.open("");
-    palette_frame(p, ImGuiKey_Tab);
-    CHECK(p.in_mode(0) && !p.scoped() && !p.wide());  // commands have no scope
     palette_frame(p);
+    CHECK(p.in_mode(0) && !p.scoped() && !p.wide());  // commands have no scope
 
     p.open(".");
     palette_frame(p);
@@ -2429,12 +2424,12 @@ static void test_command_search() {
     };
     struct Case { const char* q; const char* want; };
     for (Case c : {Case{"delete note", "note.delete"}, {"note delete", "note.delete"}, {"space rename", "space.rename"},
-                   {"rename", "note.rename"}, {"zoom reset", "view.zoom_reset"}, {"heading next", "nav.heading_next"},
+                   {"rename note", "note.rename"}, {"zoom reset", "view.zoom_reset"}, {"heading next", "nav.heading_next"},
                    {"backlinks", "palette.backlinks"}, {"settings", "config.open"}, {"trash", "note.restore"},
                    {"outline", "palette.headings"}, {"goto line", "palette.line"}, {"spell", "view.spelling"},
                    {"help", "app.manual"}, {"new", "note.new"}, {"find replace", "find.replace"},
                    {"fullscreen", "view.fullscreen"}, {"tgrm", "view.reader"}, {"tags", "palette.tags"},
-                   {"rename tag", "note.rename"}}) {
+                   {"rename tag", "tag.rename"}, {"widen", "palette.widen"}, {"sort", "palette.sort"}}) {
         std::string got = top(c.q);
         if (got != c.want) { CHECK(!"command search"); std::printf("   \"%s\": got %s, want %s\n", c.q, got.c_str(), c.want); }
     }
