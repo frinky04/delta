@@ -21,6 +21,7 @@
 #include "tags.h"
 
 struct GLFWwindow;
+struct Theme;
 
 struct AppOptions {
     fs::path config_path;               // empty = default location
@@ -184,7 +185,7 @@ private:
     // The status line as a minibuffer: tools that act on the note in view
     // happen down there, so the note stays in sight. (Choosing from a list,
     // headings included, stays in the palette.)
-    enum class Bar { None, Find, Line, Rename, Fix, Tag };
+    enum class Bar { None, Find, Line, Prompt, Fix };
     void open_bar(Bar kind);
     void close_bar();                   // keeps where the tool left you
     void cancel_bar();                  // escape: jumps go back to where you were
@@ -195,9 +196,18 @@ private:
     void draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void open_line(const std::string& text = "");
     void draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
-    void draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
-    void draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+    // A prompt: one field seeded with a name, checked as you type, and enter
+    // to act on it (rename note, rename tag).
+    struct BarPrompt {
+        std::vector<std::pair<std::string, ImU32 Theme::*>> lead;  // text before the field, in a theme colour
+        bool note = false;                                          // closes once no note is open
+        std::function<std::string(const std::string&)> problem;    // "" when the text is fine
+        std::function<std::string(const std::string&)> hint;       // shown at the right when it is
+        std::function<std::string(const std::string&)> submit;     // "" when done and the bar closes, else why not
+    } prompt_;
+    void open_prompt(BarPrompt p, const std::string& initial);
+    void draw_prompt_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
     void status(const std::string& msg, bool error = false);
     void poll_files(double now);
     float base_size() const;
@@ -243,7 +253,6 @@ private:
     TagIndex tags_;                           // which notes have which #tags
     double tags_time_ = -100;                 // when it was last brought up to date
     int tags_gen_ = -1;                       // ...for the palette as it opened this time
-    std::string tag_from_;                    // the tag being renamed (Bar::Tag), as written
     double next_problem_check_ = 0;           // a held-back problem shows then
     uint64_t hints_version_ = UINT64_MAX;     // editor version the hints and problems match
     bool reader_pref_ = false;                // reader mode to restore after the config or manual

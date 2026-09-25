@@ -1380,11 +1380,37 @@ void App::open_by_name(std::string target) {
     else create_note(space.empty() ? space_ : space, name);
 }
 
+// Rename: the note's name in the status line becomes editable where it sits,
+// after the space.
 void App::rename_note() {
     if (!need_note()) return;
-    open_bar(Bar::Rename);  // see draw_rename_bar
-    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", note_->name.c_str());
-    bar_last_ = bar_buf_;
+    BarPrompt p;
+    p.lead = {{note_->space, &Theme::dim}, {" / ", &Theme::faint}};
+    p.note = true;
+    p.problem = [this](const std::string& v) -> std::string {
+        if (v == note_->name) return {};
+        if (auto e = Store::check_name(v, "note"); !e.empty()) return e;
+        if (store_.exists(note_->space, v) && !iequals(v, note_->name)) return "there's already a note called " + v;
+        return {};
+    };
+    p.hint = [](const std::string&) { return std::string("enter to rename"); };
+    p.submit = [this](const std::string& v) -> std::string {
+        if (v == note_->name) return {};
+        save();
+        std::string old = path_u8(note_->path);
+        NoteRef n = *note_;
+        if (auto e = store_.rename_note(n, v); !e.empty()) return e;
+        views_.erase(old);
+        auto renamed = [&](NoteRef& r) { if (path_u8(r.path) == old) r = n; };
+        history_.update(renamed);
+        recent_.update(renamed);
+        note_ = n;
+        disk_mtime_ = mtime_of(n.path);
+        set_title();
+        status("renamed to " + n.name);
+        return {};
+    };
+    open_prompt(std::move(p), note_->name);
 }
 
 void App::move_note() {
@@ -2082,6 +2108,11 @@ bool App::bar_input(const char* id, char* buf, size_t size, int which, float x, 
     return active;
 }
 
+// Enter on the bar, either key; `repeat` false ignores it held down.
+static bool enter_pressed(bool repeat = true) {
+    return ImGui::IsKeyPressed(ImGuiKey_Enter, repeat) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, repeat);
+}
+
 void App::draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cancel_bar(); return; }
     // Fields in the status line's mono type.
@@ -2091,9 +2122,8 @@ void App::draw_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     switch (bar_) {
         case Bar::Find: draw_find_bar(min, max, s, pad, ty); break;
         case Bar::Line: draw_line_bar(min, max, s, pad, ty); break;
-        case Bar::Rename: draw_rename_bar(min, max, s, pad, ty); break;
+        case Bar::Prompt: draw_prompt_bar(min, max, s, pad, ty); break;
         case Bar::Fix: draw_fix_bar(min, max, s, pad, ty); break;
-        case Bar::Tag: draw_tag_bar(min, max, s, pad, ty); break;
         case Bar::None: break;
     }
     bar_focus_ = false;
@@ -2133,7 +2163,7 @@ void App::draw_find_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     ImGuiIO& io = ImGui::GetIO();
 
     // Keys first, against the field that was active last frame.
-    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    bool enter = enter_pressed();
     if (enter && io.KeyCtrl && io.KeyAlt && find_replace_) {
         int n = editor_.replace_all(repl_buf_);
         status(n ? "replaced " + std::to_string(n) : "nothing to replace");
@@ -2237,7 +2267,7 @@ void App::draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     };
 
     // No key repeat: holding enter mustn't race through fixes.
-    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+    bool enter = enter_pressed(false);
     if (enter) {
         if (io.KeyCtrl) add();
         else if (io.KeyShift) skip();
@@ -2370,7 +2400,7 @@ void App::draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     std::string q = trim(bar_buf_);
     TextPos to;
     bool ok = parse_line_target(q, bar_cur_.line, lines, to);
-    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    bool enter = enter_pressed();
     if (enter && (ok || q.empty())) { close_bar(); return; }
 
     float x = min.x + pad;
@@ -2391,60 +2421,43 @@ void App::draw_line_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     dl->AddText(mono_, s, ImVec2(max.x - pad - W(right), ty), q.empty() || ok ? T.dim : T.text, right.c_str());
 }
 
-// Rename: the note's name in the status line becomes editable where it sits.
+// A prompt (see BarPrompt): enter checks the text, then acts on it; a reason
+// it can't shows at the right until the text changes.
 
-void App::draw_rename_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
+void App::open_prompt(BarPrompt p, const std::string& initial) {
+    open_bar(Bar::Prompt);
+    prompt_ = std::move(p);
+    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", initial.c_str());
+    bar_last_ = bar_buf_;
+}
+
+void App::draw_prompt_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
-    if (!note_) { close_bar(); return; }
-    std::string v = trim(bar_buf_);
-    auto problem = [&]() -> std::string {
-        if (v == note_->name) return {};
-        if (auto e = Store::check_name(v, "note"); !e.empty()) return e;
-        if (store_.exists(note_->space, v) && !iequals(v, note_->name)) return "there's already a note called " + v;
-        return {};
-    };
+    if (prompt_.note && !note_) { close_bar(); return; }
 
-    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
-    if (enter) {
-        if (v == note_->name) { close_bar(); return; }
-        std::string e = problem();
-        if (e.empty()) {
-            save();
-            std::string old = path_u8(note_->path);
-            NoteRef n = *note_;
-            e = store_.rename_note(n, v);
-            if (e.empty()) {
-                views_.erase(old);
-                auto renamed = [&](NoteRef& r) { if (path_u8(r.path) == old) r = n; };
-                history_.update(renamed);
-                recent_.update(renamed);
-                note_ = n;
-                disk_mtime_ = mtime_of(n.path);
-                set_title();
-                close_bar();
-                status("renamed to " + n.name);
-                return;
-            }
-        }
+    if (enter_pressed()) {
+        std::string v = trim(bar_buf_);
+        std::string e = prompt_.problem(v);
+        if (e.empty()) e = prompt_.submit(v);
+        if (e.empty()) { close_bar(); return; }
         bar_error_ = e;
         bar_focus_ = true;
         bar_select_pending_ = 2;
     }
 
-    // Where the name sits: after the space, as in the normal status line.
     float x = min.x + pad;
-    dl->AddText(mono_, s, ImVec2(x, ty), T.dim, note_->space.c_str());
-    x += W(note_->space);
-    dl->AddText(mono_, s, ImVec2(x, ty), T.faint, " / ");
-    x += W(" / ");
+    for (auto& [text, colour] : prompt_.lead) {
+        dl->AddText(mono_, s, ImVec2(x, ty), T.*colour, text.c_str());
+        x += W(text);
+    }
     float w = std::clamp(W(bar_buf_) + s * 2, s * 12, (max.x - min.x) * 0.45f);
-    bar_input("##rename", bar_buf_, sizeof bar_buf_, 1, x, ty, w);
+    bar_input("##prompt", bar_buf_, sizeof bar_buf_, 1, x, ty, w);
 
     if (bar_last_ != bar_buf_) { bar_last_ = bar_buf_; bar_error_.clear(); }
-    v = trim(bar_buf_);
-    std::string msg = bar_error_.empty() ? problem() : bar_error_;
-    std::string right = msg.empty() ? "enter to rename" : msg;
+    std::string v = trim(bar_buf_);
+    std::string msg = bar_error_.empty() ? prompt_.problem(v) : bar_error_;
+    std::string right = msg.empty() ? prompt_.hint(v) : msg;
     float rx = std::max(x + w + s * 1.6f, max.x - pad - W(right));
     dl->PushClipRect(ImVec2(x + w, min.y), ImVec2(max.x - pad, max.y), true);
     dl->AddText(mono_, s, ImVec2(rx, ty), msg.empty() ? T.dim : T.text, right.c_str());
@@ -2655,61 +2668,33 @@ void App::pick_tag_rename() {
     palette_.pick("rename tag: ", std::move(items));
 }
 
+// Renaming a tag: its name in the status line becomes editable, and enter
+// asks, in the palette, before every note that has it changes.
 void App::open_tag_rename(const std::string& tag) {
     refresh_tags(true);
     if (is_note()) tags_.set(*note_, editor_.lines());
-    tag_from_ = tag;
-    open_bar(Bar::Tag);  // see draw_tag_bar
-    std::snprintf(bar_buf_, sizeof bar_buf_, "%s", tag.c_str());
-    bar_last_ = bar_buf_;
-}
-
-// Renaming a tag: its name in the status line becomes editable, and enter
-// asks, in the palette, before every note that has it changes.
-void App::draw_tag_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    auto W = [&](const std::string& t) { return mono_->CalcTextSizeA(s, FLT_MAX, 0, t.c_str()).x; };
-    auto value = [&] {
-        std::string v = trim(bar_buf_);
+    auto bare = [](std::string v) {
         while (!v.empty() && v[0] == '#') v.erase(0, 1);
         return v;
     };
-    std::string v = value();
-    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
-    if (enter) {
-        if (v == tag_from_) { close_bar(); return; }
-        std::string e = check_tag(v);
-        if (e.empty()) {
-            close_bar();
-            confirm_tag_rename(tag_from_, v);
-            return;
-        }
-        bar_error_ = e;
-        bar_focus_ = true;
-        bar_select_pending_ = 2;
-    }
-
-    float x = min.x + pad;
-    dl->AddText(mono_, s, ImVec2(x, ty), T.dim, "rename tag #");
-    x += W("rename tag #");
-    float w = std::clamp(W(bar_buf_) + s * 2, s * 12, (max.x - min.x) * 0.45f);
-    bar_input("##tag", bar_buf_, sizeof bar_buf_, 1, x, ty, w);
-
-    if (bar_last_ != bar_buf_) { bar_last_ = bar_buf_; bar_error_.clear(); }
-    v = value();
-    std::string msg = bar_error_;
-    if (msg.empty() && v != tag_from_) msg = check_tag(v);
-    std::string right = msg;
-    if (right.empty()) {
-        int n = notes_tagged(tag_from_);
-        std::string in = count_of(n, "note");
-        bool merge = !iequals(v, tag_from_) && notes_tagged(v) > 0;
-        right = merge ? "enter to merge into #" + v + ", in " + in : "enter to rename, in " + in;
-    }
-    float rx = std::max(x + w + s * 1.6f, max.x - pad - W(right));
-    dl->PushClipRect(ImVec2(x + w, min.y), ImVec2(max.x - pad, max.y), true);
-    dl->AddText(mono_, s, ImVec2(rx, ty), msg.empty() ? T.dim : T.text, right.c_str());
-    dl->PopClipRect();
+    BarPrompt p;
+    p.lead = {{"rename tag #", &Theme::dim}};
+    p.problem = [tag, bare](const std::string& text) -> std::string {
+        std::string v = bare(text);
+        return v == tag ? std::string() : check_tag(v);
+    };
+    p.hint = [this, tag, bare](const std::string& text) {
+        std::string v = bare(text);
+        std::string in = count_of(notes_tagged(tag), "note");
+        bool merge = !iequals(v, tag) && notes_tagged(v) > 0;
+        return merge ? "enter to merge into #" + v + ", in " + in : "enter to rename, in " + in;
+    };
+    p.submit = [this, tag, bare](const std::string& text) {
+        std::string v = bare(text);
+        if (v != tag) confirm_tag_rename(tag, v);
+        return std::string();
+    };
+    open_prompt(std::move(p), tag);
 }
 
 void App::confirm_tag_rename(const std::string& from, const std::string& to) {
