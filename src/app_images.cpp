@@ -18,8 +18,9 @@ static const int kDownloadTimeoutMs = 15000;
 
 // The bytes of an image file, into the store. Formats delta can show but
 // that aren't worth keeping as they are (BMP is huge; TGA, PSD...) become PNG.
-// Returns the line that shows it, or "" (with err) if it isn't an image.
-std::string App::import_image(const std::string& bytes, std::string& err) {
+// Returns the link to it (store_image) or the line that shows it
+// (import_image), or "" (with err) if it isn't an image.
+std::string App::store_image(const std::string& bytes, std::string& err) {
     std::string ext = image_ext(bytes);
     std::string png;
     if (ext.empty() || ext == "bmp") {
@@ -29,7 +30,11 @@ std::string App::import_image(const std::string& bytes, std::string& err) {
         png = encode_png(rgba, w, h);
         ext = "png";
     }
-    std::string link = image_store_.add(png.empty() ? bytes : png, ext, &err);
+    return image_store_.add(png.empty() ? bytes : png, ext, &err);
+}
+
+std::string App::import_image(const std::string& bytes, std::string& err) {
+    std::string link = store_image(bytes, err);
     return link.empty() ? std::string() : "![](" + link + ")";
 }
 
@@ -206,23 +211,18 @@ void App::poll_downloads() {
     }
 }
 
-// Files dropped on the window: the images among them go where they were
-// dropped (the line under the pointer, before or after it by which half).
-void App::handle_drops() {
-    auto drops = std::move(drops_);
-    drops_.clear();
-    for (auto& drop : drops) {
-        if (!is_note()) { status("open a note to drop images into it"); continue; }
-        std::vector<fs::path> files;
-        for (auto& p : drop.paths) files.push_back(u8path(p));
-        int skipped = 0;
-        auto lines = import_files(files, skipped);
-        if (lines.empty()) { status("nothing to add: those files aren't images"); continue; }
-        if (editor_.reader()) editor_.set_reader(false, false);
-        else if (drop.at.x >= 0) editor_.jump_to(editor_.position_at(drop.at));  // (negative: at the caret)
-        editor_.insert_lines({as_row(lines)});
-        if (skipped) status(std::to_string(skipped) + (skipped == 1 ? " file wasn't an image" : " files weren't images"));
-    }
+// Images dropped on the window (see open_paths) go where they were dropped
+// in the open note (the line under the pointer, before or after it by which
+// half; `at` negative: at the caret).
+void App::drop_images(const std::vector<fs::path>& files, ImVec2 at) {
+    if (!is_note()) { status("open a note to drop images into it"); return; }
+    int skipped = 0;
+    auto lines = import_files(files, skipped);
+    if (lines.empty()) { status("nothing to add: those files aren't images"); return; }
+    if (editor_.reader()) editor_.set_reader(false, false);
+    else if (at.x >= 0) editor_.jump_to(editor_.position_at(at));
+    editor_.insert_lines({as_row(lines)});
+    if (skipped) status(std::to_string(skipped) + (skipped == 1 ? " file wasn't an image" : " files weren't images"));
 }
 
 // ---------------------------------------------------------------------------

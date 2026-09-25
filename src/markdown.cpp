@@ -73,7 +73,7 @@ static size_t alt_close(const std::string& s, size_t a) {
 }
 
 // One ![alt](src) starting at s[a]; sets `end` past its ")".
-static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
+bool md_image_at(const std::string& s, size_t a, ImageRef& ref) {
     size_t n = s.size();
     if (a + 5 > n || s.compare(a, 2, "![") != 0) return false;
     size_t i = alt_close(s, a);
@@ -83,9 +83,11 @@ static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
     // past a "title" if there is one.
     size_t t0 = i + 2, j = t0;
     std::string path;
+    size_t path_at = t0;
     if (j < n && s[j] == '<') {
         size_t close = s.find('>', j);
         if (close == std::string::npos) return false;
+        path_at = j + 1;
         path = s.substr(j + 1, close - j - 1);
         j = close + 1;
     } else {
@@ -103,6 +105,7 @@ static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
     ref.begin = (int)a;
     ref.end = (int)j + 1;
     ref.src = path;
+    ref.src_at = (int)path_at;
     ref.alt = s.substr(a + 2, alt_end - (a + 2));
     ref.w = ref.h = 0;
     // "alt|300" or "alt|300x200": Obsidian's size.
@@ -129,7 +132,7 @@ bool md_image_row(const std::string& s, std::vector<ImageRef>* out) {
         while (i < n && is_ws(s[i])) i++;
         if (i >= n) break;
         ImageRef ref;
-        if (!parse_image(s, i, ref)) return false;
+        if (!md_image_at(s, i, ref)) return false;
         // Images need space between them, or they'd be one word.
         if (count > 0 && !is_ws(s[i - 1])) return false;
         if (out) out->push_back(ref);
@@ -157,7 +160,7 @@ std::string md_image_text(const std::string& alt, const std::string& src, int w,
 
 std::string md_image_resized(const std::string& token, int w) {
     ImageRef ref;
-    if (!parse_image(token, 0, ref)) return token;
+    if (!md_image_at(token, 0, ref)) return token;
     // Keep everything after the alt text (the target, any title) as it was.
     std::string alt = ref.alt;
     if (w > 0) alt += "|" + std::to_string(w);

@@ -11,6 +11,8 @@ struct GLFWwindow;
 
 fs::path u8path(const std::string& s);
 std::string path_u8(const fs::path& p);
+// The command line's arguments as UTF-8, whatever the system's code page.
+std::vector<std::string> utf8_args(int argc, char** argv);
 
 fs::path home_dir();
 fs::path config_dir();                 // %APPDATA%/delta or ~/.config/delta

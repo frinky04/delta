@@ -132,13 +132,16 @@ int main(int argc, char** argv) {
     // the next run with it is a second launch.
     fs::path sandbox_dir;
     bool keep_sandbox = false;
+    std::vector<std::string> args = utf8_args(argc, argv);
+    argc = (int)args.size();
     for (int i = 1; i < argc; i++) {
-        std::string a = argv[i];
-        auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+        std::string a = args[i];
+        auto next = [&]() -> std::string { return i + 1 < argc ? args[++i] : ""; };
         if (a == "--config") opts.config_path = u8path(next());
         else if (a == "--sandbox") {
             opts.sandbox = true;
-            if (i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0) {
+            std::error_code ec;  // (a file after it is the doc to open)
+            if (i + 1 < argc && args[i + 1].rfind("--", 0) != 0 && !fs::is_regular_file(u8path(args[i + 1]), ec)) {
                 sandbox_dir = u8path(next());
                 keep_sandbox = true;
             }
@@ -156,6 +159,9 @@ int main(int argc, char** argv) {
         else if (a == "--size") std::sscanf(next().c_str(), "%dx%d", &shot_w, &shot_h);
         else if (a == "--shot-delay") shot_delay = std::atof(next().c_str());
         else if (a == "--frame-log") g_frame_log = std::fopen(next().c_str(), "w");
+        // Anything else is a doc or folder to open, as if dropped on the
+        // window ("open with delta").
+        else if (a.rfind("--", 0) != 0 && !a.empty()) opts.open = u8path(a);
     }
     if (opts.sandbox) {
         if (sandbox_dir.empty()) {

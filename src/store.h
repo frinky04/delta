@@ -21,6 +21,9 @@ struct NoteRef {
     fs::file_time_type write_time{};
     std::uintmax_t size = 0;
     bool listed = false;
+    // Not a note: a doc from outside the notes, or the manual, only being
+    // read (see App::is_visiting). `path` is its file, `name` its file name.
+    bool visit = false;
 };
 
 // Every note's name, by space, for looking names up without the disk.

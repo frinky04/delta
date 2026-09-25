@@ -35,6 +35,8 @@
 #include "complete.h"
 #include "textfile.h"
 #include "lint.h"
+#include "import.h"
+#include "store.h"
 
 extern const unsigned char g_font_sans[];
 extern const std::size_t g_font_sans_size;
@@ -3616,6 +3618,118 @@ static void test_lint() {
     CHECK_EQ(split_list(c.lint_off).size(), (size_t)2);
 }
 
+// Docs from outside: sorting a drop, a folder's top level, the names they
+// become, and the images they bring along.
+static void test_import() {
+    // Docs by extension, any case; folders by the disk; images for the note.
+    CHECK(is_doc_file("a.md") && is_doc_file("B.MD") && is_doc_file("c.txt") && is_doc_file("x/y.Txt"));
+    CHECK(!is_doc_file("a.markdown") && !is_doc_file("a.pdf") && !is_doc_file("md") && !is_doc_file("a.md.bak"));
+    CHECK(is_image_file("a.PNG") && is_image_file("b.jpeg") && !is_image_file("c.svg") && !is_image_file("d.md"));
+    {
+        auto dir = [](const fs::path& p) { return p.filename() == "folder"; };
+        DropPlan d = plan_drop({"x/a.md", "x/pic.png", "x/folder", "x/b.txt", "x/doc.pdf", "x/c.MD"}, dir);
+        CHECK_EQ(d.docs.size(), (size_t)3);
+        CHECK(d.docs.size() == 3 && d.docs[0] == fs::path("x/a.md") && d.docs[1] == fs::path("x/b.txt") && d.docs[2] == fs::path("x/c.MD"));
+        CHECK(d.images.size() == 1 && d.images[0] == fs::path("x/pic.png"));
+        CHECK(d.folders.size() == 1 && d.folders[0] == fs::path("x/folder"));
+        CHECK(d.others.size() == 1 && d.others[0] == fs::path("x/doc.pdf"));
+        // A folder named like a doc is still a folder.
+        DropPlan f = plan_drop({"notes.md"}, [](const fs::path&) { return true; });
+        CHECK(f.folders.size() == 1 && f.docs.empty());
+        CHECK(plan_drop({}, dir).docs.empty());
+    }
+
+    // A folder: its top-level docs in name order; the rest left, hidden
+    // entries not even counted.
+    {
+        FolderPlan p = plan_folder({{"note 10.md", false}, {"note 2.md", false}, {"img", true}, {"a.txt", false},
+                                    {"pic.png", false}, {".git", true}, {".hidden.md", false}, {"sub.md", true}});
+        CHECK_EQ(p.docs.size(), (size_t)3);
+        CHECK(p.docs.size() == 3 && p.docs[0] == "a.txt" && p.docs[1] == "note 2.md" && p.docs[2] == "note 10.md");
+        CHECK(p.left.size() == 1 && p.left[0] == "pic.png");  // sub-folders aren't counted
+        CHECK(plan_folder({}).docs.empty());
+    }
+
+    // Names: the stem, as a note name can be.
+    CHECK_EQ(doc_note_name("dir/Report.md"), std::string("Report"));
+    CHECK_EQ(doc_note_name("notes.txt"), std::string("notes"));
+    CHECK_EQ(doc_note_name("a.b.md"), std::string("a.b"));
+    CHECK_EQ(doc_note_name(".hidden.md"), std::string("hidden"));
+    CHECK_EQ(doc_note_name("trailing..md"), std::string("trailing"));
+    CHECK_EQ(doc_note_name("..md"), std::string("untitled"));
+    CHECK_EQ(doc_note_name("  spaced  .md"), std::string("spaced"));
+    CHECK_EQ(doc_note_name(u8path("Caf\xC3\xA9.md")), std::string("Caf\xC3\xA9"));
+    CHECK_EQ(doc_note_name("Research"), std::string("Research"));  // a folder, for a space
+    CHECK(Store::check_name(doc_note_name(std::string(250, 'x') + ".md"), "note").empty());
+    for (const char* f : {"a.md", ".x.md", "x..md", "..md", " .md"}) CHECK(Store::check_name(doc_note_name(f), "note").empty());
+
+    // Clashes: " 2", " 3"... the first that's free.
+    {
+        std::set<std::string> taken = {"plan", "plan 2", "plan 3", "other"};
+        auto is_taken = [&](const std::string& n) { return taken.count(n) > 0; };
+        CHECK_EQ(free_name("fresh", is_taken), std::string("fresh"));
+        CHECK_EQ(free_name("plan", is_taken), std::string("plan 4"));
+        CHECK_EQ(free_name("other", is_taken), std::string("other 2"));
+        taken.insert("other 2");
+        CHECK_EQ(free_name("other", is_taken), std::string("other 3"));
+    }
+
+    // Which srcs are files beside the doc.
+    for (const char* s : {"a.png", "./img/a.png", "../pics/b.jpg", "img/with%20space.png", "sub\\c.gif"}) CHECK(is_local_src(s));
+    for (const char* s : {"", "https://x.org/a.png", "http://x/a.png", "data:image/png;base64,xx", "/abs/a.png", "\\\\server\\a.png",
+                          "C:\\pics\\a.png", "c:/pics/a.png", "file:///a.png", "delta-pending:3", "#frag", "mailto:a@b"})
+        CHECK(!is_local_src(s));
+
+    // The images a doc shows, wherever in a line; not in code or front matter.
+    {
+        std::vector<std::string> lines = {
+            "---",
+            "cover: ![](front.png)",
+            "---",
+            "# Title",
+            "![a|300](img/a.png) ![b](<my pics/b.png> \"B\")",
+            "Inline ![c](c.png) and `![not](code.png)` and ``![nor](x.png)``.",
+            "```",
+            "![fenced](fenced.png)",
+            "```",
+            "![web](https://x.org/w.png) ![abs](/tmp/abs.png) \\![escaped](esc.png)",
+            "![](img/a.png)",
+            "![broken](",
+        };
+        auto ims = local_images(lines);
+        CHECK_EQ(ims.size(), (size_t)4);
+        if (ims.size() == 4) {
+            CHECK(ims[0].line == 4 && ims[0].src == "img/a.png" && lines[4].substr(ims[0].at, ims[0].len) == "img/a.png");
+            CHECK(ims[1].line == 4 && ims[1].src == "my pics/b.png" && lines[4].substr(ims[1].at, ims[1].len) == "my pics/b.png");
+            CHECK(ims[2].line == 5 && ims[2].src == "c.png");
+            CHECK(ims[3].line == 10 && ims[3].src == "img/a.png");
+        }
+        // Rewritten: only the src changes, every use of it; the rest as it was.
+        std::map<std::string, std::string> to = {{"img/a.png", "../.delta/images/aa.png"}, {"my pics/b.png", "../.delta/images/bb.png"}};
+        std::vector<std::string> out = lines;
+        rewrite_images(out, ims, to);
+        CHECK_EQ(out[4], std::string("![a|300](../.delta/images/aa.png) ![b](<../.delta/images/bb.png> \"B\")"));
+        CHECK_EQ(out[5], lines[5]);  // c.png had nowhere to go (missing): left as it was
+        CHECK_EQ(out[10], std::string("![](../.delta/images/aa.png)"));
+        for (int i : {0, 1, 2, 3, 6, 7, 8, 9, 11}) CHECK_EQ(out[i], lines[i]);
+        // Stale positions (the line changed since) are left alone.
+        std::vector<std::string> changed = {"nothing here"};
+        rewrite_images(changed, {{0, 0, 5, "a.png"}}, {{"a.png", "b.png"}});
+        CHECK_EQ(changed[0], std::string("nothing here"));
+    }
+    // An image parsed anywhere in a line knows where its src is written.
+    {
+        ImageRef r;
+        std::string s = "see ![x](<a b.png>) here";
+        CHECK(md_image_at(s, 4, r));
+        CHECK_EQ(s.substr(r.src_at, r.src.size()), std::string("a b.png"));
+        CHECK(!md_image_at(s, 0, r));
+        CHECK(md_image_line("![](plain.png)"));  // rows still parse
+    }
+    // Front matter left open isn't front matter: its images count.
+    CHECK_EQ(local_images({"---", "![](a.png)"}).size(), (size_t)1);
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -3677,6 +3791,7 @@ int main() {
     test_line_target();
     test_palette_fill();
     test_lint();
+    test_import();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
