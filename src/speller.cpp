@@ -54,13 +54,19 @@ std::vector<std::pair<std::string, fs::path>> user_dicts(const fs::path& dir) {
     return out;
 }
 
+// Is this (trimmed) .aff line the directive `name`, followed by its value?
+bool directive(const std::string& line, const std::string& name) {
+    size_t n = name.size();
+    return line.rfind(name, 0) == 0 && line.size() > n && (line[n] == ' ' || line[n] == '\t');
+}
+
 // The encoding an .aff file declares (SET), upper-cased; hunspell's default
 // is ISO8859-1.
 std::string aff_encoding(const std::string& aff) {
     std::istringstream in(aff);
     for (std::string line; std::getline(in, line);) {
         line = trim(line);
-        if (line.rfind("SET", 0) == 0 && line.size() > 3 && (line[3] == ' ' || line[3] == '\t')) {
+        if (directive(line, "SET")) {
             std::string e = trim(line.substr(4));
             for (char& c : e) c = (char)std::toupper((unsigned char)c);
             return e;
@@ -72,14 +78,7 @@ std::string aff_encoding(const std::string& aff) {
 std::string latin1_to_utf8(const std::string& s) {
     std::string out;
     out.reserve(s.size() + s.size() / 8);
-    for (unsigned char c : s) {
-        if (c < 0x80) {
-            out += (char)c;
-        } else {
-            out += (char)(0xC0 | (c >> 6));
-            out += (char)(0x80 | (c & 0x3F));
-        }
-    }
+    for (unsigned char c : s) utf8::append(out, c);
     return out;
 }
 
@@ -94,8 +93,8 @@ void to_utf8(std::string& aff, std::string& dic) {
     bool has_flag = false;
     for (std::string line; std::getline(in, line);) {
         std::string t = trim(line);
-        if (t.rfind("SET", 0) == 0 && t.size() > 3 && (t[3] == ' ' || t[3] == '\t')) continue;
-        if (t.rfind("FLAG", 0) == 0 && t.size() > 4 && (t[4] == ' ' || t[4] == '\t')) has_flag = true;
+        if (directive(t, "SET")) continue;
+        if (directive(t, "FLAG")) has_flag = true;
         out += line + "\n";
     }
     aff = std::string("SET UTF-8\n") + (has_flag ? "" : "FLAG UTF-8\n") + out;

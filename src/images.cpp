@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cstring>
 
 #include "util.h"
 
@@ -35,16 +34,10 @@ std::string sha256_hex(const std::string& data) {
     uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
     auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
 
-    std::string msg = data;
-    uint64_t bits = (uint64_t)data.size() * 8;
-    msg += (char)0x80;
-    while (msg.size() % 64 != 56) msg += (char)0;
-    for (int i = 7; i >= 0; i--) msg += (char)((bits >> (i * 8)) & 0xff);
-
-    for (size_t off = 0; off < msg.size(); off += 64) {
+    auto block = [&](const unsigned char* blk) {
         uint32_t w[64];
         for (int i = 0; i < 16; i++) {
-            const unsigned char* p = (const unsigned char*)msg.data() + off + i * 4;
+            const unsigned char* p = blk + i * 4;
             w[i] = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
         }
         for (int i = 16; i < 64; i++) {
@@ -59,7 +52,18 @@ std::string sha256_hex(const std::string& data) {
             hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
         }
         h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
-    }
+    };
+
+    // Whole blocks straight from the data; only the padded tail is copied.
+    size_t whole = data.size() / 64 * 64;
+    for (size_t off = 0; off < whole; off += 64) block((const unsigned char*)data.data() + off);
+    std::string tail = data.substr(whole);
+    uint64_t bits = (uint64_t)data.size() * 8;
+    tail += (char)0x80;
+    while (tail.size() % 64 != 56) tail += (char)0;
+    for (int i = 7; i >= 0; i--) tail += (char)((bits >> (i * 8)) & 0xff);
+    for (size_t off = 0; off < tail.size(); off += 64) block((const unsigned char*)tail.data() + off);
+
     char out[65];
     for (int i = 0; i < 8; i++) std::snprintf(out + i * 8, 9, "%08x", h[i]);
     return std::string(out, 64);

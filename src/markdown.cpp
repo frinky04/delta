@@ -58,18 +58,24 @@ int md_link_word_start(const std::string& s, int col, const std::vector<Style>& 
     return from;
 }
 
-// One ![alt](src) starting at s[a]; sets `end` past its ")".
-static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
-    size_t n = s.size();
-    if (a + 5 > n || s.compare(a, 2, "![") != 0) return false;
-    // The alt text runs to the matching "]" (brackets inside it must balance).
+// Where the alt text of the image at s[a] ends: the matching "]" (brackets
+// inside it must balance), or past the end if it's never closed.
+static size_t alt_close(const std::string& s, size_t a) {
     size_t i = a + 2;
     int depth = 0;
-    for (; i < n; i++) {
+    for (; i < s.size(); i++) {
         if (s[i] == '\\') { i++; continue; }
         if (s[i] == '[') depth++;
         else if (s[i] == ']' && depth-- == 0) break;
     }
+    return i;
+}
+
+// One ![alt](src) starting at s[a]; sets `end` past its ")".
+static bool parse_image(const std::string& s, size_t a, ImageRef& ref) {
+    size_t n = s.size();
+    if (a + 5 > n || s.compare(a, 2, "![") != 0) return false;
+    size_t i = alt_close(s, a);
     if (i + 1 >= n || s[i + 1] != '(') return false;
     size_t alt_end = i;
     // The target runs to the ")" that closes it: past <...> if bracketed,
@@ -133,6 +139,7 @@ bool md_image_row(const std::string& s, std::vector<ImageRef>* out) {
 }
 
 bool md_image_line(const std::string& s, std::string* alt, std::string* src) {
+    if (!alt && !src) return md_image_row(s);  // the usual question: no list to build
     std::vector<ImageRef> refs;
     if (!md_image_row(s, &refs)) return false;
     if (alt) *alt = refs[0].alt;
@@ -151,16 +158,9 @@ std::string md_image_resized(const std::string& token, int w) {
     ImageRef ref;
     if (!parse_image(token, 0, ref)) return token;
     // Keep everything after the alt text (the target, any title) as it was.
-    size_t close = token.find("](", 0);
-    int depth = 0;
-    for (size_t i = 2; i < token.size(); i++) {
-        if (token[i] == '\\') { i++; continue; }
-        if (token[i] == '[') depth++;
-        else if (token[i] == ']' && depth-- == 0) { close = i; break; }
-    }
     std::string alt = ref.alt;
     if (w > 0) alt += "|" + std::to_string(w);
-    return "![" + alt + token.substr(close);
+    return "![" + alt + token.substr(alt_close(token, 0));
 }
 
 static bool is_rule(const std::string& s) {

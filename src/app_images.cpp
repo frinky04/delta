@@ -20,15 +20,15 @@ static const int kDownloadTimeoutMs = 15000;
 // Returns the line that shows it, or "" (with err) if it isn't an image.
 std::string App::import_image(const std::string& bytes, std::string& err) {
     std::string ext = image_ext(bytes);
-    std::string data = bytes;
+    std::string png;
     if (ext.empty() || ext == "bmp") {
         std::vector<uint8_t> rgba;
         int w = 0, h = 0;
         if (!image_decode_bytes(bytes, rgba, w, h)) { err = "not an image delta can show"; return {}; }
-        data = encode_png(rgba, w, h);
+        png = encode_png(rgba, w, h);
         ext = "png";
     }
-    std::string link = image_store_.add(data, ext, &err);
+    std::string link = image_store_.add(png.empty() ? bytes : png, ext, &err);
     return link.empty() ? std::string() : "![](" + link + ")";
 }
 

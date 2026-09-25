@@ -33,7 +33,7 @@ static float refresh_interval(GLFWwindow* w);
 // edge, Windows holds the thread in its own loop inside glfwPollEvents, so
 // without this nothing would be drawn until you let go.
 static GLFWwindow* g_window = nullptr;
-static FILE* g_frame_log = nullptr;
+static FILE* g_frame_log = nullptr;  // --frame-log: one line per frame, for pacing checks
 static bool g_in_frame = false;
 static bool g_ready = false;
 
@@ -124,7 +124,6 @@ int main(int argc, char** argv) {
     std::string shot;
     int shot_w = 0, shot_h = 0;
     double shot_delay = 1.0;  // seconds after the first frame
-    FILE* frame_log = nullptr;  // --frame-log: one line per frame, for pacing checks
     // --sandbox [dir]: a config and notes of its own, as on a first launch.
     // Without a dir it's a temporary one, removed on exit; a dir is kept, so
     // the next run with it is a second launch.
@@ -153,7 +152,7 @@ int main(int argc, char** argv) {
         } else if (a == "--screenshot") shot = next();
         else if (a == "--size") std::sscanf(next().c_str(), "%dx%d", &shot_w, &shot_h);
         else if (a == "--shot-delay") shot_delay = std::atof(next().c_str());
-        else if (a == "--frame-log") frame_log = std::fopen(next().c_str(), "w");
+        else if (a == "--frame-log") g_frame_log = std::fopen(next().c_str(), "w");
     }
     if (opts.sandbox) {
         if (sandbox_dir.empty()) {
@@ -174,7 +173,7 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // shown after the first frame: no white flash
     glfwWindowHint(GLFW_SAMPLES, 0);
-    if (!shot.empty() || frame_log) {
+    if (!shot.empty() || g_frame_log) {
         // Screenshot and logging runs must never steal focus (or keystrokes)
         // from whatever the user is doing.
         glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
@@ -214,7 +213,6 @@ int main(int argc, char** argv) {
     App app;
     g_app = &app;
     g_window = window;
-    g_frame_log = frame_log;
     float sx = 1, sy = 1;
     glfwGetWindowContentScale(window, &sx, &sy);
     app.set_dpi(sx);
@@ -237,12 +235,12 @@ int main(int argc, char** argv) {
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) { glfwWaitEvents(); continue; }
 
         render_frame(slept);
-        int w, h;
-        glfwGetFramebufferSize(window, &w, &h);
 
         // Capture once animations have had real time to settle.
         static double first_frame = glfwGetTime();
         if (!shot.empty() && ++frames >= 3 && glfwGetTime() - first_frame > shot_delay) {
+            int w, h;
+            glfwGetFramebufferSize(window, &w, &h);
             std::vector<unsigned char> px((size_t)w * h * 4);
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -259,7 +257,7 @@ int main(int argc, char** argv) {
     }
 
     g_ready = false;
-    if (frame_log) std::fclose(frame_log);
+    if (g_frame_log) std::fclose(g_frame_log);
     g_frame_log = nullptr;
     app.shutdown();
     g_app = nullptr;

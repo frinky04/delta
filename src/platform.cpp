@@ -417,9 +417,7 @@ bool clipboard_put_image(GLFWwindow* w, const std::string& png, const std::strin
     if (!dib.empty())
         if (HGLOBAL g = global_copy(dib.data(), dib.size())) ok |= SetClipboardData(CF_DIB, g) != nullptr;
     if (!text.empty()) {
-        int n = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0);
-        std::wstring wt(n, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), wt.data(), n);
+        std::wstring wt = widen(text);
         if (HGLOBAL g = global_copy(wt.c_str(), (wt.size() + 1) * sizeof(wchar_t))) ok |= SetClipboardData(CF_UNICODETEXT, g) != nullptr;
     }
     CloseClipboard();
@@ -438,12 +436,6 @@ bool http_get(const std::string& url, size_t max_bytes, int timeout_ms, const st
     body.clear();
     content_type.clear();
 #ifdef _WIN32
-    auto widen = [](const std::string& s) {
-        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-        std::wstring w(n, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
-        return w;
-    };
     HINTERNET net = InternetOpenW(L"delta", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
     if (!net) { err = "no internet connection"; return false; }
     DWORD t = (DWORD)timeout_ms;
@@ -461,16 +453,10 @@ bool http_get(const std::string& url, size_t max_bytes, int timeout_ms, const st
         HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &len, nullptr);
         wchar_t type[256] = {};
         DWORD tlen = sizeof type;
-        if (HttpQueryInfoW(req, HTTP_QUERY_CONTENT_TYPE, type, &tlen, nullptr)) {
-            int n = WideCharToMultiByte(CP_UTF8, 0, type, -1, nullptr, 0, nullptr, nullptr);
-            content_type.assign(n > 0 ? n - 1 : 0, '\0');
-            if (n > 1) WideCharToMultiByte(CP_UTF8, 0, type, -1, content_type.data(), n, nullptr, nullptr);
-        }
-        std::string lowered = content_type;
-        for (char& c : lowered) c = (char)std::tolower((unsigned char)c);
+        if (HttpQueryInfoW(req, HTTP_QUERY_CONTENT_TYPE, type, &tlen, nullptr)) content_type = narrow(type);
         if (status < 200 || status >= 300) {
             err = "the server said " + std::to_string(status);
-        } else if (!want_type.empty() && lowered.rfind(want_type, 0) != 0) {
+        } else if (!want_type.empty() && lower(content_type).rfind(want_type, 0) != 0) {
             err = "not " + want_type;
         } else {
             char buf[64 * 1024];

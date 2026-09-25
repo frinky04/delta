@@ -129,7 +129,7 @@ ImTextureID ImageCache::texture(const std::string& src, int want_w, float& shown
     }
     if (!e->tex) return ImTextureID{};
     float t = std::clamp((float)(now_ - e->ready) / 0.18f, 0.0f, 1.0f);
-    shown = anim::enabled ? 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t) : 1.0f;
+    shown = anim::enabled ? anim::ease_out(t) : 1.0f;
     return (ImTextureID)(intptr_t)e->tex;
 }
 
