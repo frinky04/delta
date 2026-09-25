@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "app.h"
+#include "textfile.h"
 #include "theme.h"
 #include "util.h"
 
@@ -196,17 +197,11 @@ void App::poll_downloads() {
             editor_.replace_line_everywhere(d->marker, with);
         } else if (!line.empty()) {
             // The note was left meanwhile; it was saved with the link.
-            std::string text;
-            if (read_file(d->note, text)) {
-                size_t at = 0;
-                while ((at = text.find(d->url, at)) != std::string::npos) {
-                    bool starts = at == 0 || text[at - 1] == '\n';
-                    size_t end = at + d->url.size();
-                    bool ends = end == text.size() || text[end] == '\n' || text[end] == '\r';
-                    if (starts && ends) { text.replace(at, d->url.size(), line); atomic_write(d->note, text, nullptr); break; }
-                    at = end;
-                }
-            }
+            rewrite_lines(d->note, [&](auto& l) {
+                for (auto& s : l)
+                    if (s == d->url) { s = line; return true; }
+                return false;
+            });
         }
     }
 }

@@ -5,6 +5,7 @@
 
 #include "app.h"
 #include "complete.h"
+#include "textfile.h"
 #include "theme.h"
 #include "util.h"
 
@@ -177,13 +178,13 @@ void App::apply_tag_rename(const std::string& from, const std::string& to) {
     int changed = 0, failed = 0;
     std::string why;
     for (auto& n : notes) {
-        std::string text;
-        if (!read_file(n.path, text)) { failed++; continue; }
-        std::vector<std::string> lines = split_lines(text);
-        if (!rename_tag(lines, from, to)) continue;
         std::string err;
-        if (!atomic_write(n.path, join_lines(lines, text.find("\r\n") != std::string::npos ? "\r\n" : "\n"), &err)) { failed++; why = err; continue; }
-        changed++;
+        switch (rewrite_lines(n.path, [&](auto& l) { return rename_tag(l, from, to) > 0; }, &err)) {
+            case Rewrite::Unchanged: break;
+            case Rewrite::Written: changed++; break;
+            case Rewrite::Unreadable: failed++; break;
+            case Rewrite::Unwritable: failed++; why = err; break;
+        }
     }
     if (is_note()) {
         std::vector<std::string> lines = editor_.lines();

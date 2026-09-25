@@ -103,6 +103,7 @@ add_library(delta_core STATIC
   src/commands.cpp
   src/tags.cpp
   src/complete.cpp
+  src/textfile.cpp
   ${EMBEDDED})
 target_include_directories(delta_core PUBLIC src)
 target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/deps)

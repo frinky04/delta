@@ -33,6 +33,7 @@
 #include "commands.h"
 #include "tags.h"
 #include "complete.h"
+#include "textfile.h"
 
 extern const unsigned char g_font_sans[];
 extern const std::size_t g_font_sans_size;
@@ -2834,9 +2835,7 @@ static void test_config_set() {
     auto set = [](const std::string& text, const std::string& key, const std::string& value) {
         std::vector<std::string> lines = split_lines(text);
         apply_edit(lines, config_set(lines, "editor", key, value));
-        std::string out;
-        for (size_t i = 0; i < lines.size(); i++) out += (i ? "\n" : "") + lines[i];
-        return out;
+        return join_lines(lines);
     };
     // Replaced, keeping a comment after it.
     CHECK_EQ(set("[editor]\nfont = Georgia ; mine\n", "font", "Consolas"), std::string("[editor]\nfont = Consolas ; mine\n"));
@@ -2856,6 +2855,90 @@ static void test_config_set() {
     CHECK_EQ(set("", "font", "Georgia"), std::string("[editor]\nfont = Georgia"));
     // A " ;" in the value would start a comment, so it's quoted.
     CHECK_EQ(set("[editor]\n", "font", "C:/my ;fonts/a.ttf"), std::string("[editor]\nfont = \"C:/my ;fonts/a.ttf\"\n"));
+}
+
+// A text file as lines and back, keeping its line endings; and rewriting
+// one in place, as a tag rename or a finished image download does.
+static void test_text_file() {
+    TempDir tmp("delta_test_text_file");
+    fs::create_directories(tmp.path);
+    auto put = [](const fs::path& p, const std::string& s) {
+        std::ofstream f(p, std::ios::binary);
+        f << s;
+    };
+    auto bytes = [](const fs::path& p) {
+        std::string s;
+        read_file(p, s);
+        return s;
+    };
+
+    // LF: a trailing newline gives a last empty line, and it comes back byte for byte.
+    fs::path lf = tmp.path / "lf.md";
+    put(lf, "one\ntwo\n");
+    TextFile f;
+    CHECK(f.load(lf));
+    CHECK(!f.crlf);
+    CHECK(f.lines == std::vector<std::string>({"one", "two", ""}));
+    CHECK_EQ(f.text(), std::string("one\ntwo\n"));
+
+    // CRLF: lines without their '\r', and the same bytes back, no final newline too.
+    fs::path crlf = tmp.path / "crlf.md";
+    put(crlf, "one\r\ntwo");
+    CHECK(f.load(crlf));
+    CHECK(f.crlf);
+    CHECK(f.lines == std::vector<std::string>({"one", "two"}));
+    CHECK_EQ(f.text(), std::string("one\r\ntwo"));
+    std::string err;
+    CHECK(f.save(crlf, &err));
+    CHECK_EQ(bytes(crlf), std::string("one\r\ntwo"));
+
+    // Missing: one empty line, as a new file is; saving creates it.
+    fs::path fresh = tmp.path / "fresh.md";
+    TextFile m;
+    m.crlf = true;
+    CHECK(!m.load(fresh));
+    CHECK(!m.crlf);
+    CHECK(m.lines == std::vector<std::string>({""}));
+    m.lines = {"new", ""};
+    CHECK(m.save(fresh, &err));
+    CHECK_EQ(bytes(fresh), std::string("new\n"));
+    // Where the parent is a file, it can't be saved, and says why.
+    err.clear();
+    CHECK(!m.save(lf / "x.md", &err));
+    CHECK(!err.empty());
+
+    // The first line that's just the link becomes the image.
+    const std::string url = "https://x/y.png", img = "![](img.png)";
+    auto to_image = [&](std::vector<std::string>& l) {
+        for (auto& s : l)
+            if (s == url) { s = img; return true; }
+        return false;
+    };
+    fs::path note = tmp.path / "note.md";
+    put(note, "a\r\n" + url + "\r\nb\r\n");
+    CHECK(rewrite_lines(note, to_image) == Rewrite::Written);
+    CHECK_EQ(bytes(note), "a\r\n" + img + "\r\nb\r\n");
+    // No line to change: nothing written.
+    fs::file_time_type was = mtime_of(note);
+    CHECK(rewrite_lines(note, to_image) == Rewrite::Unchanged);
+    CHECK_EQ(bytes(note), "a\r\n" + img + "\r\nb\r\n");
+    CHECK(mtime_of(note) == was);
+    CHECK(rewrite_lines(tmp.path / "missing.md", to_image) == Rewrite::Unreadable);
+    // Read but not written back (its temporary file's name is taken by a folder).
+    fs::path stuck = tmp.path / "stuck.md";
+    put(stuck, url + "\n");
+    fs::create_directories(tmp.path / "stuck.md.delta-tmp");
+    err.clear();
+    CHECK(rewrite_lines(stuck, to_image, &err) == Rewrite::Unwritable);
+    CHECK(!err.empty());
+    CHECK_EQ(bytes(stuck), url + "\n");
+
+    // A tag rename keeps a CRLF note CRLF.
+    fs::path tagged = tmp.path / "tagged.md";
+    put(tagged, "# t\r\n#old and #keep\r\n");
+    auto rename = [](std::vector<std::string>& l) { return rename_tag(l, "old", "new") > 0; };
+    CHECK(rewrite_lines(tagged, rename) == Rewrite::Written);
+    CHECK_EQ(bytes(tagged), std::string("# t\r\n#new and #keep\r\n"));
 }
 
 // #tags: what counts as one, finding and renaming them, the palette's
@@ -3252,6 +3335,7 @@ int main() {
     test_palette_modes();
     test_sandbox();
     test_config_set();
+    test_text_file();
     test_font_loader();
     test_tags();
     test_completion();

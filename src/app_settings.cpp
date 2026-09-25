@@ -7,6 +7,7 @@
 
 #include "app.h"
 #include "imgui_freetype.h"
+#include "textfile.h"
 #include "theme.h"
 #include "util.h"
 
@@ -416,13 +417,11 @@ void App::set_setting(const std::string& section, const std::string& key, const 
         save();
         return;
     }
-    std::string text;
-    read_file(cfg_path_, text);  // none yet: written from scratch
-    bool crlf = text.find("\r\n") != std::string::npos;
-    std::vector<std::string> lines = split_lines(text);
-    apply_edit(lines, config_set(lines, section, key, value));
+    TextFile f;
+    f.load(cfg_path_);  // none yet: written from scratch
+    apply_edit(f.lines, config_set(f.lines, section, key, value));
     std::string err;
-    if (!atomic_write(cfg_path_, join_lines(lines, crlf ? "\r\n" : "\n"), &err)) {
+    if (!f.save(cfg_path_, &err)) {
         status("couldn't save the config: " + err, true);
         return;
     }
