@@ -17,22 +17,9 @@ static std::string closest(const std::string& typo, const std::map<std::string, 
 // as space and name. Links with no name are skipped.
 template <class F>
 static void for_each_link(const std::vector<std::string>& lines, F fn) {
-    bool in_code = false;
-    LineInfo info;
-    std::vector<Style> st;
-    std::vector<LinkSpan> links;
-    for (int i = 0; i < (int)lines.size(); i++) {
-        const std::string& s = lines[i];
-        bool fence = md_is_fence(s);
-        if (!in_code && !fence && s.find("[[") != std::string::npos) {
-            links.clear();
-            md_analyze(s, false, info, st, &links);
-            for (auto& l : links) {
-                std::string space, name;
-                if (l.wiki && Store::split_target(l.target, space, name)) fn(i, l, space, name);
-            }
-        }
-        if (fence) in_code = !in_code;
+    for (auto& [i, l] : md_links(lines)) {
+        std::string space, name;
+        if (l.wiki && Store::split_target(l.target, space, name)) fn(i, l, space, name);
     }
 }
 

@@ -54,6 +54,8 @@ struct LinkSpan {
 };
 
 bool md_is_fence(const std::string& s);
+// What a word is made of: letters, digits and anything non-ASCII.
+bool md_word_char(unsigned char c);
 // What a tag's name is made of: letters, digits, _ - and /.
 bool md_tag_char(unsigned char c);
 // The tag whose name starts at s[at] (just after a #): where the name ends,
@@ -83,6 +85,11 @@ std::string md_image_text(const std::string& alt, const std::string& src, int w,
 std::string md_image_resized(const std::string& token, int w);
 void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<Style>& style,
                 std::vector<LinkSpan>* links = nullptr);
+// Which lines are fenced code, the fences included.
+std::vector<bool> md_code_lines(const std::vector<std::string>& lines);
+// Every link, url and #tag outside fenced code, with its line, in order.
+struct LineLink { int line; LinkSpan link; };
+std::vector<LineLink> md_links(const std::vector<std::string>& lines);
 
 // Reader view of one line: markers removed, bullets become "•", task boxes
 // and quote bars become placeholders the renderer draws over. A task box

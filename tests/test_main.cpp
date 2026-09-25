@@ -170,6 +170,21 @@ static void test_markdown() {
         CHECK(!links[1].wiki && links[1].target == "https://a.b");
     }
 
+    // A whole note: fences and what's between them are code, and code has no links.
+    std::vector<std::string> note = {"[[a]] #t", "```", "[[b]] #u", "~~~", "x https://c.d", "```", "plain"};
+    CHECK(md_code_lines(note) == std::vector<bool>({false, true, true, true, false, true, true}));
+    auto all = md_links(note);
+    CHECK_EQ((int)all.size(), 3);
+    if (all.size() == 3) {
+        CHECK(all[0].line == 0 && all[0].link.wiki && all[0].link.target == "a");
+        CHECK(all[1].line == 0 && all[1].link.tag && all[1].link.target == "t");
+        CHECK(all[2].line == 4 && !all[2].link.wiki && all[2].link.target == "https://c.d");
+    }
+    all = md_links({"x https://c.d y", "[t](u) and #v"});
+    CHECK_EQ((int)all.size(), 3);
+    if (all.size() == 3) CHECK(all[0].line == 0 && all[1].line == 1 && all[1].link.target == "u" && all[2].link.tag);
+    CHECK(md_word_char('a') && md_word_char('7') && md_word_char(0xC3) && !md_word_char('_') && !md_word_char('#'));
+
     // Reader text drops the syntax, and its map always points back into the
     // source in order (clicks and selections in the reader rely on it).
     std::string out;

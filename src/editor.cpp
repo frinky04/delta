@@ -168,7 +168,7 @@ int Editor::word_count() {
                 in_word = has_alnum = false;
             } else {
                 in_word = true;
-                if (std::isalnum(c) || c >= 0x80) has_alnum = true;
+                if (md_word_char(c)) has_alnum = true;
             }
         }
     }
@@ -806,11 +806,7 @@ void Editor::renumber_lists(int l0, int l1) {
     const int n = (int)lines_.size();
     // Only the lists near l0..l1 are looked at, so lines are analyzed as the
     // walk reaches them; which lines are inside code comes from the fences.
-    std::vector<char> code(n, 0);
-    for (int k = 0, in = 0; k < n; k++) {
-        code[k] = (char)in;
-        if (md_is_fence(lines_[k])) in = !in;
-    }
+    std::vector<bool> code = md_code_lines(lines_);
     std::vector<LineInfo> infos(n);
     std::vector<char> have(n, 0);
     std::vector<Style> st;

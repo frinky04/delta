@@ -1,34 +1,15 @@
 #include "tags.h"
 
 #include <algorithm>
-#include <cctype>
 #include <set>
 
 #include "markdown.h"
 #include "util.h"
 
-static bool is_word(unsigned char c) { return std::isalnum(c) || c >= 0x80; }
-static bool has_letter(const std::string& s) {
-    return std::any_of(s.begin(), s.end(), [](char c) { return std::isalpha((unsigned char)c) || (unsigned char)c >= 0x80; });
-}
-
 std::vector<TagUse> find_tags(const std::vector<std::string>& lines) {
     std::vector<TagUse> out;
-    bool in_code = false;
-    LineInfo info;
-    std::vector<Style> st;
-    std::vector<LinkSpan> links;
-    for (int i = 0; i < (int)lines.size(); i++) {
-        const std::string& s = lines[i];
-        bool fence = md_is_fence(s);
-        if (!in_code && !fence && s.find('#') != std::string::npos) {
-            links.clear();
-            md_analyze(s, false, info, st, &links);
-            for (auto& l : links)
-                if (l.tag) out.push_back({i, l.begin, l.end, l.target});
-        }
-        if (fence) in_code = !in_code;
-    }
+    for (auto& [i, l] : md_links(lines))
+        if (l.tag) out.push_back({i, l.begin, l.end, std::move(l.target)});
     return out;
 }
 
@@ -42,7 +23,7 @@ std::string check_tag(const std::string& name) {
     if (name.empty()) return "a tag needs a name";
     for (char c : name)
         if (!md_tag_char((unsigned char)c)) return "a tag is letters, digits, _ - and /; no spaces";
-    if (!has_letter(name)) return "a tag needs a letter; #" + name + " would be a number";
+    if (md_tag_end("#" + name, 1) == 1) return "a tag needs a letter; #" + name + " would be a number";
     if (name.back() == '/') return "a tag can't end with /";
     return {};
 }
@@ -54,12 +35,13 @@ int tag_word_start(const std::string& line, int col, const std::vector<Style>& s
     int k = col;
     while (k > 0 && md_tag_char((unsigned char)line[k - 1])) k--;
     if (k < 1 || line[k - 1] != '#') return -1;
-    if (k >= 2) {
-        unsigned char b = (unsigned char)line[k - 2];
-        if (is_word(b) || b == '#' || b == '&') return -1;
-    }
     if (k - 1 < (int)st.size() && (st[k - 1] & (S_Code | S_CodeBlock | S_Url | S_Link | S_WikiLink))) return -1;
-    if (k < col && !has_letter(line.substr(k, col - k))) return -1;  // "#12": a number, not a tag
+    if (k < col) {
+        if (md_tag_end(line, k) == k) return -1;  // "#12", a word's #: not a tag
+    } else if (k >= 2) {  // just the #: only what's before it can say
+        unsigned char b = (unsigned char)line[k - 2];
+        if (md_word_char(b) || b == '#' || b == '&') return -1;
+    }
     return k;
 }
 

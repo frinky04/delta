@@ -6,7 +6,6 @@
 #include <cstring>
 
 static bool is_ws(char c) { return c == ' ' || c == '\t'; }
-static bool is_word(unsigned char c) { return std::isalnum(c) || c >= 0x80; }
 
 float md_heading_scale(int level) {
     // Close to body size, after Obsidian's Minimal theme: headings are set
@@ -26,6 +25,8 @@ bool md_is_fence(const std::string& s) {
     return s.compare(i, 3, "```") == 0 || s.compare(i, 3, "~~~") == 0;
 }
 
+bool md_word_char(unsigned char c) { return std::isalnum(c) || c >= 0x80; }
+
 bool md_tag_char(unsigned char c) { return std::isalnum(c) || c == '_' || c == '-' || c == '/' || c >= 0x80; }
 
 int md_tag_end(const std::string& s, int at) {
@@ -34,7 +35,7 @@ int md_tag_end(const std::string& s, int at) {
     // Not a word's #, a run of #s or an html entity (&#39;).
     if (at >= 2) {
         unsigned char b = (unsigned char)s[at - 2];
-        if (is_word(b) || b == '#' || b == '&') return at;
+        if (md_word_char(b) || b == '#' || b == '&') return at;
     }
     int e = at;
     while (e < n && md_tag_char((unsigned char)s[e])) e++;
@@ -250,7 +251,7 @@ static void inline_parse(const std::string& s, size_t from, std::vector<Style>& 
     for (size_t i = from; i < n; i++) {
         if (used[i]) continue;
         size_t len = s.compare(i, 8, "https://") == 0 ? 8 : s.compare(i, 7, "http://") == 0 ? 7 : 0;
-        if (!len || (i > 0 && is_word((unsigned char)s[i - 1]))) continue;
+        if (!len || (i > 0 && md_word_char((unsigned char)s[i - 1]))) continue;
         size_t e = i + len;
         while (e < n && !is_ws(s[e]) && !used[e] && s[e] != '>' && s[e] != ')') e++;
         while (e > i + len && std::strchr(".,;:!?", s[e - 1])) e--;
@@ -283,12 +284,12 @@ static void inline_parse(const std::string& s, size_t from, std::vector<Style>& 
         for (size_t i = from; i + d.len <= n;) {
             size_t a = i + d.len;
             bool open = at(i) && a < n && !is_ws(s[a]) && s[a] != d.d[0] &&
-                        (d.intraword_ok || i == 0 || !is_word((unsigned char)s[i - 1]));
+                        (d.intraword_ok || i == 0 || !md_word_char((unsigned char)s[i - 1]));
             if (!open) { i++; continue; }
             size_t close = std::string::npos;
             for (size_t j = a + 1; j + d.len <= n; j++) {
                 if (!at(j) || is_ws(s[j - 1])) continue;
-                if (!d.intraword_ok && j + d.len < n && is_word((unsigned char)s[j + d.len])) continue;
+                if (!d.intraword_ok && j + d.len < n && md_word_char((unsigned char)s[j + d.len])) continue;
                 if (j + d.len < n && s[j + d.len] == d.d[0] && d.len == 1) continue;  // part of a longer run
                 close = j;
                 break;
@@ -390,6 +391,34 @@ void md_analyze(const std::string& s, bool in_code, LineInfo& info, std::vector<
     }
     info.content_start = (int)(info.list ? m : p);
     inline_parse(s, info.content_start, st, links);
+}
+
+std::vector<bool> md_code_lines(const std::vector<std::string>& lines) {
+    std::vector<bool> out(lines.size(), false);
+    bool in_code = false;
+    for (size_t i = 0; i < lines.size(); i++) {
+        bool fence = md_is_fence(lines[i]);
+        out[i] = in_code || fence;
+        if (fence) in_code = !in_code;
+    }
+    return out;
+}
+
+std::vector<LineLink> md_links(const std::vector<std::string>& lines) {
+    std::vector<LineLink> out;
+    std::vector<bool> code = md_code_lines(lines);
+    LineInfo info;
+    std::vector<Style> st;
+    std::vector<LinkSpan> links;
+    for (int i = 0; i < (int)lines.size(); i++) {
+        const std::string& s = lines[i];
+        // Most lines have nothing to find; skip them without analyzing.
+        if (code[i] || (s.find_first_of("#[") == std::string::npos && s.find("http") == std::string::npos)) continue;
+        links.clear();
+        md_analyze(s, false, info, st, &links);
+        for (auto& l : links) out.push_back({i, std::move(l)});
+    }
+    return out;
 }
 
 void md_reader(const std::string& s, const LineInfo& info, const std::vector<Style>& st,

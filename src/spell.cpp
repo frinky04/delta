@@ -35,11 +35,10 @@ unsigned cp_at(const std::string& s, int i, int end, int& len) {
 // file name or domain (a dot between letters), or code punctuation.
 bool codeish(const std::string& s, int a, int b) {
     if (s[a] == '#' || s.substr(a, b - a).find("://") != std::string::npos) return true;
-    auto wordy = [&](int k) { return k >= a && k < b && (std::isalnum((unsigned char)s[k]) || (unsigned char)s[k] >= 0x80); };
     for (int k = a; k < b; k++) {
         char c = s[k];
         if (c && std::strchr("@/\\_{}<>=$|~^", c)) return true;
-        if ((c == '.' || c == ':') && wordy(k - 1) && wordy(k + 1)) return true;
+        if ((c == '.' || c == ':') && k > a && k + 1 < b && md_word_char(s[k - 1]) && md_word_char(s[k + 1])) return true;
     }
     return false;
 }
