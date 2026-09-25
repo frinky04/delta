@@ -97,6 +97,28 @@ static Editor fresh(const std::string& text) {
     return ed;
 }
 
+// A scratch folder under the system temp folder, emptied when made and
+// removed when it goes out of scope. Nothing is created: what a test writes
+// there makes its own folders.
+struct TempDir {
+    fs::path path;
+    explicit TempDir(const char* name) : path(fs::temp_directory_path() / name) { clear(); }
+    ~TempDir() { clear(); }
+    void clear() {
+        std::error_code ec;
+        fs::remove_all(path, ec);
+    }
+};
+
+// Text split at '\n', a trailing newline giving a last empty line.
+static std::vector<std::string> split_lines(const std::string& text) {
+    std::vector<std::string> out(1);
+    for (char ch : text)
+        if (ch == '\n') out.emplace_back();
+        else out.back().push_back(ch);
+    return out;
+}
+
 static void test_markdown() {
     LineInfo info;
     std::vector<Style> st;
@@ -716,14 +738,7 @@ static void test_config_schema() {
     struct Add { const char *section, *key, *value; };
     const Add adds[] = {{"general", "daily_space", "journal"}, {"editor", "tab_size", "2"}, {"appearance", "theme", "light"},
                         {"colors", "accent", "#123456"}, {"keys", "edit.undo", "ctrl+u"}};
-    auto split = [](const std::string& t) {
-        std::vector<std::string> out(1);
-        for (char ch : t)
-            if (ch == '\n') out.emplace_back();
-            else out.back().push_back(ch);
-        return out;
-    };
-    for (auto doc : {split(default_config_text()), std::vector<std::string>{""},
+    for (auto doc : {split_lines(default_config_text()), std::vector<std::string>{""},
                      std::vector<std::string>{"[keys]", "", "; note", "[editor]", "font_size = 15", "; tabs", "", "[general]"}}) {
         for (auto& a : adds) {
             bool header = false;
@@ -744,12 +759,11 @@ static void test_config_schema() {
     }
 
     // App state (last note, window size) survives a save and load.
-    fs::path kvp = fs::temp_directory_path() / "delta_test_state" / "state.txt";
-    fs::remove_all(kvp.parent_path());
+    TempDir state("delta_test_state");
+    fs::path kvp = state.path / "state.txt";
     std::map<std::string, std::string> kv = {{"last_note", "C:/My Notes/a = b.md"}, {"window", "1280 800"}, {"empty", ""}};
     save_kv(kvp, kv);  // creates the folder
     CHECK(load_kv(kvp) == kv);
-    fs::remove_all(kvp.parent_path());
 }
 
 #include "nav.h"
@@ -765,8 +779,8 @@ static void test_config_schema() {
 // Notes are the user's documents: every store operation must keep their
 // bytes intact and refuse anything that would overwrite or orphan one.
 static void test_store() {
-    fs::path root = fs::temp_directory_path() / "delta_test_store";
-    fs::remove_all(root);
+    TempDir tmp("delta_test_store");
+    const fs::path& root = tmp.path;
     Store st;
     st.set_root(root);
     auto body = [](const NoteRef& n) {
@@ -855,8 +869,6 @@ static void test_store() {
     CHECK_EQ(st.ensure_space("empty"), std::string());
     CHECK_EQ(st.delete_space("empty"), std::string());
     CHECK(!fs::exists(root / "empty"));
-
-    fs::remove_all(root);
 }
 
 // Every image is 800x400 except those named "missing".
@@ -877,13 +889,10 @@ struct FakeImages : ImageSource {
 // nor duplicate one.
 static std::vector<std::string> image_srcs(const std::string& text) {
     std::vector<std::string> out;
-    for (size_t at = 0; at <= text.size();) {
-        size_t nl = text.find('\n', at);
-        if (nl == std::string::npos) nl = text.size();
+    for (auto& line : split_lines(text)) {
         std::vector<ImageRef> refs;
-        if (md_image_row(text.substr(at, nl - at), &refs))
+        if (md_image_row(line, &refs))
             for (auto& r : refs) out.push_back(r.src);
-        at = nl + 1;
     }
     std::sort(out.begin(), out.end());
     return out;
@@ -892,13 +901,8 @@ static std::vector<std::string> image_srcs(const std::string& text) {
 // Every line holding an image is still a whole image line: no token cut in
 // half, none run into text or into its neighbour.
 static bool image_lines_valid(const std::string& text) {
-    for (size_t at = 0; at <= text.size();) {
-        size_t nl = text.find('\n', at);
-        if (nl == std::string::npos) nl = text.size();
-        std::string line = text.substr(at, nl - at);
+    for (auto& line : split_lines(text))
         if (line.find("![") != std::string::npos && !md_image_row(line)) return false;
-        at = nl + 1;
-    }
     return true;
 }
 
@@ -981,9 +985,8 @@ static void test_image_store() {
     CHECK_EQ(sha256_hex("abc"), std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
     CHECK_EQ(sha256_hex(std::string(1000, 'a')).substr(0, 16), std::string("41edece42d63e8d9"));  // several blocks
 
-    fs::path root = fs::temp_directory_path() / "delta_test_images";
-    std::error_code ec;
-    fs::remove_all(root, ec);
+    TempDir tmp("delta_test_images");
+    const fs::path& root = tmp.path;
     fs::create_directories(root);
     ImageStore store;
     store.set_root(root);
@@ -1001,7 +1004,6 @@ static void test_image_store() {
     int files = 0;
     for (auto& f : fs::directory_iterator(store.dir())) { (void)f; files++; }
     CHECK_EQ(files, 2);
-    fs::remove_all(root, ec);
 
     fs::path note_dir = root / "space";
     CHECK(resolve_image(note_dir, "https://example.com/a.png").empty());  // never fetched from the web
@@ -1915,10 +1917,9 @@ static void test_link_problems() {
     CHECK(!Store::split_target("#only a heading", space, name));
 
     // The index comes from the disk: spaces and their notes, as written.
-    fs::path root = fs::temp_directory_path() / "delta_test_links";
-    fs::remove_all(root);
+    TempDir tmp("delta_test_links");
     Store st;
-    st.set_root(root);
+    st.set_root(tmp.path);
     NoteRef made;
     st.create_note("work", "Plan", "", made);
     st.create_note("home", "Groceries", "", made);
@@ -1927,7 +1928,6 @@ static void test_link_problems() {
     CHECK(ix == st.index());
     st.create_note("home", "Garden", "", made);
     CHECK(!(ix == st.index()));  // a new note is noticed
-    fs::remove_all(root);
 
     auto probs = link_problems({
         "[[Plan]] and [[work/plan|the plan]] are fine",
@@ -2023,10 +2023,9 @@ static void test_nav() {
     CHECK(rc.list().size() == 1 && rc.list()[0].name == "b2");
 
     // Links here resolve as following them does.
-    fs::path root = fs::temp_directory_path() / "delta_test_nav";
-    fs::remove_all(root);
+    TempDir tmp("delta_test_nav");
     Store st;
-    st.set_root(root);
+    st.set_root(tmp.path);
     NoteRef plan, home_plan, other;
     st.create_note("work", "Plan", "", plan);
     st.create_note("home", "Plan", "", home_plan);
@@ -2052,7 +2051,6 @@ static void test_nav() {
         CHECK_EQ(st.restore_note(trashed[0], back), std::string());
         CHECK(back.name == "Plan (2)" && st.exists("work", "Plan (2)") && st.trashed().empty());
     }
-    fs::remove_all(root);
 }
 
 // The words spellcheck would look at in a line, joined with |.
@@ -2099,10 +2097,18 @@ static void test_spell_words() {
     CHECK_EQ(skipped({"prose", "---", "more", "---"}), std::string("0000"));  // not at the top
 }
 
-static bool wait_ready(Speller& sp) {
+// Polls `done` until it's true or 10 seconds pass, for work on another thread.
+static bool wait_until(const std::function<bool()>& done) {
     auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!sp.ready() && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    return sp.ready();
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= until) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return true;
+}
+
+static bool wait_ready(Speller& sp) {
+    return wait_until([&] { return sp.ready(); });
 }
 
 static void test_speller() {
@@ -2139,17 +2145,13 @@ static void test_speller() {
 
     // Without waiting: nothing yet, the worker finds them, then they're there.
     CHECK(!sp.suggest_later("Seperately"));
-    for (int i = 0; i < 500 && sp.suggesting(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    wait_until([&] { return !sp.suggesting(); });
     auto later = sp.suggest_later("Seperately");
     CHECK(later && !later->empty() && (*later)[0] == "Separately");
     // Checking never waits for it: new lines come through, if not at once.
     sp.suggest_later("Acommodate");
     std::vector<Diagnostic> marks;
-    int tries = 0;
-    while (!sp.check({"a fresh line with a wurd"}, marks, 1.0) && tries < 500) {
-        tries++;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    wait_until([&] { return sp.check({"a fresh line with a wurd"}, marks, 1.0); });
     CHECK(marks.size() == 1);
 
     // Accents the dictionary leaves off.
@@ -2182,8 +2184,8 @@ static void test_speller() {
     // Dictionaries of your own, found by name in a folder. An ISO8859-1 one
     // is read as UTF-8 (flags past ASCII included); other encodings are
     // refused, saying why.
-    fs::path dir = fs::temp_directory_path() / "delta_test_dicts";
-    fs::remove_all(dir);
+    TempDir tmp("delta_test_dicts");
+    const fs::path& dir = tmp.path;
     fs::create_directories(dir);
     atomic_write(dir / "xx_Latin.aff", "SET ISO8859-1\nPFX \xC5 Y 1\nPFX \xC5 0 re .\n", nullptr);
     atomic_write(dir / "xx_Latin.dic", "2\ncaf\xE9/\xC5\nword\n", nullptr);
@@ -2196,7 +2198,6 @@ static void test_speller() {
     CHECK(wait_ready(sp));
     CHECK(sp.correct("caf\xC3\xA9") && sp.correct("recaf\xC3\xA9") && sp.correct("word") && !sp.correct("wurd"));
     CHECK(sp.errors().size() == 1 && sp.errors()[0].find("KOI8-R") != std::string::npos);
-    fs::remove_all(dir);
 }
 
 static void test_spell_fix() {
@@ -2337,60 +2338,67 @@ static void test_ui_voice() {
     CHECK(titles > 50);  // the pattern still finds the command table
 }
 
-// The palette's modes: a scoped one (notes, search, tags) widens to every
-// space and back, and no other does; backspace on an empty query
-// leaves a mode for the root, commands.
-static int g_builds = 0;
-
-static void palette_frame(Palette& p, ImGuiKey k = ImGuiKey_None) {
+// One frame of the palette with `k` held through it, its rows from `build`.
+// `first` runs inside the frame before the palette draws. Returns the
+// action of the row chosen, if any.
+static std::function<void()> palette_frame(Palette& p, ImGuiKey k, const Palette::Builder& build,
+                                           const std::function<void()>& first = {}) {
     ImGuiIO& io = ImGui::GetIO();
     if (k != ImGuiKey_None) io.AddKeyEvent(k, true);
     io.DisplaySize = ImVec2(1000, 800);
     io.DeltaTime = 1.0f / 60;
     ImGui::NewFrame();
+    if (first) first();
     Palette::Frame f{g_sans, g_sans, 17, 15, 1, 100, 600, 40, 700, 0, io.DeltaTime, Palette::Selection::Marker, 2, false};
-    p.draw(f, [](const std::string&, std::vector<PaletteItem>&, int& total) { g_builds++; total = 0; },
-           [](char) { return std::string(); });
+    auto chosen = p.draw(f, build, [](char) { return std::string(); });
     ImGui::Render();
     if (k != ImGuiKey_None) io.AddKeyEvent(k, false);
+    return chosen;
 }
 
+// The palette's modes: a scoped one (notes, search, tags) widens to every
+// space and back, and no other does; backspace on an empty query
+// leaves a mode for the root, commands.
 static void test_palette_modes() {
     Palette p;
+    int built = 0;
+    auto step = [&](ImGuiKey k = ImGuiKey_None) {
+        palette_frame(p, k, [&](const std::string&, std::vector<PaletteItem>&, int& total) { built++; total = 0; });
+    };
     p.open(".");
-    palette_frame(p);
+    step();
     CHECK(p.in_mode('.') && p.scoped() && !p.wide());
-    int builds = g_builds;
+    int builds = built;
     p.set_wide(true);  // palette.widen, bound to tab by App
-    palette_frame(p);
-    CHECK(p.wide() && g_builds == builds + 1);  // widened, and the list built again
+    step();
+    CHECK(p.wide() && built == builds + 1);  // widened, and the list built again
     p.set_wide(false);
-    palette_frame(p);
+    step();
     CHECK(!p.wide());
 
     p.open("@");
     p.set_wide(true);
-    palette_frame(p);
+    step();
     CHECK(p.in_mode('@') && !p.scoped() && !p.wide());
 
     p.open("?", true);
-    palette_frame(p);
+    step();
     CHECK(p.in_mode('?') && p.wide());
 
     p.open("#");
-    palette_frame(p);
+    step();
     CHECK(p.in_mode('#') && p.scoped());  // tags widen too
 
     p.open("");
-    palette_frame(p);
+    step();
     CHECK(p.in_mode(0) && !p.scoped() && !p.wide());  // commands have no scope
 
     p.open(".");
-    palette_frame(p);
-    palette_frame(p, ImGuiKey_Backspace);
+    step();
+    step(ImGuiKey_Backspace);
     CHECK(p.in_mode(0));
     p.close();
-    for (int i = 0; i < 30; i++) palette_frame(p);
+    for (int i = 0; i < 30; i++) step();
 }
 
 // "open manual" shows the README as the build embedded it.
@@ -2467,9 +2475,9 @@ static void test_manual() {
 // --sandbox: a config pointing at a notes folder beside it, made once and
 // then reused as it was left.
 static void test_sandbox() {
-    fs::path dir = fs::temp_directory_path() / "delta_test_sandbox";
+    TempDir tmp("delta_test_sandbox");
+    const fs::path& dir = tmp.path;
     std::error_code ec;
-    fs::remove_all(dir, ec);
     std::string err;
     fs::path cfg = make_sandbox(dir, &err);
     CHECK(cfg == dir / "delta.ini" && err.empty());
@@ -2483,7 +2491,6 @@ static void test_sandbox() {
     CHECK(make_sandbox(dir, &err) == cfg);
     std::string text;
     CHECK(read_file(cfg, text) && text == "[editor]\nfont = Georgia\n");  // kept, not rewritten
-    fs::remove_all(dir, ec);
 }
 
 // [editor] font and mono_font: the embedded font by default, else a font
@@ -2496,8 +2503,8 @@ static void test_fonts() {
     CHECK_EQ(pick_font("noto sans", "Noto Sans", p), std::string());  // the default, however it's cased
     CHECK(p.embedded());
 
-    fs::path root = fs::temp_directory_path() / "delta_test_fonts";
-    fs::remove_all(root);
+    TempDir tmp("delta_test_fonts");
+    const fs::path& root = tmp.path;
     fs::create_directories(root);
     fs::path ttf = root / "Mine.ttf", junk = root / "junk.ttf";
     CHECK(atomic_write(ttf, std::string((const char*)g_font_mono, g_font_mono_size), nullptr));
@@ -2529,7 +2536,6 @@ static void test_fonts() {
     CHECK(family("Consolas") && family("Consolas")->mono && real_bold(family("Consolas")->regular, family("Consolas")->bold));
     CHECK(family("Georgia") && !family("Georgia")->mono);
 #endif
-    fs::remove_all(root);
 
     CHECK(is_font_path("~/fonts/a.ttf") && is_font_path("Mine.OTF") && is_font_path("C:\\x\\y"));
     CHECK(!is_font_path("JetBrains Mono") && !is_font_path("Iosevka Term"));
@@ -2538,15 +2544,12 @@ static void test_fonts() {
 // The font worker: fonts found and read off the UI thread, the newest request
 // winning, and each file read once while anything holds it.
 static void test_font_loader() {
-    fs::path root = fs::temp_directory_path() / "delta_test_font_loader";
-    fs::remove_all(root);
+    TempDir tmp("delta_test_font_loader");
+    const fs::path& root = tmp.path;
     fs::create_directories(root);
     fs::path a = root / "a.ttf", b = root / "b.ttf";
     CHECK(atomic_write(a, std::string((const char*)g_font_mono, g_font_mono_size), nullptr));
     CHECK(atomic_write(b, std::string((const char*)g_font_sans, g_font_sans_size), nullptr));
-    auto wait = [](auto&& done) {
-        for (int i = 0; i < 500 && !done(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    };
 
     FontLoader fl;
     // Now, for start-up: the same file for both is read once.
@@ -2559,12 +2562,12 @@ static void test_font_loader() {
     fl.load({path_u8(b), "Noto Sans", "", "Noto Sans Mono"});
     fl.load({path_u8(a), "Noto Sans", "", "Noto Sans Mono"});
     FontLoader::Pair got;
-    wait([&] { return fl.take(got); });
+    wait_until([&] { return fl.take(got); });
     CHECK_EQ(got.sans.value, path_u8(a));
     CHECK(got.sans.regular == now.sans.regular);  // still held (by `now`): not read again
     CHECK(!got.mono.regular && got.mono.problem.empty());  // the embedded font
     CHECK(!fl.take(got));  // once
-    wait([&] { return !fl.busy(); });
+    wait_until([&] { return !fl.busy(); });
     CHECK(!fl.busy());
 
     // Once nothing holds a file's bytes, they're gone; asked again, it's read again.
@@ -2578,33 +2581,27 @@ static void test_font_loader() {
     // A problem comes back with the embedded font.
     fl.preview(path_u8(root / "missing.ttf"), "Noto Sans");
     FontLoad pl;
-    wait([&] { return fl.take_preview(pl); });
+    wait_until([&] { return fl.take_preview(pl); });
     CHECK_EQ(pl.problem, std::string("no font file here, using Noto Sans"));
     CHECK(!pl.regular);
 
 #ifdef _WIN32
     fl.list_families();
     std::vector<FontFamily> fams;
-    wait([&] { return fl.take_families(fams); });
+    wait_until([&] { return fl.take_families(fams); });
     CHECK(fams.size() > 10);
     bool sorted = true;
     for (size_t i = 1; i < fams.size(); i++)
         if (lower(fams[i - 1].name) > lower(fams[i].name)) sorted = false;
     CHECK(sorted);
 #endif
-    fs::remove_all(root);
 }
 
 // What the font picker writes: the value replaced where it's set, or the
 // setting added where "add setting" would put it.
 static void test_config_set() {
     auto set = [](const std::string& text, const std::string& key, const std::string& value) {
-        std::vector<std::string> lines;
-        for (size_t a = 0, b;; a = b + 1) {
-            b = text.find('\n', a);
-            lines.push_back(text.substr(a, b == std::string::npos ? std::string::npos : b - a));
-            if (b == std::string::npos) break;
-        }
+        std::vector<std::string> lines = split_lines(text);
         apply_edit(lines, config_set(lines, "editor", key, value));
         std::string out;
         for (size_t i = 0; i < lines.size(); i++) out += (i ? "\n" : "") + lines[i];
@@ -2735,10 +2732,9 @@ static void test_tags() {
     CHECK_EQ(tag_query_fill("rust ", "idea"), std::string("rust #idea "));
 
     // The index: read once, again when a note changes, forgotten when it goes.
-    fs::path root = fs::temp_directory_path() / "delta_test_tags";
-    fs::remove_all(root);
+    TempDir tmp("delta_test_tags");
     Store store;
-    store.set_root(root);
+    store.set_root(tmp.path);
     NoteRef a, b, c;
     store.create_note("work", "a", "#x #y", a);
     store.create_note("work", "b", "#y", b);
@@ -2760,7 +2756,6 @@ static void test_tags() {
     CHECK(ix.notes().size() == 2 && with("x") == 0);
     ix.set(a, {"#w"});  // as it is in the editor
     CHECK(with("w") == 1 && with("z") == 0);
-    fs::remove_all(root);
 }
 
 // Completion as you type: the list comes up for a word being written, enter
@@ -2844,26 +2839,17 @@ static void test_palette_fill() {
     Palette p;
     std::string built;
     bool ran = false;
+    auto build = [&](const std::string& t, std::vector<PaletteItem>& out, int& total) {
+        built = t;
+        total = 1;
+        PaletteItem it;
+        it.label = "#rust";
+        it.action = [&ran] { ran = true; };
+        if (t == "#ru") it.fill = "#rust ";
+        out.push_back(it);
+    };
     auto run = [&](ImGuiKey k, std::function<void()> first = {}) {
-        ImGuiIO& io = ImGui::GetIO();
-        if (k != ImGuiKey_None) io.AddKeyEvent(k, true);
-        io.DisplaySize = ImVec2(1000, 800);
-        io.DeltaTime = 1.0f / 60;
-        ImGui::NewFrame();
-        if (first) first();
-        Palette::Frame f{g_sans, g_sans, 17, 15, 1, 100, 600, 40, 700, 0, io.DeltaTime, Palette::Selection::Marker, 2, false};
-        auto chosen = p.draw(f, [&](const std::string& t, std::vector<PaletteItem>& out, int& total) {
-            built = t;
-            total = 1;
-            PaletteItem it;
-            it.label = "#rust";
-            it.action = [&ran] { ran = true; };
-            if (t == "#ru") it.fill = "#rust ";
-            out.push_back(it);
-        }, [](char) { return std::string(); });
-        ImGui::Render();
-        if (k != ImGuiKey_None) io.AddKeyEvent(k, false);
-        if (chosen) chosen();
+        if (auto chosen = palette_frame(p, k, build, first)) chosen();
     };
     p.open("#ru");
     run(ImGuiKey_None);

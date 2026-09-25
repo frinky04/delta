@@ -58,25 +58,27 @@ if(NOT MSVC)
 endif()
 
 # --- embedded fonts, dictionaries and manual ---------------------------------
-function(embed_file src name out_var)
+# Each call adds its generated source to EMBEDDED, which delta_core compiles.
+set(EMBEDDED)
+function(embed_file src name)
   set(out ${CMAKE_BINARY_DIR}/generated/${name}.cpp)
   add_custom_command(
     OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -DIN=${src} -DOUT=${out} -DNAME=${name} -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
     DEPENDS ${src} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
     COMMENT "Embedding ${name}")
-  set(${out_var} ${out} PARENT_SCOPE)
+  set(EMBEDDED ${EMBEDDED} ${out} PARENT_SCOPE)
 endfunction()
-embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-Regular.ttf g_font_sans FONT_SANS_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-Medium.ttf g_font_mono FONT_MONO_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-SemiBold.ttf g_font_sans_bold FONT_SANS_BOLD_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-SemiBold.ttf g_font_mono_bold FONT_MONO_BOLD_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.aff g_dict_en_us_aff DICT_EN_US_AFF_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.dic g_dict_en_us_dic DICT_EN_US_DIC_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.aff g_dict_en_gb_aff DICT_EN_GB_AFF_CPP)
-embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.dic g_dict_en_gb_dic DICT_EN_GB_DIC_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-Regular.ttf g_font_sans)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-Medium.ttf g_font_mono)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSans-SemiBold.ttf g_font_sans_bold)
+embed_file(${CMAKE_SOURCE_DIR}/assets/NotoSansMono-SemiBold.ttf g_font_mono_bold)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.aff g_dict_en_us_aff)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.dic g_dict_en_us_dic)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.aff g_dict_en_gb_aff)
+embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.dic g_dict_en_gb_dic)
 # The README, shown in the app by "open manual" (rebuilt when it changes).
-embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual MANUAL_CPP)
+embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual)
 
 # --- app ---------------------------------------------------------------------
 add_library(delta_core STATIC
@@ -98,15 +100,7 @@ add_library(delta_core STATIC
   src/fonts.cpp
   src/commands.cpp
   src/tags.cpp
-  ${FONT_SANS_CPP}
-  ${FONT_MONO_CPP}
-  ${FONT_SANS_BOLD_CPP}
-  ${FONT_MONO_BOLD_CPP}
-  ${DICT_EN_US_AFF_CPP}
-  ${DICT_EN_US_DIC_CPP}
-  ${DICT_EN_GB_AFF_CPP}
-  ${DICT_EN_GB_DIC_CPP}
-  ${MANUAL_CPP})
+  ${EMBEDDED})
 target_include_directories(delta_core PUBLIC src)
 target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/deps)
 find_package(Threads REQUIRED)
