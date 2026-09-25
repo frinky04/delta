@@ -1,6 +1,7 @@
 #pragma once
-// Getting around between notes: where you've been (back and forward, like a
-// browser) and which notes you've had open lately (the switcher, ctrl+tab).
+// Getting around: between notes, where you've been (back and forward, like a
+// browser) and which notes you've had open lately (the switcher, ctrl+tab);
+// within one, where go to line lands.
 #include <functional>
 #include <string>
 #include <vector>

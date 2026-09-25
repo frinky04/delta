@@ -147,8 +147,8 @@ public:
     // history, without it being an edit of its own (a download landing).
     bool replace_line_everywhere(const std::string& from, const std::string& to);
 
-    // Images on screen (last frame's layout, whichever view is showing). An
-    // image is (line, tile): a line can hold a row of them.
+    // Images on screen (editor_images.cpp): last frame's layout, whichever
+    // view is showing. An image is (line, tile): a line can hold a row of them.
     bool image_at(ImVec2 screen, int& line, int& tile) const;           // an image under this point?
     bool image_rect(int line, int tile, ImVec2& a, ImVec2& b) const;    // where it's drawn
     std::string image_src(int line, int tile = 0) const;                // its src, "" if none
@@ -159,6 +159,7 @@ public:
     int image_for_caret(int* tile = nullptr) const;
     void delete_image(int line, int tile);                              // one undoable edit
     bool over_image_handle() const { return hover_handle_ || resize_line_ >= 0; }
+
     // The text position under a screen point (edit view), for drops.
     TextPos position_at(ImVec2 screen) const;
 
@@ -366,7 +367,8 @@ private:
     std::vector<Mark> marks_;
     bool marks_snap_ = false;
 
-    // images, in editor_images.cpp (as are the image calls above), down to tile_morph()
+    // Images (editor_images.cpp), down to tile_morph(): the calls and the
+    // state for picking, dragging, resizing and animating them.
     void layout_image(Line& L, const std::string& s, int index);
     void step_off_image();
     bool image_backspace();

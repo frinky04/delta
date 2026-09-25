@@ -1,3 +1,7 @@
+// The editor's text and edits (undo, clipboard, find and replace, line and
+// list commands), layout and its animation, caret movement, keys and mouse,
+// completion, and drawing, down to the edit/reader morph. Images are in
+// editor_images.cpp.
 #include "editor.h"
 
 #include <algorithm>

@@ -32,7 +32,7 @@ Text delta puts on screen is lowercase fragments, like editor chrome: `open a no
 ## Code
 
 - Big classes are split by feature: `App` across `app.cpp` and `app_*.cpp`, `Editor` across `editor.cpp` and `editor_*.cpp`. Each file's head comment says what it holds, and `app.h`/`editor.h` group declarations under the file that defines them. New feature code goes in its feature's file, or a new one.
-- Logic that doesn't need the window lives in `delta_core` modules, where tests reach it; `App` wires it up.
+- New logic that doesn't need the window goes in a `delta_core` module, where tests reach it, and `App` wires it up. Some older logic still sits in `App`.
 
 ## Build and check
 

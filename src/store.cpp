@@ -147,9 +147,7 @@ NoteRef Store::ref(const std::string& space, const std::string& name) const {
     n.space = space;
     n.name = name;
     n.path = root_ / u8path(space) / u8path(name + ".md");
-    std::error_code ec;
-    auto t = fs::last_write_time(n.path, ec);
-    if (!ec) n.mtime = to_time_t(t);
+    if (auto t = mtime_of(n.path); t != fs::file_time_type{}) n.mtime = to_time_t(t);
     return n;
 }
 
