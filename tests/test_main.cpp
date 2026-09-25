@@ -2,6 +2,12 @@
 // input. No window or GPU; font textures are requested but never uploaded.
 #include <cstdio>
 #include <fstream>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 #include <climits>
 #include <regex>
 #include <set>
@@ -99,10 +105,14 @@ static Editor fresh(const std::string& text) {
 
 // A scratch folder under the system temp folder, emptied when made and
 // removed when it goes out of scope. Nothing is created: what a test writes
-// there makes its own folders.
+// there makes its own folders. The name carries this process's id, so two
+// test runs at once never clear each other's folders.
 struct TempDir {
     fs::path path;
-    explicit TempDir(const char* name) : path(fs::temp_directory_path() / name) { clear(); }
+    explicit TempDir(const char* name)
+        : path(fs::temp_directory_path() / (std::string(name) + "-" + std::to_string(getpid()))) {
+        clear();
+    }
     ~TempDir() { clear(); }
     void clear() {
         std::error_code ec;
@@ -720,8 +730,9 @@ static void test_config_schema() {
 
     // From disk: a missing file is reported and changes nothing; a real one
     // (CRLF, as Windows editors save it) loads.
-    fs::path p = fs::temp_directory_path() / "delta_test_config.ini";
-    fs::remove(p);
+    TempDir disk_dir("delta_test_config");
+    fs::create_directories(disk_dir.path);
+    fs::path p = disk_dir.path / "config.ini";
     Config keep;
     keep.font_size = 21;
     CHECK(!load_config(p, keep, issues));
