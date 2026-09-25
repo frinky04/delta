@@ -64,17 +64,17 @@ Code, links and names are not checked. US and UK English are built in.
 
 ## Style
 
-delta marks small slips the way a code formatter does, with faint dashes under them: double spaces, spaces at the ends of lines, extra blank lines, a space before a comma, no space after a full stop, a word typed twice, a bracket or quote left open, no blank line around a heading or a code block, and a list that mixes `-`, `*` and `+` or indents unevenly. Code, links, urls, tags and front matter are left alone. Two or more spaces at the end of a line stay: in markdown they are a line break.
+delta marks small slips the way a code formatter does, with faint dashes under them: double spaces, spaces at the ends of lines, extra blank lines, a space before a comma, no space after a full stop, a word typed twice, a bracket or quote left open, no blank line around a code block, and a list that mixes `-`, `*` and `+` or indents unevenly. Code, links, urls, tags and front matter are left alone. Two or more spaces at the end of a line stay: in markdown they are a line break.
 
 - `alt+.` fixes the slip at the caret. The status line says what it is.
 - `f8` steps through slips along with the note's other problems.
 - "format note" (`shift+alt+f`) fixes every slip in the note at once, and one undo puts them all back. A bracket or quote left open is for you to fix.
 
-To hide the marks, set `lint = false`. To skip some rules, list them in `lint_off`. To format each time you press `ctrl+s`, set `format_on_save = true`; saving on its own as you type never changes your text.
+To hide the marks, set `lint = false`. To skip some rules, list them in `lint_off`; by default it skips `final_newline` (a note that doesn't end in a new line) and `heading_blank` (no blank line around a heading). Listing your own replaces those, so keep them in the list if you still want them skipped. To format each time you press `ctrl+s`, set `format_on_save = true`; saving on its own as you type never changes your text.
 
 ```ini
 [editor]
-lint_off = heading_blank, final_newline
+lint_off = final_newline, heading_blank, repeated_word
 format_on_save = true
 ```
 

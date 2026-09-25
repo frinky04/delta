@@ -65,7 +65,7 @@ const std::vector<Setting>& all_settings() {
         {"editor", "blank_line_height", K::Float, "0.6", 0.2f, 1, nullptr, "x line height", &Config::blank_line_height},
         {"editor", "scroll_past_end", K::Bool, "true", 0, 0, nullptr, "", &Config::scroll_past_end},
         {"editor", "lint", K::Bool, "true", 0, 0, nullptr, "mark style slips like double spaces", &Config::lint},
-        {"editor", "lint_off", K::Text, "", 0, 0, nullptr, "style rules to skip, comma-separated", &Config::lint_off},
+        {"editor", "lint_off", K::Text, "final_newline, heading_blank", 0, 0, nullptr, "rules to skip", &Config::lint_off},
         {"editor", "format_on_save", K::Bool, "false", 0, 0, nullptr, "\"format note\" before \"save note now\"", &Config::format_on_save},
 
         {"appearance", "theme", K::Choice, "dark", 0, 0, themes.c_str(), "run \"choose theme\" to see them", &Config::theme},

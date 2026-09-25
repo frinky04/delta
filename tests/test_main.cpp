@@ -3597,7 +3597,7 @@ static void test_lint() {
     parse_config("[editor]\n", c, issues);
     CHECK(c.lint);
     CHECK(!c.format_on_save);
-    CHECK_EQ(c.lint_off, std::string());
+    CHECK_EQ(c.lint_off, std::string("final_newline, heading_blank"));
     parse_config("[editor]\nlint = false\nlint_off = double_space, repeated_word\nformat_on_save = true\n", c, issues);
     CHECK(issues.empty());
     CHECK(!c.lint);

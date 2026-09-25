@@ -37,7 +37,7 @@ struct Config {
     float blank_line_height = 0.6f;     // empty lines, as a fraction of a line
     bool scroll_past_end = true;
     bool lint = true;                   // mark style slips in notes (lint.h)
-    std::string lint_off;               // rule ids left out, comma-separated
+    std::string lint_off = "final_newline, heading_blank";  // rule ids left out, comma-separated
     bool format_on_save = false;        // "format note" when "save note now" runs
 
     // [appearance]
