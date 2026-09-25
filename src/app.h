@@ -67,7 +67,6 @@ private:
         std::function<void()> run;
         bool repeat = false;     // fires on key repeat (line moves, undo...)
         Scope scope = Scope::Page;
-        bool in_palette = true;
         char prefix = 0;         // the palette mode it opens or works in, typed first
         std::vector<Chord> chords;
     };
@@ -166,8 +165,8 @@ private:
     // mode, and renaming one in every note (app_tags.cpp).
     void refresh_tags(bool now);
     void tags_now();  // fresh now, the open note as it is in the editor
-    std::vector<CompletionItem> complete_tags(const std::string& word);
-    std::vector<CompletionItem> complete_links(const std::string& word);
+    std::vector<CompletionItem> tag_completions(const std::string& word);
+    std::vector<CompletionItem> link_completions(const std::string& word);
     void build_tags(const std::string& query, std::vector<PaletteItem>& out, int& total);
     bool tag_at_caret(std::string* name = nullptr) const;
     void pick_tag_rename();  // the tag at the caret, else one picked

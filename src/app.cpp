@@ -1,3 +1,7 @@
+// The app's set-up and command table with where keys work; notes and spaces
+// (opening, saving, reloading, renaming, moving, deleting), history and the
+// note switcher; the palette's rows; and the frame: keys, file polling, the
+// empty page and the status line. Features are in app_*.cpp.
 #include "app.h"
 
 #include <GLFW/glfw3.h>
@@ -102,13 +106,13 @@ bool App::init(GLFWwindow* window, const AppOptions& opts) {
     // Completing as you write: [[links]] to notes, #tags from every note.
     Completer link;
     link.trigger = md_link_word_start;
-    link.items = [this](const std::string& w) { return complete_links(w); };
+    link.items = [this](const std::string& w) { return link_completions(w); };
     link.min_chars = 0;
     link.close = "]]";
     editor_.add_completer(std::move(link));
     Completer tag;
     tag.trigger = tag_word_start;
-    tag.items = [this](const std::string& w) { return complete_tags(w); };
+    tag.items = [this](const std::string& w) { return tag_completions(w); };
     tag.lead = 1;
     editor_.add_completer(std::move(tag));
 
@@ -181,7 +185,8 @@ void App::apply_bindings() {
 }
 
 void App::register_commands() {
-    auto add = [&](const char* id, const char* title, const char* keys, std::function<void()> fn, bool repeat = false, Scope scope = Scope::Page) {
+    auto add = [&](const char* id, const char* title, const char* keys, std::function<void()> fn, bool repeat = false, Scope scope = Scope::Page,
+                   char prefix = 0) {
         Command c;
         c.id = id;
         c.title = title;
@@ -189,28 +194,29 @@ void App::register_commands() {
         c.run = std::move(fn);
         c.repeat = repeat;
         c.scope = scope;
+        c.prefix = prefix;
         cmds_.push_back(std::move(c));
     };
     auto ed = [this](void (Editor::*fn)()) { return [this, fn] { if (editing()) (editor_.*fn)(); }; };
 
     // Navigation
-    add("palette.notes", "find note in this space", "ctrl+o", [this] { open_palette("."); }, false, Scope::App);
-    add("palette.all", "find note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, Scope::App);
+    add("palette.notes", "find note in this space", "ctrl+o", [this] { open_palette("."); }, false, Scope::App, '.');
+    add("palette.all", "find note in any space", "ctrl+alt+o", [this] { open_palette(".", true); }, false, Scope::App, '.');
     // A palette mode's own commands. Their keys work in the mode; picked
     // from the list of commands, they open it first.
     add("palette.sort", "sort notes by name or recent", "ctrl+r", [this] {
         sort_recent_ = !sort_recent_;
         if (palette_.in_mode('.')) palette_.rebuild();
         else open_palette(".");
-    }, false, Scope::Notes);
+    }, false, Scope::Notes, '.');
     add("palette.widen", "widen to every space, or back", "tab", [this] {
         if (palette_.is_open() && palette_.scoped()) palette_.set_wide(!palette_.wide());
         else open_palette(".", true);
-    }, false, Scope::Scoped);
+    }, false, Scope::Scoped, '.');
     add("palette.commands", "show all commands", "ctrl+p", [this] { open_palette(""); }, false, Scope::App);
-    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, Scope::App);
-    add("palette.headings", "jump to heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, Scope::App);
-    add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, Scope::App);
+    add("palette.spaces", "switch space", "ctrl+shift+s", [this] { open_palette("/"); }, false, Scope::App, '/');
+    add("palette.headings", "jump to heading", "ctrl+shift+o", [this] { open_palette("@"); }, false, Scope::App, '@');
+    add("palette.line", "go to line", "ctrl+g", [this] { open_line(); }, false, Scope::App, ':');
     add("find.open", "find in this note", "ctrl+f", [this] { open_find(false); }, false, Scope::App);
     add("find.replace", "find and replace in this note", "ctrl+h", [this] { open_find(true); }, false, Scope::App);
     add("nav.heading_next", "next heading", "ctrl+alt+down", [this] {
@@ -238,9 +244,9 @@ void App::register_commands() {
     add("palette.search", "search notes in this space", "ctrl+shift+f", [this] {
         std::string sel = note_ && editor_.has_selection() && editor_.cursor().line == editor_.anchor().line ? editor_.selected_text() : "";
         open_palette("?" + sel);
-    }, false, Scope::App);
-    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, Scope::App);
-    add("palette.tags", "find notes by tag", "ctrl+t", [this] { open_palette("#"); }, false, Scope::App);
+    }, false, Scope::App, '?');
+    add("palette.backlinks", "show notes that link here", "ctrl+shift+b", [this] { open_palette("["); }, false, Scope::App, '[');
+    add("palette.tags", "find notes by tag", "ctrl+t", [this] { open_palette("#"); }, false, Scope::App, '#');
     add("nav.back", "go back", "alt+left", [this] { history_step(-1); });
     add("nav.forward", "go forward", "alt+right", [this] { history_step(1); });
     add("nav.switch", "switch to recent note", "ctrl+tab", [this] { switch_note(1); }, true);
@@ -330,13 +336,6 @@ void App::register_commands() {
     add("edit.strike", "strikethrough", "ctrl+shift+x", [this] { if (editing()) editor_.wrap_selection("~~"); });
     add("edit.indent", "indent", "ctrl+]", ed(&Editor::indent), true);
     add("edit.outdent", "outdent", "ctrl+[", ed(&Editor::outdent), true);
-
-    // The palette mode each opens or works in, shown beside its shortcut in
-    // the list so the prefixes can be learnt there.
-    for (auto [id, p] : {std::pair{"palette.notes", '.'}, {"palette.all", '.'}, {"palette.spaces", '/'},
-                         {"palette.headings", '@'}, {"palette.line", ':'}, {"palette.search", '?'}, {"palette.backlinks", '['},
-                         {"palette.tags", '#'}, {"palette.sort", '.'}, {"palette.widen", '.'}})
-        if (Command* c = find_command(id)) c->prefix = p;
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,12 +1035,11 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
 
     if (!prefixed) {
         palette_.set_empty("no command matches " + quote(q));
-        total = (int)std::count_if(cmds_.begin(), cmds_.end(), [](const Command& c) { return c.in_palette; });
+        total = (int)cmds_.size();
         size_t prefixed_w = 0;
         for (auto& cmd : cmds_)
             if (cmd.prefix && !cmd.chords.empty()) prefixed_w = std::max(prefixed_w, chord_str(cmd.chords.front()).size());
         for (auto& cmd : cmds_) {
-            if (!cmd.in_palette) continue;
             PaletteItem it;
             it.label = cmd.title;
             if (!match_command(q, cmd.title, cmd.id, command_keywords(cmd.id), it.score, &it.hl, &it.aside)) continue;

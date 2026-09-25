@@ -1,4 +1,5 @@
 #include "notefile.h"
+#include "textfile.h"
 #include "util.h"
 
 namespace {
@@ -9,7 +10,7 @@ bool read_note(const fs::path& p, std::string& text, bool& crlf, std::string* er
         if (err) *err = "couldn't read " + path_u8(p.filename());
         return false;
     }
-    crlf = raw.find("\r\n") != std::string::npos;
+    crlf = has_crlf(raw);
     text = join_lines(split_lines(raw));
     return true;
 }
@@ -37,7 +38,7 @@ void NoteFile::moved(const fs::path& p) {
 }
 
 std::string NoteFile::encode(const std::string& text) const {
-    return crlf_ ? join_lines(split_lines(text), "\r\n") : text;
+    return crlf_ ? join_lines(split_lines(text), eol_of(true)) : text;
 }
 
 NoteFile::Save NoteFile::save(const std::string& text, uint64_t version, bool over_disk, std::string* err) {

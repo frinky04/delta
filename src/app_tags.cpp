@@ -21,15 +21,15 @@ void App::tags_now() {
     if (is_note()) tags_.set(*note_, editor_.lines());
 }
 
-std::vector<CompletionItem> App::complete_tags(const std::string& word) {
+std::vector<CompletionItem> App::tag_completions(const std::string& word) {
     refresh_tags(false);
     static const std::vector<std::string> none;
     bool n = is_note();
-    return ::complete_tags(tags_, n ? note_->path : fs::path(), n ? editor_.lines() : none, editor_.cursor(), word);
+    return complete_tags(tags_, n ? note_->path : fs::path(), n ? editor_.lines() : none, editor_.cursor(), word);
 }
 
-std::vector<CompletionItem> App::complete_links(const std::string& word) {
-    return ::complete_links(note_index_, space_, is_note() ? note_->name : std::string(), word);
+std::vector<CompletionItem> App::link_completions(const std::string& word) {
+    return complete_links(note_index_, space_, is_note() ? note_->name : std::string(), word);
 }
 
 // The palette's # mode. While a tag is being typed: the tags (on notes with
