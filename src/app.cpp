@@ -59,23 +59,6 @@ std::string quote(const std::string& s) { return "\xE2\x80\x9C" + s + "\xE2\x80\
 // "1 note", "3 notes".
 std::string count_of(int n, const std::string& thing) { return std::to_string(n) + " " + thing + (n == 1 ? "" : "s"); }
 
-// A file's text as lines (without their line endings), and back.
-std::vector<std::string> text_lines(const std::string& text) {
-    std::vector<std::string> lines(1);
-    for (char ch : text) {
-        if (ch == '\r') continue;
-        if (ch == '\n') lines.emplace_back();
-        else lines.back() += ch;
-    }
-    return lines;
-}
-
-std::string join_lines(const std::vector<std::string>& lines, bool crlf) {
-    std::string out;
-    for (size_t i = 0; i < lines.size(); i++) out += (i ? (crlf ? "\r\n" : "\n") : "") + lines[i];
-    return out;
-}
-
 // Stepping through marks in text order from the selection (`a` to `b`):
 // the first after it, or the last before it, wrapping round.
 const Diagnostic& step_from(const std::vector<Diagnostic>& marks, TextPos a, TextPos b, int dir) {
@@ -902,10 +885,10 @@ void App::set_setting(const std::string& section, const std::string& key, const 
     std::string text;
     read_file(cfg_path_, text);  // none yet: written from scratch
     bool crlf = text.find("\r\n") != std::string::npos;
-    std::vector<std::string> lines = text_lines(text);
+    std::vector<std::string> lines = split_lines(text);
     apply_edit(lines, config_set(lines, section, key, value));
     std::string err;
-    if (!atomic_write(cfg_path_, join_lines(lines, crlf), &err)) {
+    if (!atomic_write(cfg_path_, join_lines(lines, crlf ? "\r\n" : "\n"), &err)) {
         status("couldn't save the config: " + err, true);
         return;
     }
@@ -1613,7 +1596,7 @@ const std::vector<std::string>& App::note_lines(const NoteRef& n) {
     if (it == cache_text_.end()) {
         std::string text;
         read_file(n.path, text);
-        it = cache_text_.emplace(path_u8(n.path), text_lines(text)).first;
+        it = cache_text_.emplace(path_u8(n.path), split_lines(text)).first;
     }
     return it->second;
 }
@@ -2756,10 +2739,10 @@ void App::apply_tag_rename(const std::string& from, const std::string& to) {
     for (auto& n : notes) {
         std::string text;
         if (!read_file(n.path, text)) { failed++; continue; }
-        std::vector<std::string> lines = text_lines(text);
+        std::vector<std::string> lines = split_lines(text);
         if (!rename_tag(lines, from, to)) continue;
         std::string err;
-        if (!atomic_write(n.path, join_lines(lines, text.find("\r\n") != std::string::npos), &err)) { failed++; why = err; continue; }
+        if (!atomic_write(n.path, join_lines(lines, text.find("\r\n") != std::string::npos ? "\r\n" : "\n"), &err)) { failed++; why = err; continue; }
         changed++;
     }
     if (is_note()) {

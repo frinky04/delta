@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 #include <cctype>
 
 namespace utf8 {
@@ -121,6 +122,29 @@ inline std::string trim(std::string_view s) {
 inline std::string lower(std::string s) {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
     return s;
+}
+
+// A file's text as lines, without their line endings ('\r' dropped), and back.
+inline std::vector<std::string> split_lines(std::string_view text) {
+    std::vector<std::string> out(1);
+    for (char c : text) {
+        if (c == '\r') continue;
+        if (c == '\n') out.emplace_back();
+        else out.back() += c;
+    }
+    return out;
+}
+
+inline std::string join_lines(const std::vector<std::string>& lines, std::string_view eol = "\n") {
+    size_t total = 0;
+    for (auto& l : lines) total += l.size() + eol.size();
+    std::string out;
+    out.reserve(total);
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (i) out += eol;
+        out += lines[i];
+    }
+    return out;
 }
 
 inline bool iequals(const std::string& a, const std::string& b) { return lower(a) == lower(b); }

@@ -24,28 +24,6 @@ int char_class(unsigned char c) {
     return 2;
 }
 
-std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> out(1);
-    for (char c : text) {
-        if (c == '\r') continue;
-        if (c == '\n') out.emplace_back();
-        else out.back() += c;
-    }
-    return out;
-}
-
-std::string join_lines(const std::vector<std::string>& lines) {
-    size_t total = 0;
-    for (auto& l : lines) total += l.size() + 1;
-    std::string out;
-    out.reserve(total);
-    for (size_t i = 0; i < lines.size(); i++) {
-        if (i) out += '\n';
-        out += lines[i];
-    }
-    return out;
-}
-
 // An image line's ![...](...) tokens (none if it isn't one), and a row
 // rebuilt from them, one space apart.
 std::vector<std::string> image_tokens(const std::string& line) {

@@ -135,16 +135,6 @@ static int64_t stamp_of(const fs::path& p) {
     return (int64_t)t.time_since_epoch().count() * 31 + (ec ? 0 : (int64_t)size);
 }
 
-static std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> lines(1);
-    for (char c : text) {
-        if (c == '\r') continue;
-        if (c == '\n') lines.emplace_back();
-        else lines.back() += c;
-    }
-    return lines;
-}
-
 void TagIndex::refresh(const std::vector<NoteRef>& notes) {
     std::set<std::string> seen;
     for (auto& n : notes) {
