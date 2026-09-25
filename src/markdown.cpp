@@ -438,8 +438,12 @@ void md_reader(const std::string& s, const LineInfo& info, const std::vector<Sty
         Style f = st[i];
         auto run_end = [&](Style flag) { int j = i; while (j < n && (st[j] & flag)) j++; return j; };
         if (f & S_QuoteMark) {
-            emit("  ", S_QuoteMark, i);  // bar is drawn over this gap
-            i = run_end(S_QuoteMark);
+            // One placeholder byte per >, each a bar; the layout gives it the
+            // bar's width and the gap after it.
+            int e = run_end(S_QuoteMark);
+            for (int q = i; q < e; q++)
+                if (s[q] == '>') emit(" ", S_QuoteMark, q);
+            i = e;
         } else if ((f & S_ListMark) && (f & S_Marker)) {
             if (!info.task) emit("\xE2\x80\xA2 ", S_ListMark, i);  // "• "
             i = run_end(S_ListMark);

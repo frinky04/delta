@@ -1097,6 +1097,7 @@ bool Editor::bold_of(Style f) const {
 float Editor::advance(const Metrics& m, unsigned cp, Style f) const {
     if (cp == '\t') return m.tabw;
     if ((f & S_TaskBox) && !(f & S_Marker)) return std::round(m.sans->Size * 1.3f);  // reader checkbox
+    if ((f & S_QuoteMark) && !(f & S_Marker)) return std::round(m.sans->Size * 0.9f);  // reader quote bar and gap
     bool b = bold_of(f);
     ImFontBaked* font = is_mono(f) ? (b && m.mono_b ? m.mono_b : m.mono) : (b && m.sans_b ? m.sans_b : m.sans);
     return font->GetCharAdvance((ImWchar)cp);
@@ -1206,7 +1207,10 @@ void Editor::layout(int mode) {
             }
 
             // Blank lines are paragraph spacing, not a full line.
-            if (L.info.kind == LineKind::Blank) L.row_h = std::max(1.0f, std::round(L.row_h * P_.blank_line));
+            // So is a quote's blank line in the reader: its bar still runs through.
+            bool blank_quote = mode == 1 && L.info.quote && L.info.content_start >= (int)s.size();
+            if (L.info.kind == LineKind::Blank || blank_quote)
+                L.row_h = std::max(1.0f, std::round(L.row_h * P_.blank_line));
             L.text_rows = L.rows;
             L.text_row_h = L.row_h;
         }
@@ -3045,7 +3049,9 @@ struct Look {
 Look resolve(Style f, const LineInfo& info, bool reader) {
     Look k{T.text};
     if (f & S_Heading) k.col = T.bright;
-    if (f & S_Quote) { k.col = col_mix(T.text, T.dim, 0.35f); k.italic = true; }
+    // Upright and only a little quieter: long quotes stay easy to read, and
+    // *emphasis* inside them still shows.
+    if (f & S_Quote) k.col = col_mix(T.text, T.dim, 0.2f);
     if (f & S_Bold) k.col = T.bright;
     if (f & S_Italic) k.italic = true;
     if (f & S_Strike) { k.strike = true; k.col = T.dim; }
@@ -3179,8 +3185,15 @@ void Editor::draw_row(ImDrawList* dl, int mode, const Line& L, const Metrics& m,
                 dl->AddRect(ImVec2(bx, by), ImVec2(bx + bs, by + bs), fade(T.dim), 3 * dpi, 1.5f * dpi);
             }
         } else if (mode == 1 && (f & S_QuoteMark)) {
-            float bw = std::max(2.0f, std::round(3 * dpi));
-            dl->AddRectFilled(ImVec2(x, ry), ImVec2(x + bw, ry + L.row_h), fade(T.faint));
+            // A bar per level, down every row of the line (the placeholders
+            // are all on its first), so a quote's lines join into one bar.
+            float bw = std::max(2.0f, std::round(2 * dpi));
+            float bottom = ry + L.rows.size() * L.row_h;
+            float step = advance(m, ' ', f);
+            for (int q = i; q < j; q++) {
+                float bx = std::round(x + (q - i) * step);
+                dl->AddRectFilled(ImVec2(bx, ry), ImVec2(bx + bw, bottom), fade(T.faint));
+            }
         } else if (!tab) {
             // Real SemiBold when we have it; the double-draw only as a fallback.
             bool bold = bold_of(f);

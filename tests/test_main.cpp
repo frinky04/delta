@@ -206,6 +206,17 @@ static void test_markdown() {
             ok = map[i] >= 0 && map[i] < (int)std::string(s).size() && (i == 0 || map[i] >= map[i - 1]);
     }
     CHECK(ok);
+
+    // Each > of a quote becomes one bar placeholder, mapped to its >.
+    md_analyze("> > nested", false, info, st);
+    md_reader("> > nested", info, st, out, ost, map);
+    CHECK_EQ(out, std::string("  nested"));
+    CHECK(ost.size() == out.size() && (ost[0] & S_QuoteMark) && (ost[1] & S_QuoteMark) && !(ost[2] & S_QuoteMark));
+    CHECK(map.size() == out.size() && map[0] == 0 && map[1] == 2 && map[2] == 4);
+    md_analyze(">", false, info, st);
+    md_reader(">", info, st, out, ost, map);
+    CHECK_EQ(out, std::string(" "));
+    CHECK(info.quote && info.content_start == 1);
 }
 
 static void test_typing() {
