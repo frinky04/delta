@@ -123,7 +123,10 @@ int main(int argc, char** argv) {
     AppOptions opts;
     std::string shot;
     int shot_w = 0, shot_h = 0;
-    double shot_delay = 1.0;  // seconds after the first frame
+    // --screenshot waits for the --run script to finish, and for at least
+    // --shot-delay seconds after the first frame. A trailing "wait:<secs>"
+    // settles the last step: the capture comes that long after it.
+    double shot_delay = 1.0;
     // --sandbox [dir]: a config and notes of its own, as on a first launch.
     // Without a dir it's a temporary one, removed on exit; a dir is kept, so
     // the next run with it is a second launch.
@@ -234,11 +237,14 @@ int main(int argc, char** argv) {
         if (g_wake > 0) g_wake--;
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) { glfwWaitEvents(); continue; }
 
+        // Asked before the frame, so the frame shows the script's last step.
+        bool script_done = app.script_done(now);
         render_frame(slept);
 
-        // Capture once animations have had real time to settle.
+        // Capture once the script is done and animations have had real time
+        // to settle.
         static double first_frame = glfwGetTime();
-        if (!shot.empty() && ++frames >= 3 && glfwGetTime() - first_frame > shot_delay) {
+        if (!shot.empty() && ++frames >= 3 && script_done && glfwGetTime() - first_frame > shot_delay) {
             int w, h;
             glfwGetFramebufferSize(window, &w, &h);
             std::vector<unsigned char> px((size_t)w * h * 4);

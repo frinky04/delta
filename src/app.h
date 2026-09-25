@@ -37,6 +37,10 @@ public:
     void shutdown();
 
     bool should_quit() const { return quit_; }
+    // Whether the --run script has run every step, its last wait included.
+    bool script_done(double now) const {
+        return pending_run_.empty() && release_key_ == ImGuiKey_None && now >= run_after_;
+    }
     // Files dropped on the window (UTF-8 paths), at a point in the window.
     void on_drop(std::vector<std::string> paths, ImVec2 at) { drops_.push_back({std::move(paths), at}); }
     double next_wake(double now);       // when the idle loop must render next
