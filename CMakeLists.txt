@@ -83,6 +83,7 @@ embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual)
 # --- app ---------------------------------------------------------------------
 add_library(delta_core STATIC
   src/editor.cpp
+  src/editor_images.cpp
   src/markdown.cpp
   src/ini_syntax.cpp
   src/palette.cpp

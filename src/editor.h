@@ -302,39 +302,6 @@ private:
     bool is_img(int i) const {
         return i >= 0 && i < (int)lay_[0].size() && i < (int)lines_.size() && lay_[0][i].img && md_image_line(lines_[i]);
     }
-    void layout_image(Line& L, const std::string& s, int index);
-    void step_off_image();
-    bool image_backspace();
-    bool image_delete();
-    // The caret's places in an image line are "stops": before the first
-    // image (0), between images, after the last (n).
-    static int img_stop(const Line& L, int col);
-    static int stop_col(const Line& L, int k, int len);
-    static int img_tile(const Line& L, int col) { return std::max(0, img_stop(L, col) - 1); }  // the one it's "on"
-    void img_caret(const Line& L, int col, float& x, float& y, float& h) const;
-    // The caret never rests on an image line: arriving there picks an image
-    // whole, a selection of exactly it, outlined. picked() is its line (-1
-    // if none is picked) and `tile` which one.
-    int picked(int* tile = nullptr) const;
-    void pick(int line, int tile, bool reveal = true);
-    bool unpick();  // the caret just after the picked image
-    void settle_on_images();
-    void step_picked(int line, int tile, int dir);
-    void vertical_picked(int line, int tile, int dir);
-    void remove_picked(int line, int tile, int dir);
-    static int nearest_tile(const Line& L, float x, float row_y);
-    int img_col_at(const Line& L, int len, float x, float y) const;
-    int img_tile_at(const Line& L, float x, float y) const;     // -1 if none there
-    void delete_tile(int line, int tile);
-    bool resize_handle(int line, ImVec2& a, ImVec2& b) const;   // doc coords
-    bool handle_image_mouse(bool hovered, ImVec2 doc);          // true: it took the mouse this frame
-    void finish_resize();
-    void move_image();                                          // to the drop target (sets land_*)
-    bool drop_changes() const;                                  // would dropping here move it?
-    void let_go_image(bool drop);                               // end a drag: drop, or fly home
-    bool tile_rect(int line, int tile, ImVec2& a, ImVec2& b) const;  // doc coords, edit view
-    void draw_image_drag(ImDrawList* dl);
-    void draw_image(ImDrawList* dl, const Line& L, float x, float y, float alpha, int index);
     int col_at_x(int mode, int line, int row, float x) const;
     ImVec2 pos_xy(TextPos p) const;              // doc coords of caret position (edit layout)
     bool hit(int mode, ImVec2 doc, int& line, int& col) const;
@@ -398,6 +365,41 @@ private:
     };
     std::vector<Mark> marks_;
     bool marks_snap_ = false;
+
+    // images, in editor_images.cpp (as are the image calls above), down to tile_morph()
+    void layout_image(Line& L, const std::string& s, int index);
+    void step_off_image();
+    bool image_backspace();
+    bool image_delete();
+    // The caret's places in an image line are "stops": before the first
+    // image (0), between images, after the last (n).
+    static int img_stop(const Line& L, int col);
+    static int stop_col(const Line& L, int k, int len);
+    static int img_tile(const Line& L, int col) { return std::max(0, img_stop(L, col) - 1); }  // the one it's "on"
+    void img_caret(const Line& L, int col, float& x, float& y, float& h) const;
+    // The caret never rests on an image line: arriving there picks an image
+    // whole, a selection of exactly it, outlined. picked() is its line (-1
+    // if none is picked) and `tile` which one.
+    int picked(int* tile = nullptr) const;
+    void pick(int line, int tile, bool reveal = true);
+    bool unpick();  // the caret just after the picked image
+    void settle_on_images();
+    void step_picked(int line, int tile, int dir);
+    void vertical_picked(int line, int tile, int dir);
+    void remove_picked(int line, int tile, int dir);
+    static int nearest_tile(const Line& L, float x, float row_y);
+    int img_col_at(const Line& L, int len, float x, float y) const;
+    int img_tile_at(const Line& L, float x, float y) const;     // -1 if none there
+    void delete_tile(int line, int tile);
+    bool resize_handle(int line, ImVec2& a, ImVec2& b) const;   // doc coords
+    bool handle_image_mouse(bool hovered, ImVec2 doc);          // true: it took the mouse this frame
+    void finish_resize();
+    void move_image();                                          // to the drop target (sets land_*)
+    bool drop_changes() const;                                  // would dropping here move it?
+    void let_go_image(bool drop);                               // end a drag: drop, or fly home
+    bool tile_rect(int line, int tile, ImVec2& a, ImVec2& b) const;  // doc coords, edit view
+    void draw_image_drag(ImDrawList* dl);
+    void draw_image(ImDrawList* dl, const Line& L, float x, float y, float alpha, int index);
 
     // Resizing an image by its handle: the line, the width being dragged to
     // (screen px) and what it snapped to ("" for none).
