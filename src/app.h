@@ -12,6 +12,7 @@
 #include "editor.h"
 #include "fonts.h"
 #include "keys.h"
+#include "lint.h"
 #include "nav.h"
 #include "notefile.h"
 #include "image_cache.h"
@@ -60,6 +61,7 @@ private:
         App,     // anywhere, the palette and status-line tools too
         Page,    // the note or the empty page has the keys: no palette or tool open
         Tag,     //   ...with the caret on a #tag
+        Slip,    //   ...with the caret on a style slip (and not a misspelt word)
         Scoped,  // the palette in a mode with a scope (Palette::kScoped)
         Notes,   //   ...listing notes
     };
@@ -131,6 +133,15 @@ private:
     void fix_next(TextPos from);
     void add_to_dictionary(const std::string& word);
     void draw_fix_bar(ImVec2 min, ImVec2 max, float s, float pad, float ty);
+
+    // Style slips: found, marked and fixed (app_lint.cpp).
+    void check_lint();
+    TextPos lint_held() const;
+    void add_lint_marks(std::vector<Diagnostic>& out, int hold, TextPos held) const;
+    const LintProblem* lint_at_caret() const;
+    bool slip_at_caret() const;
+    void fix_slip();
+    void format_note(bool on_save);
 
     // Notes (app.cpp).
     void open_note(const NoteRef& n, bool push_history = true);
@@ -265,13 +276,21 @@ private:
     uint64_t shown_gen_ = UINT64_MAX;         // ...as last handed to the editor
     int shown_hold_ = -2;                     // the line held back then
     TextPos shown_held_{-2, 0};               // and the word
+    TextPos shown_lint_held_{-2, 0};          // and the style slip
+    // Style slips (app_lint.cpp): the open note's, and what they were found
+    // for (editor version, lint on, lint_off).
+    std::vector<LintProblem> lint_;
+    LintCache lint_cache_;
+    uint64_t lint_version_ = UINT64_MAX;
+    bool lint_on_ = false;
+    std::string lint_off_;
     // The status line's echo (see update_echo): what it says, and what's
     // showing (kept while it fades out). A part can be clicked to act.
     enum class Tone : uint8_t { Plain, Strong, Quiet };  // message, the words that matter, asides
     struct Echo {
         std::string text;
         Tone tone = Tone::Plain;
-        enum class Act : uint8_t { None, QuickFix, FixSpelling } act = Act::None;
+        enum class Act : uint8_t { None, QuickFix, FixSpelling, FixSlip } act = Act::None;
     };
     std::vector<Echo> echo_, echo_shown_;
     float echo_a_ = 0;

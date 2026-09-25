@@ -62,6 +62,24 @@ Misspelt words are underlined, and the likeliest fix shows in the status line.
 
 Code, links and names are not checked. US and UK English are built in.
 
+## Style
+
+delta marks small slips the way a code formatter does, with faint dashes under them: double spaces, spaces at the ends of lines, extra blank lines, a space before a comma, no space after a full stop, a word typed twice, a bracket or quote left open, no blank line around a heading or a code block, and a list that mixes `-`, `*` and `+` or indents unevenly. Code, links, urls, tags and front matter are left alone. Two or more spaces at the end of a line stay: in markdown they are a line break.
+
+- `alt+.` fixes the slip at the caret. The status line says what it is.
+- `f8` steps through slips along with the note's other problems.
+- "format note" (`shift+alt+f`) fixes every slip in the note at once, and one undo puts them all back. A bracket or quote left open is for you to fix.
+
+To hide the marks, set `lint = false`. To skip some rules, list them in `lint_off`. To format each time you press `ctrl+s`, set `format_on_save = true`; saving on its own as you type never changes your text.
+
+```ini
+[editor]
+lint_off = heading_blank, final_newline
+format_on_save = true
+```
+
+The rules are `double_space`, `trailing_space`, `blank_lines`, `space_before_punct`, `space_after_punct`, `final_newline`, `repeated_word`, `unclosed`, `heading_blank`, `fence_blank`, `list_marker` and `list_indent`.
+
 ## Images
 
 Paste or drop an image into a note to add it. Drag its right edge to resize it. Images on the same line form a row. Double-click an image to view it full size.

@@ -231,7 +231,7 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
     auto same = [](const Chord& a, const Chord& b) { return a.key == b.key && a.mods == b.mods; };
     auto overlap = [](Scope a, Scope b) {
         if (a > b) std::swap(a, b);
-        return a == b || a == Scope::App || (a == Scope::Page && b == Scope::Tag) || (a == Scope::Scoped && b == Scope::Notes);
+        return a == b || a == Scope::App || (a == Scope::Page && (b == Scope::Tag || b == Scope::Slip)) || (a == Scope::Tag && b == Scope::Slip) || (a == Scope::Scoped && b == Scope::Notes);
     };
     for (size_t i = 0; i < cmds_.size(); i++) {
         auto set = c.keys.find(cmds_[i].id);
@@ -265,6 +265,13 @@ void App::check_settings(const Config& c, std::vector<ConfigIssue>& issues) cons
         }
     };
     check_langs("spell.languages", c.spell_languages);
+    for (auto& id : split_list(c.lint_off)) {
+        std::string why = check_lint_rule(id);
+        if (why.empty()) continue;
+        ConfigIssue is = issue_at(c, "editor.lint_off", true, why);
+        underline(is, "editor.lint_off", c.lint_off, id);
+        issues.push_back(is);
+    }
     Store notes;
     notes.set_root(expand_user(c.notes_dir));
     std::vector<std::string> spaces = notes.spaces();

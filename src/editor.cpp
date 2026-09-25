@@ -2261,12 +2261,16 @@ void Editor::draw_completion(ImDrawList* dl, float dt) {
     dl->PopClipRect();
 }
 
-void Editor::rewrite(const std::vector<std::string>& lines, TextPos cur) {
+void Editor::rewrite(const std::vector<std::string>& lines, TextPos cur) { rewrite(lines, cur, cur); }
+
+void Editor::rewrite(const std::vector<std::string>& lines, TextPos cur, TextPos anchor) {
     std::vector<std::string> before = lines_;
     begin_edit(Edit::Other);
     lines_ = lines.empty() ? std::vector<std::string>{""} : lines;
     clamp(cur);
-    cur_ = anchor_ = cur;
+    clamp(anchor);
+    cur_ = cur;
+    anchor_ = anchor;
     last_edit_ = Edit::None;
     end_edit(false);
     pulse_changes(before);
@@ -2994,26 +2998,32 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         // The underlines, row by row if a range wraps. No range: the whole
         // line. They sit where an underline does, just under the baseline;
         // on a link, which has its own, just under that. Spelling gets dots,
-        // quieter than an error's solid line.
+        // quieter than an error's solid line; a style slip fainter dashes,
+        // and a short dash where it marks a point (a missing newline).
         float uh = std::max(1.0f, std::round(P_.dpi));
         for (auto& k : on) {
             if (k.a <= 0.0f) continue;
             bool spell = k.d.kind == Diagnostic::Kind::Spelling;
-            ImU32 col = col_alpha(fade(spell ? T.spelling : T.error), k.a);
+            bool lint = k.d.kind == Diagnostic::Kind::Lint;
+            ImU32 col = col_alpha(fade(spell ? T.spelling : lint ? T.dim : T.error), k.a * (lint ? 0.8f : 1.0f));
             int c0 = k.d.col0 >= 0 ? std::clamp(k.d.col0, 0, (int)s.size()) : 0;
             int c1 = k.d.col0 >= 0 ? std::clamp(k.d.col1, 0, (int)s.size()) : (int)s.size();
-            if (c1 <= c0) continue;
+            bool point = lint && c1 <= c0;
+            if (c1 <= c0 && !point) continue;
             for (int r = 0; r < (int)L.rows.size(); r++) {
                 int ra = L.rows[r], rb = r + 1 < (int)L.rows.size() ? L.rows[r + 1] : (int)s.size();
                 int a = std::max(c0, ra), b = std::min(c1, rb);
-                if (a >= b) continue;
+                if (point ? r != row_of(L, c0) : a >= b) continue;
                 float ux = std::round(x0 + row_x(L, r) + measure(s, st, ra, a, m));
-                float ux1 = std::round(ux + measure(s, st, a, b, m));
+                float ux1 = point ? ux + std::round(L.size * 0.5f) : std::round(ux + measure(s, st, a, b, m));
                 bool on_link = false;
                 for (int k2 = a; k2 < b && !on_link; k2++) on_link = (st[k2] & (S_Link | S_WikiLink)) != 0;
                 float text_top = y + r * L.row_h + (L.row_h - L.size) * 0.5f;
                 float uy = std::round(text_top + L.size * 0.86f) + (on_link ? std::max(2 * uh, std::round(L.size * 0.14f)) : 0.0f);
-                if (!spell) {
+                if (lint) {
+                    float dash = std::round(uh * 3), gap = std::round(uh * 2);
+                    for (float dx = ux; dx < ux1; dx += dash + gap) dl->AddRectFilled(ImVec2(dx, uy), ImVec2(std::min(dx + dash, ux1), uy + uh), col);
+                } else if (!spell) {
                     dl->AddRectFilled(ImVec2(ux, uy), ImVec2(ux1, uy + uh), col);
                 } else {
                     float dot = std::max(1.0f, std::round(uh * 1.5f));

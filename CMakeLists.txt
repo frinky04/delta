@@ -104,6 +104,7 @@ add_library(delta_core STATIC
   src/tags.cpp
   src/complete.cpp
   src/textfile.cpp
+  src/lint.cpp
   ${EMBEDDED})
 target_include_directories(delta_core PUBLIC src)
 target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/deps)
@@ -118,7 +119,7 @@ if(MSVC)
 endif()
 
 add_executable(delta WIN32 src/main.cpp src/app.cpp src/app_bars.cpp src/app_images.cpp src/app_script.cpp
-                            src/app_settings.cpp src/app_spell.cpp src/app_tags.cpp src/image_cache.cpp)
+                            src/app_settings.cpp src/app_lint.cpp src/app_spell.cpp src/app_tags.cpp src/image_cache.cpp)
 target_include_directories(delta PRIVATE third_party/glfw/deps)
 target_link_libraries(delta PRIVATE delta_core)
 if(WIN32)
