@@ -6,6 +6,7 @@
 #include <cstring>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 
 #include "ini_syntax.h"
 #include "theme.h"
@@ -37,39 +38,39 @@ const std::vector<Setting>& all_settings() {
     }();
     // Colours have no default of their own: it's the theme's (default_for).
     static const std::vector<Setting> table = {
-        // section, key, kind, default, lo, hi, choices, description
+        // section, key, kind, default, lo, hi, choices, description, field
         // (descriptions only where the name doesn't say it all)
-        {"general", "notes_dir", K::Path, "~/Documents/delta", 0, 0, nullptr, "~ is home"},
-        {"general", "default_space", K::Text, "default", 0, 0, nullptr, ""},
-        {"general", "daily_space", K::Text, "daily", 0, 0, nullptr, ""},
-        {"general", "daily_format", K::Text, "%Y-%m-%d", 0, 0, nullptr, "strftime codes"},
-        {"general", "new_note_heading", K::Bool, "true", 0, 0, nullptr, "name as first heading"},
+        {"general", "notes_dir", K::Path, "~/Documents/delta", 0, 0, nullptr, "~ is home", &Config::notes_dir},
+        {"general", "default_space", K::Text, "default", 0, 0, nullptr, "", &Config::default_space},
+        {"general", "daily_space", K::Text, "daily", 0, 0, nullptr, "", &Config::daily_space},
+        {"general", "daily_format", K::Text, "%Y-%m-%d", 0, 0, nullptr, "strftime codes", &Config::daily_format},
+        {"general", "new_note_heading", K::Bool, "true", 0, 0, nullptr, "name as first heading", &Config::new_note_heading},
 
-        {"editor", "font", K::Text, "Noto Sans", 0, 0, nullptr, "an installed font's name, or a font file"},
-        {"editor", "mono_font", K::Text, "Noto Sans Mono", 0, 0, nullptr, "for code; a name or a file"},
-        {"editor", "font_size", K::Float, "14", 8, 48, nullptr, "px"},
-        {"editor", "line_height", K::Float, "1.5", 1, 3, nullptr, "x font size"},
-        {"editor", "code_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; code"},
-        {"editor", "small_size", K::Float, "0.8", 0.5f, 1.5f, nullptr, "x font size; line numbers, image labels"},
-        {"editor", "column_width", K::Int, "72", 20, 400, nullptr, "characters"},
-        {"editor", "line_numbers", K::Bool, "false", 0, 0, nullptr, ""},
-        {"editor", "tab_size", K::Int, "4", 1, 8, nullptr, "spaces"},
-        {"editor", "autosave_delay", K::Float, "0.6", 0.1f, 60, nullptr, "seconds idle"},
-        {"editor", "cursor_blink", K::Bool, "true", 0, 0, nullptr, ""},
-        {"editor", "caret_style", K::Choice, "thick", 0, 0, "bar|thick|block", "bar, thick or block"},
-        {"editor", "caret_trail", K::Bool, "false", 0, 0, nullptr, "smears as it moves"},
-        {"editor", "fade_syntax", K::Bool, "true", 0, 0, nullptr, "dim markdown away from the caret"},
-        {"editor", "blank_line_height", K::Float, "0.6", 0.2f, 1, nullptr, "x line height"},
-        {"editor", "scroll_past_end", K::Bool, "true", 0, 0, nullptr, ""},
+        {"editor", "font", K::Text, "Noto Sans", 0, 0, nullptr, "an installed font's name, or a font file", &Config::font},
+        {"editor", "mono_font", K::Text, "Noto Sans Mono", 0, 0, nullptr, "for code; a name or a file", &Config::mono_font},
+        {"editor", "font_size", K::Float, "14", 8, 48, nullptr, "px", &Config::font_size},
+        {"editor", "line_height", K::Float, "1.5", 1, 3, nullptr, "x font size", &Config::line_height},
+        {"editor", "code_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; code", &Config::code_size},
+        {"editor", "small_size", K::Float, "0.8", 0.5f, 1.5f, nullptr, "x font size; line numbers, image labels", &Config::small_size},
+        {"editor", "column_width", K::Int, "72", 20, 400, nullptr, "characters", &Config::column_width},
+        {"editor", "line_numbers", K::Bool, "false", 0, 0, nullptr, "", &Config::line_numbers},
+        {"editor", "tab_size", K::Int, "4", 1, 8, nullptr, "spaces", &Config::tab_size},
+        {"editor", "autosave_delay", K::Float, "0.6", 0.1f, 60, nullptr, "seconds idle", &Config::autosave_delay},
+        {"editor", "cursor_blink", K::Bool, "true", 0, 0, nullptr, "", &Config::cursor_blink},
+        {"editor", "caret_style", K::Choice, "thick", 0, 0, "bar|thick|block", "bar, thick or block", &Config::caret_style},
+        {"editor", "caret_trail", K::Bool, "false", 0, 0, nullptr, "smears as it moves", &Config::caret_trail},
+        {"editor", "fade_syntax", K::Bool, "true", 0, 0, nullptr, "dim markdown away from the caret", &Config::fade_syntax},
+        {"editor", "blank_line_height", K::Float, "0.6", 0.2f, 1, nullptr, "x line height", &Config::blank_line_height},
+        {"editor", "scroll_past_end", K::Bool, "true", 0, 0, nullptr, "", &Config::scroll_past_end},
 
-        {"appearance", "theme", K::Choice, "dark", 0, 0, themes.c_str(), "run \"choose theme\" to see them"},
-        {"appearance", "animations", K::Bool, "true", 0, 0, nullptr, ""},
-        {"appearance", "ui_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; palette, status line, notes"},
-        {"appearance", "animation_speed", K::Float, "1", 0.1f, 10, nullptr, "2 is twice as fast"},
-        {"appearance", "palette_selection", K::Choice, "marker", 0, 0, "marker|invert", "marker or invert"},
+        {"appearance", "theme", K::Choice, "dark", 0, 0, themes.c_str(), "run \"choose theme\" to see them", &Config::theme},
+        {"appearance", "animations", K::Bool, "true", 0, 0, nullptr, "", &Config::animations},
+        {"appearance", "ui_size", K::Float, "0.9", 0.5f, 1.5f, nullptr, "x font size; palette, status line, notes", &Config::ui_size},
+        {"appearance", "animation_speed", K::Float, "1", 0.1f, 10, nullptr, "2 is twice as fast", &Config::animation_speed},
+        {"appearance", "palette_selection", K::Choice, "marker", 0, 0, "marker|invert", "marker or invert", &Config::palette_selection},
 
-        {"spell", "enabled", K::Bool, "true", 0, 0, nullptr, "underline misspelt words"},
-        {"spell", "languages", K::Text, "en_US", 0, 0, nullptr, "dictionaries, comma-separated"},
+        {"spell", "enabled", K::Bool, "true", 0, 0, nullptr, "underline misspelt words", &Config::spell},
+        {"spell", "languages", K::Text, "en_US", 0, 0, nullptr, "dictionaries, comma-separated", &Config::spell_languages},
 
         {"colors", "accent", K::Colour, "", 0, 0, nullptr, "caret, selection"},
         {"colors", "background", K::Colour, "", 0, 0, nullptr, ""},
@@ -131,6 +132,27 @@ static bool parse_bool_value(const std::string& v, bool& out) {
     if (l == "true" || l == "yes" || l == "on" || l == "1") { out = true; return true; }
     if (l == "false" || l == "no" || l == "off" || l == "0") { out = false; return true; }
     return false;
+}
+
+void Setting::apply(Config& c, const std::string& value) const {
+    std::visit([&](auto f) {
+        using T = decltype(f);
+        if constexpr (std::is_same_v<T, bool Config::*>) { bool b = false; parse_bool_value(value, b); c.*f = b; }
+        else if constexpr (std::is_same_v<T, int Config::*>) c.*f = (int)(float)std::atof(value.c_str());
+        else if constexpr (std::is_same_v<T, float Config::*>) c.*f = (float)std::atof(value.c_str());
+        else if constexpr (std::is_same_v<T, std::string Config::*>) c.*f = value;
+    }, field);
+}
+
+std::string Setting::read(const Config& c) const {
+    return std::visit([&](auto f) -> std::string {
+        using T = decltype(f);
+        if constexpr (std::is_same_v<T, bool Config::*>) return c.*f ? "true" : "false";
+        else if constexpr (std::is_same_v<T, int Config::*>) return std::to_string(c.*f);
+        else if constexpr (std::is_same_v<T, float Config::*>) return fmt_num(c.*f);
+        else if constexpr (std::is_same_v<T, std::string Config::*>) return c.*f;
+        else return {};
+    }, field);
 }
 
 // Does `value` say the same as `def` for this kind of setting (1 == 1.0,
@@ -318,47 +340,14 @@ void parse_config(const std::string& text, Config& cfg, std::vector<ConfigIssue>
     }
 
     // Typed values, falling back to each setting's default.
-    auto get = [&](const char* k) -> std::string {
-        auto it = vals.find(k);
-        if (it != vals.end()) return it->second;
-        std::string full = k;
-        size_t dot = full.find('.');
-        return find_setting(full.substr(0, dot), full.substr(dot + 1))->def;
-    };
-    auto flag = [&](const char* k) { bool b = false; parse_bool_value(get(k), b); return b; };
-    auto num = [&](const char* k) { return (float)std::atof(get(k).c_str()); };
-
-    c.notes_dir = get("general.notes_dir");
-    c.default_space = get("general.default_space");
-    c.daily_space = get("general.daily_space");
-    c.daily_format = get("general.daily_format");
-    c.new_note_heading = flag("general.new_note_heading");
-    c.font = get("editor.font");
-    c.mono_font = get("editor.mono_font");
-    c.font_size = num("editor.font_size");
-    c.line_height = num("editor.line_height");
-    c.code_size = num("editor.code_size");
-    c.small_size = num("editor.small_size");
-    c.column_width = (int)num("editor.column_width");
-    c.line_numbers = flag("editor.line_numbers");
-    c.tab_size = (int)num("editor.tab_size");
-    c.autosave_delay = num("editor.autosave_delay");
-    c.cursor_blink = flag("editor.cursor_blink");
-    c.caret_style = get("editor.caret_style");
-    c.caret_trail = flag("editor.caret_trail");
-    c.fade_syntax = flag("editor.fade_syntax");
-    c.blank_line_height = num("editor.blank_line_height");
-    c.scroll_past_end = flag("editor.scroll_past_end");
-    c.theme = get("appearance.theme");
-    c.animations = flag("appearance.animations");
-    c.ui_size = num("appearance.ui_size");
-    c.animation_speed = num("appearance.animation_speed");
-    c.palette_selection = get("appearance.palette_selection");
-    c.spell = flag("spell.enabled");
-    c.spell_languages = get("spell.languages");
-    for (auto& s : all_settings())
-        if (s.kind == K::Colour)
-            if (auto it = vals.find(std::string("colors.") + s.key); it != vals.end()) c.colors[s.key] = it->second;
+    for (auto& s : all_settings()) {
+        auto it = vals.find(std::string(s.section) + "." + s.key);
+        if (s.kind == K::Colour) {
+            if (it != vals.end()) c.colors[s.key] = it->second;
+        } else {
+            s.apply(c, it != vals.end() ? it->second : std::string(s.def));
+        }
+    }
 
     cfg = std::move(c);
 }

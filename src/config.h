@@ -4,6 +4,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "platform.h"
@@ -80,8 +81,15 @@ struct Setting {
     float lo, hi;           // Float and Int: allowed range
     const char* choices;    // Choice: "bar|thick|block"
     const char* desc;       // one short line, lowercase
+    // The Config member it sets; none for colours, which go to Config::colors.
+    using Field = std::variant<std::monostate, bool Config::*, int Config::*, float Config::*, std::string Config::*>;
+    Field field;
     // The default under a theme: a colour's is the theme's own.
     std::string default_for(const std::string& theme) const;
+    // Stores a checked value, as written in the file, in the field.
+    void apply(Config& c, const std::string& value) const;
+    // The field's value, as it would be written in the file.
+    std::string read(const Config& c) const;
 };
 const std::vector<Setting>& all_settings();
 const Setting* find_setting(const std::string& section, const std::string& key);

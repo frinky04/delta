@@ -647,6 +647,15 @@ static void test_config_schema() {
             if (!is.empty()) rejected += std::string(s.key) + "/" + t.name + " ";
         }
     CHECK_EQ(rejected, std::string());
+
+    // Config's own initialisers agree with the table, and every setting but
+    // a colour has a field to land in.
+    std::string drifted;
+    for (auto& s : all_settings())
+        if ((s.kind == Setting::Kind::Colour) != std::holds_alternative<std::monostate>(s.field) ||
+            s.read(Config{}) != s.def)
+            drifted += std::string(s.key) + " ";
+    CHECK_EQ(drifted, std::string());
     {
         Config c;
         std::vector<ConfigIssue> is;
@@ -714,16 +723,7 @@ static void test_config_schema() {
     std::string out_of_range;
     for (auto& s : all_settings()) {
         if (s.kind != Setting::Kind::Float && s.kind != Setting::Kind::Int) continue;
-        float v = std::string(s.key) == "font_size" ? g.font_size
-                : std::string(s.key) == "line_height" ? g.line_height
-                : std::string(s.key) == "code_size" ? g.code_size
-                : std::string(s.key) == "small_size" ? g.small_size
-                : std::string(s.key) == "ui_size" ? g.ui_size
-                : std::string(s.key) == "column_width" ? (float)g.column_width
-                : std::string(s.key) == "tab_size" ? (float)g.tab_size
-                : std::string(s.key) == "autosave_delay" ? g.autosave_delay
-                : std::string(s.key) == "blank_line_height" ? g.blank_line_height
-                : std::string(s.key) == "animation_speed" ? g.animation_speed : s.lo;
+        float v = std::stof(s.read(g));
         if (!(v >= s.lo && v <= s.hi)) out_of_range += std::string(s.key) + " ";
     }
     CHECK_EQ(out_of_range, std::string());
