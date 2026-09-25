@@ -251,7 +251,8 @@ int main(int argc, char** argv) {
 
         glfwSwapBuffers(window);
         if (!shown) {
-            glfwShowWindow(window);
+            // A screenshot run reads the back buffer, so it never needs showing.
+            if (shot.empty()) glfwShowWindow(window);
             shown = true;
         }
     }
