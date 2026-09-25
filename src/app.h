@@ -13,6 +13,7 @@
 #include "fonts.h"
 #include "keys.h"
 #include "nav.h"
+#include "notefile.h"
 #include "image_cache.h"
 #include "images.h"
 #include "palette.h"
@@ -134,7 +135,7 @@ private:
     // Writes the note. While it's in conflict with disk, only `over_disk`
     // (an explicit save) writes.
     bool save(bool over_disk = false);
-    std::string disk_text() const;  // the editor's text as it's written: line endings, pending downloads
+    std::string text_to_save() const;  // the editor's text, pending downloads as their urls
     void reload_note();
     void keep_yours();  // leaving a note in conflict: your edits go to a copy beside it
     void remember_view();
@@ -359,13 +360,9 @@ private:
 
     std::string space_;
     std::optional<NoteRef> note_;
-    bool crlf_ = false;
-    uint64_t saved_version_ = 0, seen_version_ = 0;
+    NoteFile file_;  // the open note's file (none for the manual)
+    uint64_t seen_version_ = 0;
     double last_change_ = 0;
-    fs::file_time_type disk_mtime_{};
-    // The note changed on disk while you had edits not yet saved: nothing
-    // saves over it until you pick a version (see keep_yours).
-    bool conflict_ = false;
     double next_poll_ = 0;
     bool focused_ = true;
 

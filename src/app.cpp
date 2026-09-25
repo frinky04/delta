@@ -352,7 +352,7 @@ void App::remember_view() {
     if (note_) views_[path_u8(note_->path)] = {editor_.cursor(), editor_.scroll()};
 }
 
-std::string App::disk_text() const {
+std::string App::text_to_save() const {
     std::string text = editor_.text();
     // A download still on its way is saved as the address it came from; the
     // placeholder is only ever on screen.
@@ -361,39 +361,20 @@ std::string App::disk_text() const {
         for (size_t at = text.find(d->marker); at != std::string::npos; at = text.find(d->marker, at))
             text.replace(at, d->marker.size(), d->url);
     }
-    if (crlf_) {
-        std::string out;
-        out.reserve(text.size() + text.size() / 20);
-        for (char c : text) {
-            if (c == '\n') out += '\r';
-            out += c;
-        }
-        text.swap(out);
-    }
     return text;
 }
 
 bool App::save(bool over_disk) {
-    if (!note_ || is_manual() || editor_.version() == saved_version_) return true;
-    if (!over_disk && !conflict_) {
-        // Changed on disk since we last looked (before the poll saw it).
-        auto nm = mtime_of(note_->path);
-        if (nm != fs::file_time_type{} && disk_mtime_ != fs::file_time_type{} && nm != disk_mtime_) {
-            disk_mtime_ = nm;
-            conflict_ = true;
-        }
-    }
-    if (conflict_ && !over_disk) return false;
+    if (!note_ || is_manual()) return true;
     std::string err;
-    std::error_code ec;
-    fs::create_directories(note_->path.parent_path(), ec);
-    if (!atomic_write(note_->path, disk_text(), &err)) {
+    switch (file_.save(text_to_save(), editor_.version(), over_disk, &err)) {
+    case NoteFile::Save::Clean: return true;
+    case NoteFile::Save::Held: return false;
+    case NoteFile::Save::Failed:
         status("couldn't save: " + err, true);
         return false;
+    case NoteFile::Save::Saved: break;
     }
-    saved_version_ = editor_.version();
-    disk_mtime_ = mtime_of(note_->path);
-    conflict_ = false;
     if (is_config()) load_settings();  // edits apply as soon as they're saved
     return true;
 }
@@ -402,32 +383,30 @@ bool App::save(bool over_disk) {
 void App::reload_note() {
     if (!note_ || is_manual()) return;
     std::string text;
-    if (!read_file(note_->path, text)) {
+    if (!file_.reload(text, nullptr)) {
         status("couldn't read " + note_->name + "; it may have been moved or deleted", true);
         return;
     }
-    crlf_ = text.find("\r\n") != std::string::npos;
     editor_.reload_text(text);
-    saved_version_ = seen_version_ = editor_.version();
-    disk_mtime_ = mtime_of(note_->path);
-    conflict_ = false;
+    file_.synced(editor_.version());
+    seen_version_ = editor_.version();
 }
 
 // Leaving a note in conflict with disk: the file keeps the other version,
 // and your edits are saved beside it as "name (yours)", so neither is lost.
 void App::keep_yours() {
-    if (!conflict_ || !note_ || editor_.version() == saved_version_) { conflict_ = false; return; }
-    conflict_ = false;
-    fs::path dir = note_->path.parent_path(), ext = note_->path.extension();
-    std::string stem = path_u8(note_->path.stem()) + " (yours)", name = stem;
-    std::error_code ec;
-    for (int i = 2; fs::exists(dir / u8path(name + path_u8(ext)), ec); i++) name = stem + " " + std::to_string(i);
-    std::string err;
-    if (!atomic_write(dir / u8path(name + path_u8(ext)), disk_text(), &err)) {
+    if (!note_) {
+        file_.close();  // no note (one just deleted, say): nothing of its file to keep
+        return;
+    }
+    // Without edits in conflict this only settles the conflict.
+    bool leaving = file_.conflict() && file_.dirty(editor_.version());
+    std::string err, name = file_.keep_beside(leaving ? text_to_save() : std::string(), editor_.version(), &err);
+    if (!leaving) return;
+    if (name.empty()) {
         status("couldn't keep your edits: " + err, true);
         return;
     }
-    saved_version_ = editor_.version();  // nothing left to save over the other version
     status("kept your edits as " + name + "; " + note_->name + " has the version from disk");
 }
 
@@ -440,12 +419,13 @@ void App::open_note(const NoteRef& n, bool push_history) {
     remember_view();
     bool config = n.path == cfg_path_, manual = n.path == kManual;
     std::string text;
-    if (manual) text.assign((const char*)g_manual, g_manual_size);
-    else if (!read_file(n.path, text)) {
+    if (manual) {
+        text.assign((const char*)g_manual, g_manual_size);
+        file_.close();
+    } else if (!file_.load(n.path, text, nullptr)) {
         status("couldn't open " + n.name + "; it may have been moved, deleted or locked by another app", true);
         return;
     }
-    crlf_ = text.find("\r\n") != std::string::npos;
 
     // The config is edited like a note, but as ini text and never in reader
     // mode; the manual is only ever in reader mode. The reader preference
@@ -472,8 +452,8 @@ void App::open_note(const NoteRef& n, bool push_history) {
     check_spelling();
     show_problems(ImGui::GetTime());
     hints_version_ = UINT64_MAX;
-    saved_version_ = seen_version_ = editor_.version();
-    disk_mtime_ = mtime_of(n.path);
+    file_.synced(editor_.version());
+    seen_version_ = editor_.version();
     if (auto it = views_.find(path_u8(n.path)); it != views_.end()) editor_.restore_view(it->second.first, it->second.second);
     fade_start_ = anim::clock;
     if (!config && !manual) recent_.visit(n);
@@ -648,7 +628,7 @@ void App::note_relocated(const std::string& old_path, const NoteRef& n) {
     history_.update(relocated);
     recent_.update(relocated);
     note_ = n;
-    disk_mtime_ = mtime_of(n.path);
+    file_.moved(n.path);
 }
 
 void App::delete_note() {
@@ -690,7 +670,7 @@ void App::rename_space() {
         recent_.update(moved);
         if (note_) {
             note_ = store_.ref(to, note_->name);
-            disk_mtime_ = mtime_of(note_->path);
+            file_.moved(note_->path);
         }
         status("renamed space to " + to);
     });
@@ -1100,7 +1080,7 @@ void App::on_focus(bool focused) {
 double App::next_wake(double now) {
     double t = now + 1.0;
     if (note_ && editing() && cfg_.cursor_blink && focused_ && !palette_.is_open()) t = std::min(t, editor_.next_blink(now));
-    if (note_ && !conflict_ && editor_.version() != saved_version_) t = std::min(t, last_change_ + cfg_.autosave_delay);
+    if (note_ && !file_.conflict() && file_.dirty(editor_.version())) t = std::min(t, last_change_ + cfg_.autosave_delay);
     double status_end = status_time_ + 3.4;
     if (status_end > now) t = std::min(t, status_end);
     if (note_ && next_problem_check_ > now) t = std::min(t, next_problem_check_);
@@ -1131,11 +1111,9 @@ void App::poll_files(double now) {
             hints_version_ = UINT64_MAX;
         }
     }
-    auto nm = mtime_of(note_->path);
-    if (nm == fs::file_time_type{} || nm == disk_mtime_) return;
-    disk_mtime_ = nm;
-    if (editor_.version() != saved_version_) conflict_ = true;  // the status line says so until it's settled
-    else reload_note();
+    // Rewritten under unsaved edits, it's a conflict, which the status line
+    // shows until it's settled.
+    if (file_.poll(editor_.version()) == NoteFile::Poll::Changed) reload_note();
 }
 
 void App::toggle_fullscreen() {
@@ -1262,7 +1240,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
         // The note name is the "you are here", so it gets the weight.
         dl->AddText(mono_bold_, s, ImVec2(x, ty), T.text, note_->name.c_str());
         x += mono_bold_->CalcTextSizeA(s, FLT_MAX, 0, note_->name.c_str()).x;
-        if (editor_.version() != saved_version_) {
+        if (file_.dirty(editor_.version())) {
             float r = std::max(2.0f, std::round(s * 0.16f));
             dl->AddCircleFilled(ImVec2(x + s * 0.7f, ty + s * 0.55f), r, T.accent, 12);
         }
@@ -1347,7 +1325,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
     }
 
     // Otherwise, while the note on disk and yours differ, the two ways out.
-    if (status_.empty() && conflict_) {
+    if (status_.empty() && file_.conflict()) {
         std::string save = chord_for("note.save");
         centred(fit("changed on disk; " + (save.empty() ? "\"save note now\"" : save) +
                     " keeps your version, \"reload note\" takes the file's"),
@@ -1357,7 +1335,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
     // Otherwise, in the same place, the echo of what the caret is on.
     if (!echo_.empty()) echo_shown_ = echo_;
     echo_a_ = anim::approach(echo_a_, echo_.empty() ? 0.0f : 1.0f, 16.0f, ImGui::GetIO().DeltaTime, 0.004f);
-    if (status_.empty() && !conflict_ && echo_a_ > 0.0f && !echo_shown_.empty()) {
+    if (status_.empty() && !file_.conflict() && echo_a_ > 0.0f && !echo_shown_.empty()) {
         // Centred in the room between the note's name and the counts.
         float w = 0;
         for (auto& e : echo_shown_) w += W(e.text);
@@ -1508,7 +1486,7 @@ void App::frame() {
                 editor_.set_hints(config_hints(editor_.lines(), cfg_.theme, binding_docs()));
                 // Unsaved edits are checked as they're typed; once saved,
                 // load_settings has the file's own verdict.
-                if (editor_.version() != saved_version_) {
+                if (file_.dirty(editor_.version())) {
                     Config live;
                     std::vector<ConfigIssue> issues;
                     parse_config(editor_.text(), live, issues);
@@ -1595,7 +1573,7 @@ void App::frame() {
             seen_version_ = editor_.version();
             last_change_ = now;
         }
-        if (!conflict_ && editor_.version() != saved_version_ && now - last_change_ >= cfg_.autosave_delay) save();
+        if (!file_.conflict() && file_.dirty(editor_.version()) && now - last_change_ >= cfg_.autosave_delay) save();
     }
 }
 

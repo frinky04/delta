@@ -92,6 +92,7 @@ add_library(delta_core STATIC
   src/spell_fix.cpp
   src/speller.cpp
   src/store.cpp
+  src/notefile.cpp
   src/config.cpp
   src/keys.cpp
   src/theme.cpp

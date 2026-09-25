@@ -19,6 +19,7 @@
 #include "editor.h"
 #include "fonts.h"
 #include "images.h"
+#include "notefile.h"
 #include "platform.h"
 #include "imgui.h"
 #include "ini_syntax.h"
@@ -896,6 +897,200 @@ static void test_store() {
     CHECK_EQ(st.ensure_space("empty"), std::string());
     CHECK_EQ(st.delete_space("empty"), std::string());
     CHECK(!fs::exists(root / "empty"));
+}
+
+// The open note against its file: line endings kept, and nothing saved over
+// a version written elsewhere until one is picked. Writes from "elsewhere"
+// move the file's time on a whole second, so no check leans on how fine the
+// file system's clock is.
+static void test_note_file() {
+    using namespace std::chrono_literals;
+    TempDir tmp("delta_test_note_file");
+    fs::create_directories(tmp.path);
+    auto body = [](const fs::path& p) {
+        std::string s;
+        return read_file(p, s) ? s : std::string("<unreadable>");
+    };
+    auto elsewhere = [](const fs::path& p, const std::string& text) {
+        auto before = fs::last_write_time(p);
+        atomic_write(p, text, nullptr);
+        fs::last_write_time(p, before + 1s);
+    };
+    using Save = NoteFile::Save;
+    using Poll = NoteFile::Poll;
+
+    // LF in, LF out.
+    fs::path lf = tmp.path / "lf.md";
+    atomic_write(lf, "one\ntwo\n", nullptr);
+    NoteFile f;
+    std::string text, err;
+    CHECK(!f.open());
+    CHECK(f.load(lf, text, &err));
+    CHECK(f.open());
+    CHECK(f.path() == lf);
+    CHECK_EQ(text, std::string("one\ntwo\n"));
+    CHECK(!f.crlf());
+    f.synced(1);
+    CHECK(!f.dirty(1));
+    CHECK(f.dirty(2));
+    CHECK(f.save("one\ntwo\nthree", 2, false, &err) == Save::Saved);
+    CHECK_EQ(body(lf), std::string("one\ntwo\nthree"));
+    CHECK(!f.dirty(2));
+
+    // CRLF: the editor gets '\n', the file keeps "\r\n".
+    fs::path crlf = tmp.path / "crlf.md";
+    atomic_write(crlf, "a\r\nb\r\n", nullptr);
+    NoteFile c;
+    CHECK(c.load(crlf, text, &err));
+    CHECK_EQ(text, std::string("a\nb\n"));
+    CHECK(c.crlf());
+    CHECK_EQ(c.encode("a\nb\nc"), std::string("a\r\nb\r\nc"));
+    c.synced(1);
+    CHECK(c.save(text, 2, false, &err) == Save::Saved);
+    CHECK_EQ(body(crlf), std::string("a\r\nb\r\n"));
+    // Mixed endings: one "\r\n" makes it a CRLF file, and a save writes
+    // every line that way.
+    fs::path mixed = tmp.path / "mixed.md";
+    atomic_write(mixed, "a\nb\r\nc\n", nullptr);
+    NoteFile m;
+    CHECK(m.load(mixed, text, &err));
+    CHECK_EQ(text, std::string("a\nb\nc\n"));
+    CHECK(m.crlf());
+    m.synced(1);
+    CHECK(m.save(text, 2, false, &err) == Save::Saved);
+    CHECK_EQ(body(mixed), std::string("a\r\nb\r\nc\r\n"));
+
+    // A file that can't be read leaves the one already open as it was.
+    text = "kept";
+    CHECK(!c.load(tmp.path / "missing.md", text, &err));
+    CHECK(c.path() == crlf);
+    CHECK(c.crlf());
+    CHECK_EQ(text, std::string("kept"));
+    CHECK(!c.dirty(2));
+
+    // Nothing unsaved: nothing written.
+    fs::path n = tmp.path / "note.md";
+    atomic_write(n, "disk\n", nullptr);
+    fs::last_write_time(n, fs::last_write_time(n) - 10s);
+    auto t0 = fs::last_write_time(n);
+    NoteFile f2;
+    CHECK(f2.load(n, text, &err));
+    f2.synced(5);
+    CHECK(f2.save("other", 5, false, &err) == Save::Clean);
+    CHECK(fs::last_write_time(n) == t0);
+    CHECK_EQ(body(n), std::string("disk\n"));
+
+    // Unsaved edits: written.
+    CHECK(f2.save("mine\n", 6, false, &err) == Save::Saved);
+    CHECK(!f2.dirty(6));
+    CHECK_EQ(body(n), std::string("mine\n"));
+    CHECK(f2.poll(6) == Poll::Same);  // its own write isn't news
+
+    // Rewritten elsewhere with nothing unsaved here: reload it.
+    elsewhere(n, "theirs\r\n");
+    CHECK(f2.poll(6) == Poll::Changed);
+    CHECK(!f2.conflict());
+    CHECK(f2.reload(text, &err));
+    CHECK_EQ(text, std::string("theirs\n"));
+    CHECK(f2.crlf());
+    f2.synced(7);
+    CHECK(!f2.dirty(7));
+    CHECK(f2.poll(7) == Poll::Same);
+
+    // Rewritten elsewhere under unsaved edits: a conflict, and saving is held
+    // until a save over it.
+    elsewhere(n, "theirs 2\n");
+    CHECK(f2.poll(8) == Poll::Conflict);
+    CHECK(f2.conflict());
+    CHECK(f2.save("mine 2\n", 8, false, &err) == Save::Held);
+    CHECK_EQ(body(n), std::string("theirs 2\n"));
+    CHECK(f2.poll(8) == Poll::Same);  // seen already
+    CHECK(f2.conflict());
+    CHECK(f2.save("mine 2\n", 8, true, &err) == Save::Saved);
+    CHECK(!f2.conflict());
+    CHECK(!f2.dirty(8));
+    CHECK_EQ(body(n), std::string("mine 2\r\n"));  // still the CRLF it was loaded as
+
+    // ...or settled by taking the file's version.
+    elsewhere(n, "theirs 3\n");
+    CHECK(f2.poll(9) == Poll::Conflict);
+    CHECK(f2.reload(text, &err));
+    CHECK_EQ(text, std::string("theirs 3\n"));
+    CHECK(!f2.conflict());
+    CHECK(!f2.crlf());
+    f2.synced(10);
+    CHECK(!f2.dirty(10));
+
+    // A save sees a change no poll has yet.
+    elsewhere(n, "theirs 4\n");
+    CHECK(f2.save("mine 4\n", 11, false, &err) == Save::Held);
+    CHECK(f2.conflict());
+    CHECK_EQ(body(n), std::string("theirs 4\n"));
+
+    // Leaving a conflict: your edits go beside the file, numbered when the
+    // name is taken, with the note's line endings.
+    fs::path y = tmp.path / "yours.md";
+    atomic_write(y, "base\r\n", nullptr);
+    NoteFile k;
+    CHECK(k.load(y, text, &err));
+    k.synced(1);
+    elsewhere(y, "theirs\r\n");
+    CHECK(k.poll(2) == Poll::Conflict);
+    CHECK_EQ(k.keep_beside("mine\n", 2, &err), std::string("yours (yours)"));
+    CHECK_EQ(body(tmp.path / "yours (yours).md"), std::string("mine\r\n"));
+    CHECK_EQ(body(y), std::string("theirs\r\n"));
+    CHECK(!k.conflict());
+    CHECK(!k.dirty(2));
+    k.synced(3);
+    elsewhere(y, "theirs again\r\n");
+    CHECK(k.poll(4) == Poll::Conflict);
+    CHECK_EQ(k.keep_beside("mine again\n", 4, &err), std::string("yours (yours) 2"));
+    CHECK_EQ(body(tmp.path / "yours (yours) 2.md"), std::string("mine again\r\n"));
+    // Not in conflict: nothing kept, even with edits unsaved.
+    CHECK_EQ(k.keep_beside("more\n", 5, &err), std::string());
+    CHECK(!fs::exists(tmp.path / "yours (yours) 3.md"));
+    CHECK(k.dirty(5));
+    // In conflict with nothing unsaved: nothing kept, and the conflict is gone.
+    k.synced(6);
+    elsewhere(y, "theirs once more\r\n");
+    CHECK(k.save("x", 7, false, &err) == Save::Held);  // held, so the conflict stands
+    CHECK(k.conflict());
+    CHECK_EQ(k.keep_beside("x", 6, &err), std::string());
+    CHECK(!k.conflict());
+    CHECK(!fs::exists(tmp.path / "yours (yours) 3.md"));
+
+    // Deleted elsewhere: no news, and a save puts it back.
+    fs::path d = tmp.path / "gone.md";
+    atomic_write(d, "here\n", nullptr);
+    NoteFile g;
+    CHECK(g.load(d, text, &err));
+    g.synced(1);
+    fs::remove(d);
+    CHECK(g.poll(1) == Poll::Same);
+    CHECK(g.poll(2) == Poll::Same);
+    CHECK(!g.conflict());
+    CHECK(g.save("back\n", 2, false, &err) == Save::Saved);
+    CHECK_EQ(body(d), std::string("back\n"));
+
+    // Renamed or moved: the same content, saved at the new place.
+    fs::path to = tmp.path / "sub" / "moved.md";
+    fs::create_directories(to.parent_path());
+    fs::rename(d, to);
+    g.moved(to);
+    CHECK(g.path() == to);
+    CHECK(g.poll(2) == Poll::Same);
+    CHECK(g.save("moved\n", 3, false, &err) == Save::Saved);
+    CHECK_EQ(body(to), std::string("moved\n"));
+    CHECK(!fs::exists(d));
+
+    // Closed: nothing open, unsaved or written.
+    g.close();
+    CHECK(!g.open());
+    CHECK(!g.dirty(4));
+    CHECK(!g.conflict());
+    CHECK(g.save("closed\n", 4, false, &err) == Save::Clean);
+    CHECK(g.poll(4) == Poll::Same);
+    CHECK_EQ(body(to), std::string("moved\n"));
 }
 
 // Every image is 800x400 except those named "missing".
@@ -3030,6 +3225,7 @@ int main() {
     test_ini();
     test_config_schema();
     test_store();
+    test_note_file();
     test_images();
     test_smear();
     test_layout_motion();
