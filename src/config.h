@@ -100,6 +100,10 @@ std::vector<std::string> split_list(const std::string& v);
 
 // The closest known name to a mistyped one, or "" if nothing is close.
 std::string suggest(const std::string& typo, const std::vector<std::string>& names);
+// How many edits suggest() allows for a typo, and the edits between two
+// names, or limit + 1 once there are sure to be more than `limit`.
+int suggest_limit(const std::string& typo);
+int edit_distance(const std::string& a, const std::string& b, int limit);
 
 // Returns false only if the file couldn't be read. Value problems land in
 // `issues` but still produce a usable config.

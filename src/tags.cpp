@@ -109,12 +109,21 @@ std::string tag_query_fill(const std::string& text, const std::string& name) {
     return head + (skip ? "-" : "") + (first ? "" : "#") + name + " ";
 }
 
+static int64_t stamp_from(fs::file_time_type t, std::uintmax_t size) {
+    return (int64_t)t.time_since_epoch().count() * 31 + (int64_t)size;
+}
+
 static int64_t stamp_of(const fs::path& p) {
     std::error_code ec;
     auto t = fs::last_write_time(p, ec);
     if (ec) return 0;
     auto size = fs::file_size(p, ec);
-    return (int64_t)t.time_since_epoch().count() * 31 + (ec ? 0 : (int64_t)size);
+    return stamp_from(t, ec ? 0 : size);
+}
+
+// From the folder listing when the ref came from one, else from the disk.
+static int64_t stamp_of(const NoteRef& n) {
+    return n.listed ? stamp_from(n.write_time, n.size) : stamp_of(n.path);
 }
 
 void TagIndex::refresh(const std::vector<NoteRef>& notes) {
@@ -122,7 +131,7 @@ void TagIndex::refresh(const std::vector<NoteRef>& notes) {
     for (auto& n : notes) {
         std::string key = path_u8(n.path);
         seen.insert(key);
-        int64_t stamp = stamp_of(n.path);
+        int64_t stamp = stamp_of(n);
         auto it = notes_.find(key);
         if (it != notes_.end() && it->second.stamp == stamp) {
             it->second.note = n;

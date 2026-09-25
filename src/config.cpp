@@ -98,27 +98,38 @@ const Setting* find_setting(const std::string& section, const std::string& key) 
     return nullptr;
 }
 
-static int edit_distance(const std::string& a, const std::string& b) {
-    std::vector<int> prev(b.size() + 1), cur(b.size() + 1);
+int edit_distance(const std::string& a, const std::string& b, int limit) {
+    if (std::abs((int)a.size() - (int)b.size()) > limit) return limit + 1;
+    // Two rows, kept between calls: suggest() runs this against every name.
+    thread_local std::vector<int> prev, cur;
+    prev.resize(b.size() + 1);
+    cur.resize(b.size() + 1);
     for (size_t j = 0; j <= b.size(); j++) prev[j] = (int)j;
     for (size_t i = 1; i <= a.size(); i++) {
         cur[0] = (int)i;
-        for (size_t j = 1; j <= b.size(); j++)
+        int row_min = cur[0];
+        for (size_t j = 1; j <= b.size(); j++) {
             cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)});
+            row_min = std::min(row_min, cur[j]);
+        }
+        if (row_min > limit) return limit + 1;  // no later row gets below this
         std::swap(prev, cur);
     }
-    return prev[b.size()];
+    return std::min(prev[b.size()], limit + 1);
 }
 
+// Close enough to be a typo: a couple of edits, or a third of the name.
+int suggest_limit(const std::string& typo) { return std::max(2, (int)typo.size() / 3); }
+
 std::string suggest(const std::string& typo, const std::vector<std::string>& names) {
+    const int limit = suggest_limit(typo);
     std::string best;
-    int best_d = 1 << 30;
+    int best_d = limit + 1;
     for (auto& n : names) {
-        int d = edit_distance(typo, n);
+        int d = edit_distance(typo, n, best_d - 1);  // only a nearer one counts
         if (d < best_d) { best_d = d; best = n; }
     }
-    // Close enough to be a typo: a couple of edits, or a third of the name.
-    return best_d <= std::max(2, (int)typo.size() / 3) ? best : std::string();
+    return best_d <= limit ? best : std::string();
 }
 
 static std::string fmt_num(float f) {

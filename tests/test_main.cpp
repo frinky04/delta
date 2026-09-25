@@ -2171,6 +2171,38 @@ static void test_link_problems() {
         CHECK_EQ(probs[3].msg, std::string("no note with this name yet"));  // it's in home, not work
     }
 
+    // Asked again, the index remembers its answers and gives the same ones;
+    // a copy starts without them and still equals it.
+    std::vector<std::string> typos = {"[[Plam]] [[hme/x]] [[plan2]] [[work/Garden]]"};
+    auto first = link_problems(typos, ix);
+    CHECK(!ix.near_cache.near.empty());
+    auto again = link_problems(typos, ix);
+    CHECK_EQ(first.size(), (size_t)4);
+    CHECK_EQ(again.size(), first.size());
+    for (size_t i = 0; i < first.size() && i < again.size(); i++) CHECK_EQ(again[i].msg, first[i].msg);
+    if (first.size() == 4) {
+        CHECK_EQ(first[0].msg, std::string("no note with this name yet; did you mean Plan?"));
+        CHECK_EQ(first[1].msg, std::string("no space with this name yet; did you mean home?"));
+        CHECK_EQ(first[2].msg, std::string("no note with this name yet; did you mean Plan?"));
+        CHECK_EQ(first[3].msg, std::string("no note with this name yet"));  // not a space-mate of it
+    }
+    NoteIndex copy = ix;
+    CHECK(copy.near_cache.near.empty() && copy == ix);
+
+    // A new index doesn't carry the old answers: "Plamb" is as near as
+    // "Plan", and the smaller name wins the tie, as suggest() has it.
+    st.create_note("work", "Plamb", "", made);
+    ix = st.index();
+    CHECK(ix.near_cache.near.empty());
+    auto fresh_probs = link_problems({"[[Plam]]"}, ix);
+    CHECK(fresh_probs.size() == 1 && fresh_probs[0].msg == "no note with this name yet; did you mean Plamb?");
+    CHECK_EQ(suggest("plam", {"plan", "plamb"}), std::string("plan"));  // the first of equals
+    CHECK_EQ(suggest("plam", {"plamb", "plan"}), std::string("plamb"));
+    CHECK_EQ(suggest("abcdefgh", {"zzzzzzzzzzzzzz", "abcdefghij"}), std::string("abcdefghij"));
+    CHECK_EQ(suggest("abcdefgh", {"abcdefghijk"}), std::string());  // three edits: too many
+    CHECK_EQ(edit_distance("kitten", "sitting", 10), 3);
+    CHECK_EQ(edit_distance("kitten", "sitting", 2), 3);  // past the limit: limit + 1
+
     // Several marks on a line, errors and spelling, draw without trouble and
     // clear away.
     Editor e = fresh("one two three");
@@ -3079,6 +3111,25 @@ static void test_tags() {
     CHECK(ix.notes_with("W") == 2 && ix.notes_with("nope") == 0);
     auto work = ix.tally([](const TagIndex::Entry& e) { return e.note.space == "work"; });
     CHECK(work.size() == 2 && work["y"].name == "y" && work["y"].notes == 1);
+
+    // A change that keeps the size is still seen, by its time from the
+    // listing (stamped whole seconds apart, as some file clocks, like
+    // MinGW's, keep only seconds). A ref made by name (no listing) is
+    // looked up on the disk.
+    auto listed = store.all_notes();
+    CHECK(!listed.empty() && listed[0].listed && listed[0].size > 0);
+    CHECK(store.ref("home", "d").listed == false);
+    auto when = fs::last_write_time(b.path);
+    CHECK(atomic_write(b.path, "#q", &err));
+    fs::last_write_time(b.path, when + std::chrono::seconds(2));
+    ix.refresh(store.all_notes());
+    CHECK(with("q") == 1 && ix.notes_with("y") == 1);
+    CHECK(atomic_write(b.path, "#v", &err));
+    fs::last_write_time(b.path, when + std::chrono::seconds(4));
+    ix.refresh({store.ref("work", "b")});
+    CHECK_EQ(ix.notes().size(), (size_t)1);
+    CHECK_EQ(with("v"), 1);
+    CHECK_EQ(with("q"), 0);
 }
 
 // Completion as you type: the list comes up for a word being written, enter

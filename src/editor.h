@@ -334,6 +334,7 @@ private:
     TextPos insert(TextPos p, const std::string& text);
     void delete_selection();
     void replace_selection(const std::string& text);
+    bool laid_out() const;                       // lay_[0] is of the text as it is (markdown)
     bool in_code_before(int line) const;
     std::pair<int, int> selected_lines() const;
     void clamp(TextPos& p) const;
@@ -364,7 +365,7 @@ private:
         float a = 0;        // shown, 0..1
         bool live = true;   // false: fading out
     };
-    std::vector<Mark> marks_;
+    std::vector<Mark> marks_;        // in line order (stable), for drawing
     bool marks_snap_ = false;
 
     // Images (editor_images.cpp), down to tile_morph(): the calls and the
@@ -544,6 +545,12 @@ private:
     };
     std::vector<std::string> prev_lines_;
     uint64_t diff_version_ = 0;
+    // The last edits sync_edits() paired: from text version `from` to `to`,
+    // only lines p..(size - s) changed.
+    struct Edited {
+        uint64_t from = 0, to = 0;
+        size_t p = 0, s = 0;
+    } edited_;
     std::vector<float> dh_;          // drawn height per line (edit layout)
     std::vector<Ghost> ghosts_;
     bool snap_heights_ = true;
@@ -578,6 +585,9 @@ private:
 
     int words_ = 0;
     uint64_t words_version_ = 0;
+    mutable int sel_len_ = 0;                    // selection_length(), for this text and selection
+    mutable uint64_t sel_len_version_ = 0;
+    mutable TextPos sel_len_cur_, sel_len_anchor_;
 
     // The completion list: which completer, the word (its line, where it
     // starts, as typed), the choices and the one picked. Escape puts it away

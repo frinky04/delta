@@ -23,7 +23,14 @@ static NoteRef note_at(const fs::directory_entry& e, const std::string& space) {
     n.path = e.path();
     std::error_code ec;
     auto t = e.last_write_time(ec);
-    if (!ec) n.mtime = to_time_t(t);
+    if (ec) return n;
+    n.mtime = to_time_t(t);
+    auto size = e.file_size(ec);
+    if (!ec) {
+        n.write_time = t;
+        n.size = size;
+        n.listed = true;
+    }
     return n;
 }
 

@@ -2,6 +2,7 @@
 // Spaces are folders directly under the notes root; notes are the .md files
 // inside them. No nesting: sub-folders of a space are ignored, and folders
 // starting with '.' (like .trash) are not spaces.
+#include <cstdint>
 #include <ctime>
 #include <map>
 #include <string>
@@ -14,6 +15,12 @@ struct NoteRef {
     std::string name;   // file name without .md
     fs::path path;
     std::time_t mtime = 0;
+    // As the folder listing found the file, for noticing it changed without
+    // asking the disk again; `listed` is false where the ref was made by
+    // name (Store::ref) instead.
+    fs::file_time_type write_time{};
+    std::uintmax_t size = 0;
+    bool listed = false;
 };
 
 // Every note's name, by space, for looking names up without the disk.
@@ -35,6 +42,18 @@ struct NoteIndex {
     bool resolve(const std::string& from, const std::string& space, const std::string& name,
                  std::string& out_space, std::string& out_name) const;
     bool operator==(const NoteIndex&) const = default;
+
+    // "Did you mean" answers already worked out (see link_problems), by
+    // what was looked for. They hold for these spaces as they are: a copy
+    // starts without them, and they never make two indexes differ.
+    struct NearCache {
+        std::map<std::string, std::string> near;
+        NearCache() = default;
+        NearCache(const NearCache&) {}
+        NearCache& operator=(const NearCache&) { near.clear(); return *this; }
+        bool operator==(const NearCache&) const { return true; }
+    };
+    mutable NearCache near_cache;
 };
 
 class Store {

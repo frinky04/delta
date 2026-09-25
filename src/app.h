@@ -193,7 +193,8 @@ private:
     // The palette, the page and the status line (app.cpp).
     void dispatch_keys(bool& fired);
     void build_palette(const std::string& text, std::vector<PaletteItem>& out, int& total);
-    const std::vector<std::string>& note_lines(const NoteRef& n);
+    struct NoteText { std::vector<std::string> lines, lower; };  // lower: the lines lowercased, for search
+    const NoteText& note_lines(const NoteRef& n);
     void open_palette(const std::string& prefix, bool wide = false);
     // Asks in the palette before `action`: `yes_label` (`yes_meta` beside
     // it) goes ahead, "keep it" doesn't.
@@ -362,6 +363,7 @@ private:
     float dpi_ = 1, zoom_ = 1;
 
     std::string space_;
+    int space_count_ = -1;  // notes in space_, for the empty page (-1: count again)
     std::optional<NoteRef> note_;
     NoteFile file_;  // the open note's file (none for the manual)
     uint64_t seen_version_ = 0;
@@ -384,7 +386,24 @@ private:
     // palette caches, refreshed each time it opens
     std::vector<NoteRef> cache_notes_, cache_all_;
     std::vector<std::string> cache_spaces_;
-    std::map<std::string, std::vector<std::string>> cache_text_;
+    std::vector<int> cache_counts_;  // notes in each of cache_spaces_, counted when first listed
+    std::map<std::string, NoteText> cache_text_;
+    // The notes mode's list in order, sorted once for what it lists (gen -1: sort again).
+    struct NotesOrder {
+        int gen = -1;
+        bool all = false, recent = false;
+        std::string only;
+        std::vector<NoteRef> notes;
+    } cache_order_;
+    // Links here: every link to the open note, found once for the palette as it opened this time.
+    struct LinkHit {
+        NoteRef note;
+        TextPos a, b;
+        PaletteItem item;   // without its action
+        std::string match;  // what the query is matched against
+    };
+    std::vector<LinkHit> cache_links_;
+    int links_gen_ = -1;
 
     std::string status_;
     bool status_error_ = false;

@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <span>
+#include <unordered_map>
 
 #include "ini_syntax.h"
 #include "theme.h"
@@ -67,13 +69,37 @@ void Editor::set_text(const std::string& text) {
 }
 
 void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
-    for (auto& m : marks_) m.live = false;
+    // The old marks, by what they're about, so each problem finds the one it
+    // carries on (the earliest that matches) without a scan: a long note
+    // can have thousands.
+    auto key = [](Diagnostic::Kind kind, int col0, uint64_t text) {
+        return text ^ ((uint64_t)kind << 56) ^ (uint64_t)(uint32_t)col0 * 0x9e3779b97f4a7c15ull;
+    };
+    std::unordered_map<uint64_t, std::vector<size_t>> old;
+    old.reserve(marks_.size());
+    for (size_t k = 0; k < marks_.size(); k++) {
+        Mark& m = marks_[k];
+        m.live = false;
+        old[key(m.d.kind, m.d.col0, fnv(m.text))].push_back(k);
+    }
+    int hashed = -1;
+    uint64_t text_hash = 0;
     for (auto& d : ds) {
         if (d.line < 0 || d.line >= (int)lines_.size()) continue;
         const std::string& text = lines_[d.line];
+        if (d.line != hashed) { text_hash = fnv(text); hashed = d.line; }
         Mark* same = nullptr;
-        for (auto& m : marks_)
-            if (!m.live && m.d.kind == d.kind && m.d.col0 == d.col0 && m.d.msg == d.msg && m.text == text) { same = &m; break; }
+        if (auto it = old.find(key(d.kind, d.col0, text_hash)); it != old.end()) {
+            auto& ks = it->second;
+            for (size_t j = 0; j < ks.size(); j++) {
+                Mark& m = marks_[ks[j]];
+                if (m.d.kind == d.kind && m.d.col0 == d.col0 && m.d.msg == d.msg && m.text == text) {
+                    same = &m;
+                    ks.erase(ks.begin() + j);
+                    break;
+                }
+            }
+        }
         if (same) {
             same->d = d;
             same->live = true;
@@ -81,6 +107,8 @@ void Editor::set_diagnostics(const std::vector<Diagnostic>& ds) {
             marks_.push_back({d, text, marks_snap_ ? 1.0f : 0.0f, true});
         }
     }
+    // Kept in line order, so drawing a line finds its own by bisection.
+    std::stable_sort(marks_.begin(), marks_.end(), [](const Mark& a, const Mark& b) { return a.d.line < b.d.line; });
 }
 
 void Editor::reload_text(const std::string& text) {
@@ -110,8 +138,10 @@ std::string Editor::selected_text() const {
 }
 
 int Editor::selection_length() const {
-    // Counted in place (the status bar asks every frame): characters, plus
-    // one for each line break.
+    // Counted in place, and again only when the text or selection changes
+    // (the status bar asks every frame): characters, plus one for each line
+    // break.
+    if (sel_len_version_ == version_ && sel_len_cur_ == cur_ && sel_len_anchor_ == anchor_) return sel_len_;
     TextPos a = std::min(cur_, anchor_), b = std::max(cur_, anchor_);
     int n = b.line - a.line;
     for (int l = a.line; l <= b.line; l++) {
@@ -120,6 +150,10 @@ int Editor::selection_length() const {
         for (int i = from; i < to; i++)
             if (!utf8::is_cont((unsigned char)s[i])) n++;
     }
+    sel_len_ = n;
+    sel_len_version_ = version_;
+    sel_len_cur_ = cur_;
+    sel_len_anchor_ = anchor_;
     return n;
 }
 
@@ -129,6 +163,13 @@ std::vector<Heading> Editor::headings() const {
         std::string name;
         for (int i = 0; i < (int)lines_.size(); i++)
             if (ini_section(lines_[i], name)) out.push_back({i, 1, name});
+        return out;
+    }
+    if (laid_out()) {  // the layout has analyzed every line already
+        const auto& V = lay_[0];
+        for (int i = 0; i < (int)V.size(); i++)
+            if (V[i].info.kind == LineKind::Heading)
+                out.push_back({i, V[i].info.level, trim(lines_[i].substr(V[i].info.content_start))});
         return out;
     }
     bool in_code = false;
@@ -164,7 +205,14 @@ int Editor::word_count() {
     return n;
 }
 
+bool Editor::laid_out() const {
+    return syntax_ == Syntax::Markdown && laid_version_[0] == version_ && lay_[0].size() == lines_.size();
+}
+
+// Mid-edit (the version not yet bumped), this is only right while the lines
+// above `line` are as they were laid out.
 bool Editor::in_code_before(int line) const {
+    if (laid_out() && line >= 0 && line < (int)lines_.size()) return lay_[0][line].in_code;
     bool in_code = false;
     for (int i = 0; i < line && i < (int)lines_.size(); i++)
         if (md_is_fence(lines_[i])) in_code = !in_code;
@@ -696,14 +744,25 @@ void Editor::renumber_lists(int l0, int l1) {
     if (syntax_ != Syntax::Markdown) return;
     const int n = (int)lines_.size();
     // Only the lists near l0..l1 are looked at, so lines are analyzed as the
-    // walk reaches them; which lines are inside code comes from the fences.
-    std::vector<bool> code = md_code_lines(lines_);
+    // walk reaches them; which lines are inside code comes from the fences,
+    // read down to the furthest line the walk reaches. (Not from the layout:
+    // this runs mid-edit, when the layout is still of the old text.)
+    std::vector<char> code;
+    bool fenced = false;
+    auto in_code = [&](int k) {
+        while ((int)code.size() <= k) {
+            bool fence = md_is_fence(lines_[code.size()]);
+            code.push_back(fenced || fence);
+            if (fence) fenced = !fenced;
+        }
+        return code[k] != 0;
+    };
     std::vector<LineInfo> infos(n);
     std::vector<char> have(n, 0);
     std::vector<Style> st;
     auto info = [&](int k) -> const LineInfo& {
         if (!have[k]) {
-            md_analyze(lines_[k], code[k], infos[k], st);
+            md_analyze(lines_[k], in_code(k), infos[k], st);
             have[k] = 1;
         }
         return infos[k];
@@ -1058,7 +1117,12 @@ float Editor::measure(const std::string& s, const std::vector<Style>& st, int a,
 void Editor::layout(int mode) {
     auto& V = lay_[mode];
     // Same text as last time: no need to hash every line again to find out.
+    // Laid out just before the last edit: only the lines it touched need it
+    // (carry_layout() has lined the rest up with their text).
     bool same_text = laid_version_[mode] == version_ && V.size() == lines_.size();
+    bool one_edit = !same_text && laid_version_[mode] == edited_.from && edited_.to == version_ &&
+                    V.size() == lines_.size();
+    const size_t dirty0 = edited_.p, dirty1 = lines_.size() - std::min(edited_.s, lines_.size());
     laid_version_[mode] = version_;
     V.resize(lines_.size());
     bool in_code = false;
@@ -1070,7 +1134,8 @@ void Editor::layout(int mode) {
     for (int i = 0; i < (int)lines_.size(); i++) {
         Line& L = V[i];
         const std::string& s = lines_[i];
-        uint64_t hash = same_text ? L.hash : fnv(s);
+        bool kept = same_text || (one_edit && ((size_t)i < dirty0 || (size_t)i >= dirty1));
+        uint64_t hash = kept ? L.hash : fnv(s);
         if (L.hash != hash || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
             L.lh != P_.line_height || L.tab != P_.tab_size || L.blank != P_.blank_line || L.code != P_.code_size) {
             L.hash = hash;
@@ -1183,6 +1248,7 @@ void Editor::layout(int mode) {
 // while lay_[0] still holds last frame's layout (before layout(0)).
 void Editor::sync_edits() {
     if (version_ == diff_version_) return;
+    const uint64_t from = diff_version_;
     diff_version_ = version_;
     const std::vector<std::string>& O = prev_lines_;
     const std::vector<std::string>& N = lines_;
@@ -1196,7 +1262,12 @@ void Editor::sync_edits() {
 
     auto finish = [&] {
         carry_layout(p, s);
-        prev_lines_ = lines_;
+        edited_ = {from, version_, p, s};
+        // prev_lines_ takes the new middle; the rest already matches.
+        size_t common = std::min(o_end, n_end) - p;
+        std::copy(N.begin() + p, N.begin() + p + common, prev_lines_.begin() + p);
+        if (o_end > n_end) prev_lines_.erase(prev_lines_.begin() + p + common, prev_lines_.begin() + o_end);
+        else prev_lines_.insert(prev_lines_.begin() + p + common, N.begin() + p + common, N.begin() + n_end);
     };
     if (snap_heights_ || reader_ || lay_[0].size() != O.size() || dh_.size() != O.size()) {
         snap_heights_ = true;
@@ -2880,9 +2951,12 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
     // first error's message after the row it's on, where the eye already is.
     // The message crossfades with the line's hint (after the last row).
     if (mode == 0 && i >= 0) {
+        auto m0 = std::lower_bound(marks_.begin(), marks_.end(), i, [](const Mark& k, int l) { return k.d.line < l; });
+        auto m1 = std::upper_bound(m0, marks_.end(), i, [](int l, const Mark& k) { return l < k.d.line; });
+        std::span<const Mark> on(m0, m1);  // (marks_ is in line order)
         const Mark* mk = nullptr;
-        for (auto& k : marks_)
-            if (k.d.line == i && k.d.kind == Diagnostic::Kind::Error && (!mk || k.a > mk->a)) mk = &k;
+        for (auto& k : on)
+            if (k.d.kind == Diagnostic::Kind::Error && (!mk || k.a > mk->a)) mk = &k;
         float pa = mk ? mk->a : 0.0f;
         auto hint = hints_.find(i);
         // An image line whose image can't be shown says so, quietly.
@@ -2922,8 +2996,8 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
         // on a link, which has its own, just under that. Spelling gets dots,
         // quieter than an error's solid line.
         float uh = std::max(1.0f, std::round(P_.dpi));
-        for (auto& k : marks_) {
-            if (k.d.line != i || k.a <= 0.0f) continue;
+        for (auto& k : on) {
+            if (k.a <= 0.0f) continue;
             bool spell = k.d.kind == Diagnostic::Kind::Spelling;
             ImU32 col = col_alpha(fade(spell ? T.spelling : T.error), k.a);
             int c0 = k.d.col0 >= 0 ? std::clamp(k.d.col0, 0, (int)s.size()) : 0;
