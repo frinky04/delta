@@ -170,6 +170,7 @@ bool App::in_scope(Scope s) const {
         case Scope::App: return true;
         case Scope::Page: return page;
         case Scope::Tag: return page && tag_at_caret();
+        case Scope::Slip: return page && slip_at_caret();
         case Scope::Scoped: return palette_.is_open() && palette_.scoped();
         case Scope::Notes: return palette_.in_mode('.');
     }
@@ -262,7 +263,10 @@ void App::register_commands() {
     add("note.move", "move note to another space", "", [this] { move_note(); });
     add("note.delete", "delete note", "", [this] { delete_note(); });
     add("note.restore", "restore deleted note", "", [this] { restore_note(); });
-    add("note.save", "save note now", "ctrl+s", [this] { if (save(true)) status("saved"); });
+    add("note.save", "save note now", "ctrl+s", [this] {
+        if (cfg_.format_on_save && is_note()) format_note(true);
+        if (save(true)) status("saved");
+    });
     add("note.reload", "reload note", "", [this] { reload_note(); });
     add("space.new", "new space", "", [this] { new_space(); });
     add("space.rename", "rename this space", "", [this] { rename_space(); });
@@ -298,6 +302,8 @@ void App::register_commands() {
     add("nav.next_misspelling", "next misspelt word", "alt+f8", [this] { goto_misspelling(1); }, true);
     add("nav.prev_misspelling", "previous misspelt word", "alt+shift+f8", [this] { goto_misspelling(-1); }, true);
     add("edit.quick_fix", "quick fix misspelt word", "alt+.", [this] { quick_fix(); });
+    add("edit.fix_slip", "fix style slip", "alt+.", [this] { fix_slip(); }, false, Scope::Slip);
+    add("edit.format_note", "format note", "shift+alt+f", [this] { format_note(false); });
     add("edit.fix_spelling", "fix spelling, word by word", "ctrl+.", [this] { fix_spelling(); });
     add("view.spelling", "toggle spellcheck", "", [this] {
         cfg_.spell = !cfg_.spell;
@@ -1093,6 +1099,7 @@ void App::build_palette(const std::string& text, std::vector<PaletteItem>& out, 
             it.label = cmd.title;
             if (!match_command(q, cmd.title, cmd.id, command_keywords(cmd.id), it.score, &it.hl, &it.aside)) continue;
             if (cmd.scope == Scope::Tag && !tag_at_caret()) it.score -= 50;  // "rename" is the note's, off a tag
+            if (cmd.scope == Scope::Slip && !slip_at_caret()) it.score -= 50;
             // Prefixes sit in a column of their own: the palette is mono, so
             // padding the keys to the widest a prefixed command has lines them up.
             std::string keys = cmd.chords.empty() ? "" : chord_str(cmd.chords.front());
@@ -1409,6 +1416,7 @@ void App::draw_status(ImVec2 min, ImVec2 max) {
         }
         dl->PopClipRect();
         if (act == Echo::Act::QuickFix) quick_fix();
+        if (act == Echo::Act::FixSlip) fix_slip();
         if (act == Echo::Act::FixSpelling) fix_spelling();
     }
 }

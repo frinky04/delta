@@ -44,6 +44,8 @@ void App::refresh_problems() {
         return a.line != b.line ? a.line < b.line : a.col0 < b.col0;
     });
     diag_gen_++;
+    lint_version_ = UINT64_MAX;  // another note may have this version too
+    check_lint();
 }
 
 // The words in words.txt, one a line ("#" starts a comment line).
@@ -122,15 +124,18 @@ void App::show_problems(double now) {
     if (typing) next_problem_check_ = last_change_ + 0.9;
     int hold = typing ? editor_.cursor().line : -1;
     TextPos held = spell_held();
-    if (diag_gen_ == shown_gen_ && hold == shown_hold_ && held == shown_held_) return;
+    TextPos lint_held = this->lint_held();
+    if (diag_gen_ == shown_gen_ && hold == shown_hold_ && held == shown_held_ && lint_held == shown_lint_held_) return;
     shown_gen_ = diag_gen_;
     shown_hold_ = hold;
     shown_held_ = held;
+    shown_lint_held_ = lint_held;
     std::vector<Diagnostic> d;
     for (auto& p : problems_)
         if (p.line != hold) d.push_back(p);
     for (auto& p : spelling_)
         if (p.line != held.line || p.col0 != held.col) d.push_back(p);
+    add_lint_marks(d, hold, lint_held);
     editor_.set_diagnostics(d);
 }
 
@@ -177,6 +182,16 @@ void App::update_echo() {
                 echo_.push_back({p.msg, Tone::Strong});
                 break;
             }
+        // A style slip says what it is, and the key that fixes it.
+        const LintProblem* l = echo_.empty() ? lint_at_caret() : nullptr;
+        if (l) {
+            echo_.push_back({l->msg, Tone::Strong});
+            std::string key = l->fixable ? chord_for("edit.fix_slip") : "";
+            if (!key.empty()) {
+                echo_.push_back({"   ", Tone::Quiet});
+                echo_.push_back({key + " fix", Tone::Quiet, Echo::Act::FixSlip});
+            }
+        }
     }
 }
 
@@ -304,14 +319,20 @@ void App::add_to_dictionary(const std::string& word) {
 void App::goto_problem(int dir) {
     Jump j(*this, History::Problem);
     const Diagnostic* to = nullptr;
-    if (problems_.empty()) {
+    // A note's style slips are stepped through with its problems.
+    std::vector<Diagnostic> marks = problems_;
+    add_lint_marks(marks, -1, {-1, 0});
+    std::stable_sort(marks.begin(), marks.end(), [](const Diagnostic& a, const Diagnostic& b) {
+        return a.line != b.line ? a.line < b.line : a.col0 < b.col0;
+    });
+    if (marks.empty()) {
         bool config_has = std::any_of(config_problems_.begin(), config_problems_.end(), [](const ConfigIssue& is) { return is.line >= 0; });
         if (is_config() || !config_has) { status(is_config() ? "no problems in the config" : "no problems in this note"); return; }
         open_config();
         if (!is_config() || problems_.empty()) return;
         to = dir > 0 ? &problems_.front() : &problems_.back();  // just opened: the first (or last) one
     } else {
-        to = &step_from(problems_, editor_.cursor(), editor_.anchor(), dir);
+        to = &step_from(marks, editor_.cursor(), editor_.anchor(), dir);
     }
     // The part it's about comes selected, ready to retype.
     TextPos s{to->line, std::max(0, to->col0)}, e{to->line, to->col0 >= 0 ? to->col1 : 0};

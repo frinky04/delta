@@ -23,9 +23,11 @@ inline bool operator<(TextPos a, TextPos b) { return a.line < b.line || (a.line 
 
 // A problem on a line: the message, and the byte range it's about
 // (underlined; col0 < 0 for none). An error's message shows after the line;
-// a spelling mark is only a dotted underline, as a line can carry many.
+// a spelling mark is only a dotted underline, as a line can carry many, and
+// a style slip (lint.h) a fainter dashed one, or a short dash at a point
+// (col0 == col1).
 struct Diagnostic {
-    enum class Kind : uint8_t { Error, Spelling };
+    enum class Kind : uint8_t { Error, Spelling, Lint };
     int line = 0, col0 = -1, col1 = -1;
     std::string msg;
     Kind kind = Kind::Error;
@@ -239,6 +241,8 @@ public:
     // Swap in the whole text as one undoable edit (a rename across notes),
     // the caret at `cur`; what changed glows as an undo's does.
     void rewrite(const std::vector<std::string>& lines, TextPos cur);
+    // The same, with the selection from `anchor` to `cur` (formatting a note).
+    void rewrite(const std::vector<std::string>& lines, TextPos cur, TextPos anchor);
 
 private:
     struct Line {

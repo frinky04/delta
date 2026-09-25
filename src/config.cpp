@@ -64,6 +64,9 @@ const std::vector<Setting>& all_settings() {
         {"editor", "fade_syntax", K::Bool, "true", 0, 0, nullptr, "dim markdown away from the caret", &Config::fade_syntax},
         {"editor", "blank_line_height", K::Float, "0.6", 0.2f, 1, nullptr, "x line height", &Config::blank_line_height},
         {"editor", "scroll_past_end", K::Bool, "true", 0, 0, nullptr, "", &Config::scroll_past_end},
+        {"editor", "lint", K::Bool, "true", 0, 0, nullptr, "mark style slips like double spaces", &Config::lint},
+        {"editor", "lint_off", K::Text, "", 0, 0, nullptr, "style rules to skip, comma-separated", &Config::lint_off},
+        {"editor", "format_on_save", K::Bool, "false", 0, 0, nullptr, "\"format note\" before \"save note now\"", &Config::format_on_save},
 
         {"appearance", "theme", K::Choice, "dark", 0, 0, themes.c_str(), "run \"choose theme\" to see them", &Config::theme},
         {"appearance", "animations", K::Bool, "true", 0, 0, nullptr, "", &Config::animations},
@@ -417,7 +420,7 @@ std::map<int, std::string> config_hints(const std::vector<std::string>& lines, c
         const Setting* s = find_setting(e.section, e.key);
         if (!s) continue;  // the problem shows instead
         std::string def = s->default_for(theme);
-        hints[e.line] = hint(s->desc, same_value(*s, unquote(e.value), def), def);
+        hints[e.line] = hint(s->desc, same_value(*s, unquote(e.value), def), def.empty() ? "none" : def);
     }
     return hints;
 }

@@ -34,6 +34,7 @@
 #include "tags.h"
 #include "complete.h"
 #include "textfile.h"
+#include "lint.h"
 
 extern const unsigned char g_font_sans[];
 extern const std::size_t g_font_sans_size;
@@ -3361,6 +3362,249 @@ static void test_palette_fill() {
     for (int i = 0; i < 30; i++) run(ImGuiKey_None);
 }
 
+// Style slips (lint.h): each rule finds what it should and leaves alone
+// what it shouldn't, fixes land where they belong, and formatting twice is
+// formatting once.
+static std::vector<std::string> lint_lines(const std::string& text) { return split_lines(text); }
+static std::string lint_ids(const std::string& text, const std::vector<std::string>& off = {}) {
+    std::string out;
+    for (auto& p : lint(split_lines(text), off)) out += (out.empty() ? "" : ",") + std::string(p.rule);
+    return out;
+}
+static std::string lint_fmt(const std::string& text, const std::vector<std::string>& off = {}) {
+    std::vector<std::string> lines = split_lines(text);
+    lint_format(lines, off);
+    return join_lines(lines);
+}
+
+static void test_lint() {
+    // Double spaces: between words, not indentation, code, links or tables.
+    CHECK_EQ(lint_ids("a  b\n"), std::string("double_space"));
+    CHECK_EQ(lint_fmt("a  b   c\n"), std::string("a b c\n"));
+    CHECK_EQ(lint_ids("    indented text\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n    - b\n"), std::string());
+    CHECK_EQ(lint_ids("`a  b` and ``c  d``\n"), std::string());
+    CHECK_EQ(lint_ids("[[two  words]]\n"), std::string());
+    CHECK_EQ(lint_ids("| a   | b |\n| :-- | - |\n"), std::string());
+    CHECK_EQ(lint_ids("<span  class=x>y</span>\n"), std::string());
+
+    // Trailing whitespace: a slip, but two or more spaces after text are a
+    // line break (except on a heading).
+    CHECK_EQ(lint_ids("a \n"), std::string("trailing_space"));
+    CHECK_EQ(lint_ids("a\t\n"), std::string("trailing_space"));
+    CHECK_EQ(lint_ids("a  \t\n"), std::string("trailing_space"));
+    CHECK_EQ(lint_ids("a  \nb\n"), std::string());
+    CHECK_EQ(lint_ids("a    \nb\n"), std::string());
+    CHECK_EQ(lint_fmt("a  \nb\n"), std::string("a  \nb\n"));
+    CHECK_EQ(lint_ids("# title  \n"), std::string("trailing_space"));
+    CHECK_EQ(lint_fmt("a \nb\t\n"), std::string("a\nb\n"));
+    CHECK_EQ(lint_ids("a\n  \nb\n"), std::string("trailing_space"));
+    CHECK_EQ(lint_fmt("a\n \t\nb\n"), std::string("a\n\nb\n"));
+    CHECK_EQ(lint(lint_lines("a\n  \nb\n"))[0].msg, std::string("spaces on a blank line"));
+
+    // Blank lines: runs collapse to one; at the end, to the final newline.
+    CHECK_EQ(lint_ids("a\n\n\nb\n"), std::string("blank_lines"));
+    CHECK_EQ(lint_fmt("a\n\n\n\n\nb\n"), std::string("a\n\nb\n"));
+    CHECK_EQ(lint_fmt("a\n\n\n"), std::string("a\n"));
+    CHECK_EQ(lint_ids("a\n\nb\n"), std::string());
+    CHECK_EQ(lint_ids("```\na\n\n\n\nb\n```\n"), std::string());
+    CHECK_EQ(lint_fmt("a\n  \n\t\n\nb\n"), std::string("a\n\nb\n"));
+
+    // A space before punctuation that ends something.
+    CHECK_EQ(lint_ids("a , b\n"), std::string("space_before_punct"));
+    CHECK_EQ(lint_fmt("yes , no ; maybe !\n"), std::string("yes, no; maybe!\n"));
+    CHECK_EQ(lint_fmt("wait  .\n"), std::string("wait.\n"));
+    CHECK_EQ(lint_ids("wait  .\n"), std::string("space_before_punct"));  // one mark, not a double space too
+    CHECK_EQ(lint_ids("the .md files\n"), std::string());
+    CHECK_EQ(lint_ids("and then ...\n"), std::string());
+    CHECK_EQ(lint_ids("it is .5 of it\n"), std::string());
+    CHECK_EQ(lint_ids("nice :) and ;)\n"), std::string());
+    CHECK_EQ(lint_ids("run `a ,` now\n"), std::string());
+
+    // The final newline.
+    CHECK_EQ(lint_ids("a"), std::string("final_newline"));
+    CHECK_EQ(lint_fmt("a"), std::string("a\n"));
+    CHECK_EQ(lint_ids(""), std::string());
+    CHECK_EQ(lint_ids("a\n"), std::string());
+
+    // A word said twice, over one space, in any case.
+    CHECK_EQ(lint_ids("the the cat\n"), std::string("repeated_word"));
+    CHECK_EQ(lint_fmt("The the cat sat on on the mat\n"), std::string("The cat sat on the mat\n"));
+    CHECK_EQ(lint_fmt("the  the cat\n"), std::string("the cat\n"));
+    CHECK_EQ(lint_ids("I had had enough; bye bye\n"), std::string());
+    CHECK_EQ(lint_ids("the\nthe\n"), std::string());
+    CHECK_EQ(lint_ids("`the the`\n"), std::string());
+    CHECK_EQ(lint_ids("#the #the\n"), std::string());
+    CHECK_EQ(lint_ids("the theme\n"), std::string());
+
+    // A missing space between sentences.
+    CHECK_EQ(lint_ids("the end.Next one\n"), std::string("space_after_punct"));
+    CHECK_EQ(lint_fmt("the end.Next one!Then?Why\n"), std::string("the end. Next one! Then? Why\n"));
+    CHECK_EQ(lint_fmt("wait...Then\n"), std::string("wait... Then\n"));
+    CHECK_EQ(lint_ids("pi is 3.14 and v2.0\n"), std::string());
+    CHECK_EQ(lint_ids("say e.g. this, i.e. that\n"), std::string());
+    CHECK_EQ(lint_ids("the U.S.A and Ph.D\n"), std::string());
+    CHECK_EQ(lint_ids("open notes.md or README.md\n"), std::string());
+    CHECK_EQ(lint_ids("meet at 10:30\n"), std::string());
+    CHECK_EQ(lint_ids("see https://example.com/page.Html\n"), std::string());
+    CHECK_EQ(lint_ids("see [[notes.Todo]]\n"), std::string());
+    CHECK_EQ(lint_ids("call `obj.Method` or obj/path.Name\n"), std::string());
+    CHECK_EQ(lint_ids("mail me@home.Com\n"), std::string());
+
+    // Brackets and quotes left open in their paragraph: marked, never fixed.
+    CHECK_EQ(lint_ids("a (b\n"), std::string("unclosed"));
+    CHECK_EQ(lint_fmt("a (b\n"), std::string("a (b\n"));
+    CHECK(lint(lint_lines("a (b\n"))[0].msg.find("fix by hand") != std::string::npos);
+    CHECK(!lint(lint_lines("a (b\n"))[0].fixable);
+    CHECK_EQ(lint_ids("a (b\nc) d\n"), std::string());
+    CHECK_EQ(lint_ids("a (b\n\nc) d\n"), std::string("unclosed"));
+    CHECK_EQ(lint_ids("a [b\n"), std::string("unclosed"));
+    CHECK_EQ(lint_ids("he said \"hi\n"), std::string("unclosed"));
+    CHECK_EQ(lint_ids("\xE2\x80\x9Chi\n"), std::string("unclosed"));
+    CHECK_EQ(lint_ids("\"a\" and \"b\" (c [d] e)\n"), std::string());
+    CHECK_EQ(lint_ids("sad :( or :-(\n"), std::string());
+    CHECK_EQ(lint_ids("a 27\" screen\n"), std::string());
+    CHECK_EQ(lint_ids("- [ ] task and [link](url) and `(`\n"), std::string());
+    CHECK_EQ(lint_ids("a) first\n"), std::string());
+    CHECK_EQ(lint_ids("# a (b\n\nc)\n"), std::string("unclosed"));  // a heading is a paragraph of its own
+    CHECK_EQ(lint(lint_lines("a (bc d\n"))[0].col1, 5);             // the word after it too, to be seen
+
+    // Headings: a blank line on each side. A #tag is never a heading.
+    CHECK_EQ(lint_ids("a\n# H\nb\n"), std::string("heading_blank,heading_blank"));
+    CHECK_EQ(lint_fmt("a\n# H\nb\n"), std::string("a\n\n# H\n\nb\n"));
+    CHECK_EQ(lint_fmt("# A\n## B\ntext\n"), std::string("# A\n\n## B\n\ntext\n"));
+    CHECK_EQ(lint_ids("#idea\n#todo more\ntext #tag\n"), std::string());
+    CHECK_EQ(lint_fmt("#idea\n#todo more\n"), std::string("#idea\n#todo more\n"));
+    CHECK_EQ(lint_ids("# H\n"), std::string());
+    CHECK_EQ(lint_ids("---\ntitle:  x \ntags: [a\n---\n# H\n\ntext\n"), std::string());
+
+    // Fenced code: a blank line around it, and nothing inside is linted.
+    CHECK_EQ(lint_ids("a\n```\ncode\n```\nb\n"), std::string("fence_blank,fence_blank"));
+    CHECK_EQ(lint_fmt("a\n```\ncode\n```\nb\n"), std::string("a\n\n```\ncode\n```\n\nb\n"));
+    CHECK_EQ(lint_ids("```\nx  y the the (a end.Next \n\n\n\n```\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n  ```\n  x\n  ```\n- b\n"), std::string());
+    CHECK_EQ(lint_fmt("```\ncode\n```\n# H\n"), std::string("```\ncode\n```\n\n# H\n"));
+
+    // Lists: one marker a level, even indents.
+    CHECK_EQ(lint_ids("- a\n* b\n- c\n"), std::string("list_marker"));
+    CHECK_EQ(lint_fmt("- a\n* b\n+ c\n"), std::string("- a\n- b\n- c\n"));
+    CHECK_EQ(lint_ids("- a\n  * b\n  * c\n- d\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n  * b\n- c\n  - d\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n\ntext\n\n* b\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n\n* b\n"), std::string("list_marker"));
+    CHECK_EQ(lint_ids("1. a\n2. b\n- c\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n  - b\n   - c\n"), std::string("list_indent"));
+    CHECK_EQ(lint_fmt("- a\n  - b\n   - c\n"), std::string("- a\n  - b\n  - c\n"));
+    CHECK_EQ(lint_fmt("- a\n  - b\n      - c\n"), std::string("- a\n  - b\n    - c\n"));
+    CHECK_EQ(lint_ids("- a\n    - b\n        - c\n    - d\n"), std::string());
+    CHECK_EQ(lint_ids("1. a\n   - b\n2. c\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n\t- b\n\t\t- c\n"), std::string());
+    CHECK_EQ(lint_ids("- a\n  more of a\n- b\n"), std::string());
+    CHECK_EQ(lint_ids("> - a\n> * b\n"), std::string());
+
+    // Rules turned off, and naming them.
+    CHECK_EQ(lint_ids("a  b \n", {"double_space"}), std::string("trailing_space"));
+    CHECK_EQ(lint_ids("a  b \n", {"double_space", "trailing_space"}), std::string());
+    CHECK_EQ(lint_fmt("a  b\n", {"double_space"}), std::string("a  b\n"));
+    CHECK_EQ(check_lint_rule("double_space"), std::string());
+    CHECK_EQ(check_lint_rule("double_spaces"), std::string("no style rule with this name; did you mean double_space?"));
+    CHECK_EQ(check_lint_rule("zzzzzzzz"), std::string("no style rule with this name"));
+    std::set<std::string> ids;
+    for (auto& r : lint_rules()) {
+        CHECK(ids.insert(r.id).second);
+        CHECK(in_voice(r.desc));
+    }
+
+    // Everything at once: every message in delta's voice and from a known
+    // rule; formatting twice is formatting once, and leaves only what has
+    // no fix; the cache changes nothing.
+    const std::string messy =
+        "# Title\nSome  text with a trailing space \nand the the end.Next sentence , here\n\n\n\n"
+        "- one\n* two\n   - three\n## Sub\n```\nkeep  this  \n```\nlast (open\n#tag  here";
+    std::vector<LintProblem> all = lint(split_lines(messy));
+    CHECK(all.size() >= 12);
+    for (auto& p : all) {
+        CHECK(in_voice(p.msg));
+        CHECK(ids.count(p.rule));
+    }
+    std::string once = lint_fmt(messy), twice = lint_fmt(once);
+    CHECK_EQ(twice, once);
+    CHECK_EQ(lint_ids(once), std::string("unclosed"));
+    CHECK_EQ(once, std::string("# Title\n\nSome text with a trailing space\nand the end. Next sentence, here\n\n"
+                               "- one\n- two\n   - three\n\n## Sub\n\n```\nkeep  this  \n```\n\nlast (open\n#tag here\n"));
+    LintCache cache;
+    for (int k = 0; k < 2; k++) {
+        std::vector<LintProblem> cached = lint(split_lines(messy), {}, &cache);
+        CHECK_EQ(cached.size(), all.size());
+        for (size_t i = 0; i < cached.size() && i < all.size(); i++) {
+            CHECK_EQ(cached[i].line, all[i].line);
+            CHECK_EQ(cached[i].col0, all[i].col0);
+            CHECK_EQ(cached[i].msg, all[i].msg);
+        }
+    }
+
+    // Where the caret and selection go.
+    {
+        std::vector<std::string> lines = lint_lines("a  b  c");
+        TextPos cur{0, 7}, anchor{0, 3};  // "b  c" selected
+        lint_format(lines, {}, &cur, &anchor);
+        CHECK_EQ(join_lines(lines), std::string("a b c\n"));
+        CHECK(cur == (TextPos{0, 5}));     // still at the end of the line, before the new newline
+        CHECK(anchor == (TextPos{0, 2}));  // still before b
+    }
+    {
+        std::vector<std::string> lines = lint_lines("text\n# Head\nmore\n");
+        TextPos cur{1, 4};
+        lint_format(lines, {}, &cur);
+        CHECK(cur == (TextPos{2, 4}));  // the heading moved down a line
+        CHECK_EQ(lines[cur.line], std::string("# Head"));
+    }
+    {
+        std::vector<std::string> lines = lint_lines("the the end\n");
+        TextPos cur{0, 6};  // inside the second "the"
+        lint_format(lines, {}, &cur);
+        CHECK(cur == (TextPos{0, 3}));
+    }
+    CHECK(after_fix({0, 2}, {{0, 5}, {0, 7}, ""}) == (TextPos{0, 2}));          // before
+    CHECK(after_fix({0, 9}, {{0, 5}, {0, 7}, ""}) == (TextPos{0, 7}));          // after, same line
+    CHECK(after_fix({0, 6}, {{0, 5}, {0, 7}, "x"}) == (TextPos{0, 6}));         // inside: the new text's end
+    CHECK(after_fix({3, 1}, {{1, 0}, {1, 0}, "\n"}) == (TextPos{4, 1}));        // a line below
+    CHECK(after_fix({1, 0}, {{1, 0}, {1, 0}, "\n"}) == (TextPos{2, 0}));        // right at an insert: after it
+    CHECK(after_fix({1, 3}, {{1, 3}, {1, 3}, "\n", true}) == (TextPos{1, 3}));  // ...unless it's `before`
+    CHECK(after_fix({2, 4}, {{0, 1}, {2, 0}, ""}) == (TextPos{0, 5}));          // lines joined
+    CHECK_EQ(lint(lint_lines("a ,\n"))[0].msg, std::string("space before \",\""));
+    CHECK_EQ(lint(lint_lines("end.Next\n"))[0].msg, std::string("no space after \".\""));
+    // In the editor: one edit, one undo, the selection kept.
+    {
+        Editor ed;
+        ed.set_text("a  b\n\n\n\nc");
+        std::vector<std::string> lines = ed.lines();
+        TextPos cur{4, 1}, anchor{0, 0};
+        lint_format(lines, {}, &cur, &anchor);
+        ed.rewrite(lines, cur, anchor);
+        CHECK_EQ(ed.text(), std::string("a b\n\nc\n"));
+        CHECK(ed.cursor() == (TextPos{2, 1}));
+        CHECK(ed.anchor() == (TextPos{0, 0}));
+        ed.undo();
+        CHECK_EQ(ed.text(), std::string("a  b\n\n\n\nc"));
+    }
+    CHECK_EQ(lint_at(lint(lint_lines("a  b\n")), {0, 1}), 0);
+    CHECK_EQ(lint_at(lint(lint_lines("a  b\n")), {0, 4}), -1);
+
+    // The settings.
+    Config c;
+    std::vector<ConfigIssue> issues;
+    parse_config("[editor]\n", c, issues);
+    CHECK(c.lint);
+    CHECK(!c.format_on_save);
+    CHECK_EQ(c.lint_off, std::string());
+    parse_config("[editor]\nlint = false\nlint_off = double_space, repeated_word\nformat_on_save = true\n", c, issues);
+    CHECK(issues.empty());
+    CHECK(!c.lint);
+    CHECK(c.format_on_save);
+    CHECK_EQ(split_list(c.lint_off).size(), (size_t)2);
+}
+
 int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -3421,6 +3665,7 @@ int main() {
     test_complete_sources();
     test_line_target();
     test_palette_fill();
+    test_lint();
 
     ImGui::DestroyContext();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
