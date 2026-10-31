@@ -424,9 +424,131 @@ std::vector<LineLink> md_links(const std::vector<std::string>& lines) {
     return out;
 }
 
+// Where the next unescaped | is, from `i` on (n if none).
+static size_t next_bar(const std::string& s, size_t i) {
+    for (; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size()) i++;
+        else if (s[i] == '|') return i;
+    }
+    return s.size();
+}
+
+std::vector<TableCell> md_table_cells(const std::string& s) {
+    std::vector<TableCell> out;
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n && is_ws(s[i])) i++;
+    if (i < n && s[i] == '|') i++;
+    while (true) {
+        size_t e = next_bar(s, i);
+        size_t a = i, b = e;
+        while (a < b && is_ws(s[a])) a++;
+        while (b > a && is_ws(s[b - 1])) b--;
+        // Nothing after the last |: that one only closed the row.
+        if (e == n && a == b && !out.empty()) break;
+        out.push_back({(int)a, (int)b});
+        if (e == n) break;
+        i = e + 1;
+    }
+    return out;
+}
+
+bool md_table_delim(const std::string& s, std::vector<Align>* align) {
+    if (align) align->clear();
+    if (next_bar(s, 0) == s.size()) return false;
+    for (auto& c : md_table_cells(s)) {
+        int a = c.begin, b = c.end;
+        bool left = a < b && s[a] == ':', right = b > a + (left ? 1 : 0) && s[b - 1] == ':';
+        if (left) a++;
+        if (right) b--;
+        if (a >= b) return false;
+        for (int k = a; k < b; k++)
+            if (s[k] != '-') return false;
+        if (align) align->push_back(left && right ? Align::Center : right ? Align::Right : left ? Align::Left : Align::None);
+    }
+    return true;
+}
+
+std::vector<TableRole> md_table_roles(const std::vector<std::string>& lines) {
+    const int n = (int)lines.size();
+    std::vector<TableRole> out(n, TableRole::None);
+    std::vector<bool> code = md_code_lines(lines);
+    auto row = [&](int i) {
+        const std::string& s = lines[i];
+        size_t k = 0;
+        while (k < s.size() && s[k] == ' ') k++;
+        // Indented code, a quote or a heading isn't a table row (a #tag can be).
+        size_t h = k;
+        while (h < s.size() && s[h] == '#') h++;
+        bool heading = h > k && (h == s.size() || s[h] == ' ');
+        return !code[i] && k < 4 && k < s.size() && s[k] != '>' && !heading && next_bar(s, 0) < s.size();
+    };
+    std::vector<Align> align;
+    for (int i = 0; i + 1 < n; i++) {
+        if (!row(i) || code[i + 1] || !md_table_delim(lines[i + 1], &align) ||
+            md_table_cells(lines[i]).size() != align.size())
+            continue;
+        out[i] = TableRole::Header;
+        out[i + 1] = TableRole::Delim;
+        int j = i + 2;
+        while (j < n && row(j)) out[j++] = TableRole::Body;
+        i = j - 1;
+    }
+    return out;
+}
+
+void md_table_row(const std::string& s, TableRole role, LineInfo& info, std::vector<Style>& st,
+                  std::vector<LinkSpan>* links) {
+    const size_t n = s.size();
+    st.assign(n, 0);
+    info = LineInfo{};
+    info.table = role;
+    if (role == TableRole::Delim) {
+        mark(st, 0, n, S_Marker | S_TableBar);
+        return;
+    }
+    for (size_t i = next_bar(s, 0); i < n; i = next_bar(s, i + 1)) st[i] |= S_Marker | S_TableBar;
+    std::vector<Style> sub_st;
+    std::vector<LinkSpan> sub_links;
+    for (auto& c : md_table_cells(s)) {
+        std::string sub = s.substr(c.begin, c.end - c.begin);
+        sub_st.assign(sub.size(), 0);
+        sub_links.clear();
+        inline_parse(sub, 0, sub_st, links ? &sub_links : nullptr);
+        for (size_t k = 0; k < sub.size(); k++) {
+            st[c.begin + k] |= sub_st[k];
+            if (sub[k] == '\\' && k + 1 < sub.size() && sub[k + 1] == '|') st[c.begin + k] |= S_Marker;
+        }
+        if (role == TableRole::Header) mark(st, c.begin, c.end, S_Bold);
+        for (auto& l : sub_links) {
+            l.begin += c.begin;
+            l.end += c.begin;
+            links->push_back(std::move(l));
+        }
+    }
+}
+
+void md_table_reader(const std::string& s, const std::vector<Style>& st, std::string& out,
+                     std::vector<Style>& ost, std::vector<int>& map, std::vector<int>& bounds) {
+    out.clear(); ost.clear(); map.clear(); bounds.clear();
+    for (auto& c : md_table_cells(s)) {
+        bounds.push_back((int)out.size());
+        for (int i = c.begin; i < c.end; i++) {
+            if (st[i] & S_Marker) continue;
+            out += s[i]; ost.push_back(st[i]); map.push_back(i);
+        }
+    }
+    bounds.push_back((int)out.size());
+}
+
 void md_reader(const std::string& s, const LineInfo& info, const std::vector<Style>& st,
                std::string& out, std::vector<Style>& ost, std::vector<int>& map) {
     out.clear(); ost.clear(); map.clear();
+    if (info.table != TableRole::None) {
+        std::vector<int> bounds;
+        if (info.table != TableRole::Delim) md_table_reader(s, st, out, ost, map, bounds);
+        return;
+    }
     auto emit = [&](const char* text, Style style, int src) {
         for (const char* c = text; *c; c++) { out += *c; ost.push_back(style); map.push_back(src); }
     };

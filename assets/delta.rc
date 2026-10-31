@@ -1,3 +1,36 @@
 // The app icon. GLFW looks for this name when it registers the window class,
 // so the title bar and taskbar use it too; Explorer shows it as the exe's.
 GLFW_ICON ICON "delta.ico"
+
+// The exe's details tab in Explorer. Antivirus heuristics also read it: an exe
+// with no version info looks more like a dropped payload.
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName",      "Frinky"
+      VALUE "FileDescription",  "delta markdown notes"
+      VALUE "FileVersion",      "0.1.0"
+      VALUE "InternalName",     "delta"
+      VALUE "LegalCopyright",   "Copyright (C) 2026 Frinky"
+      VALUE "OriginalFilename", "delta.exe"
+      VALUE "ProductName",      "delta"
+      VALUE "ProductVersion",   "0.1.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

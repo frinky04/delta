@@ -27,7 +27,15 @@ enum : Style {
     S_Highlight = 1 << 14,  // ==text==
     S_WikiLink  = 1 << 15,  // [[note]]
     S_Tag       = 1 << 16,  // #tag, its # included (not a marker: the reader keeps it)
+    S_TableBar  = 1 << 17,  // a table's | (and its whole delimiter row)
 };
+
+// A line's part in a table (GFM): a header row, the delimiter row under it
+// (| --- | :-: |), then body rows up to the first line without a |. Table
+// rows are still paragraphs to everything else; the reader draws them as a
+// grid.
+enum class TableRole : uint8_t { None, Header, Delim, Body };
+enum class Align : uint8_t { None, Left, Center, Right };
 
 // Image: a line holding nothing but ![alt](src). It's shown as the image
 // itself, an object the caret steps over, rather than as text.
@@ -43,6 +51,7 @@ struct LineInfo {
     bool done = false;
     int marker_begin = 0;     // start of bullet/number (after quote + indent)
     int content_start = 0;    // first byte after all block markers
+    TableRole table = TableRole::None;
 };
 
 // A link, or a #tag (following one lists the notes that have it).
@@ -93,6 +102,25 @@ std::vector<bool> md_code_lines(const std::vector<std::string>& lines);
 // Every link, url and #tag outside fenced code, with its line, in order.
 struct LineLink { int line; LinkSpan link; };
 std::vector<LineLink> md_links(const std::vector<std::string>& lines);
+
+// Tables. A row's cells: where each one's text is, spaces around it left
+// out. The | at either end is optional, and \| is a | inside a cell (in
+// code spans too, as in GFM).
+struct TableCell { int begin, end; };
+std::vector<TableCell> md_table_cells(const std::string& s);
+// Is this a delimiter row? `align` gets each column's alignment.
+bool md_table_delim(const std::string& s, std::vector<Align>* align = nullptr);
+// Every line's part in a table, fenced code left out.
+std::vector<TableRole> md_table_roles(const std::vector<std::string>& lines);
+// md_analyze for a table row: each cell's inline markdown on its own, the
+// |s marked S_Marker | S_TableBar (a delimiter row is all bar), a header's
+// text bold.
+void md_table_row(const std::string& s, TableRole role, LineInfo& info, std::vector<Style>& style,
+                  std::vector<LinkSpan>* links = nullptr);
+// A table row's reader text: its cells' text one after another, markers
+// dropped. `bounds` gets where each cell starts, and the end.
+void md_table_reader(const std::string& s, const std::vector<Style>& style, std::string& out,
+                     std::vector<Style>& out_style, std::vector<int>& map, std::vector<int>& bounds);
 
 // Reader view of one line: markers removed, bullets become "•", task boxes
 // and quote bars become placeholders the renderer draws over. A task box

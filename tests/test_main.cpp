@@ -1178,6 +1178,83 @@ static void click(Editor& ed, ImVec2 p) {
     }
 }
 
+static void test_tables() {
+    // Cells: outer |s optional, spaces around a cell left out, \| stays in.
+    auto cells = [](const std::string& s) {
+        std::vector<std::string> out;
+        for (auto& c : md_table_cells(s)) out.push_back(s.substr(c.begin, c.end - c.begin));
+        return out;
+    };
+    CHECK(cells("| a | b |") == std::vector<std::string>({"a", "b"}));
+    CHECK(cells("a|b") == std::vector<std::string>({"a", "b"}));
+    CHECK(cells("| a \\| b | c") == std::vector<std::string>({"a \\| b", "c"}));
+    CHECK(cells("| a | |") == std::vector<std::string>({"a", ""}));
+
+    std::vector<Align> al;
+    CHECK(md_table_delim("| :-- | :-: | --: | --- |", &al) && al.size() == 4 && al[0] == Align::Left &&
+          al[1] == Align::Center && al[2] == Align::Right && al[3] == Align::None);
+    CHECK(md_table_delim("--- | ---"));
+    CHECK(!md_table_delim("---"));        // a rule
+    CHECK(!md_table_delim("| -x- |"));
+    CHECK(!md_table_delim("| : |"));
+
+    // A header needs a delimiter row under it with as many cells; body rows
+    // run to the first line without a |. Not in code, quotes or headings.
+    using R = TableRole;
+    auto roles = md_table_roles({"| a | b |", "|---|---|", "| 1 | 2 |", "3 | 4", "after", "| x |"});
+    CHECK(roles == std::vector<R>({R::Header, R::Delim, R::Body, R::Body, R::None, R::None}));
+    roles = md_table_roles({"| a | b |", "|---|"});
+    CHECK(roles == std::vector<R>({R::None, R::None}));
+    roles = md_table_roles({"```", "| a |", "| - |", "```", "> | a |", "> | - |", "## a | b", "-- | --"});
+    CHECK(std::all_of(roles.begin(), roles.end(), [](R r) { return r == R::None; }));
+    roles = md_table_roles({"#tag | b", "- | -"});
+    CHECK(roles[0] == R::Header);
+
+    // A row's |s are syntax; each cell is its own inline markdown; a header
+    // is bold. The reader has the cells' text one after another.
+    LineInfo info;
+    std::vector<Style> st;
+    std::vector<LinkSpan> links;
+    const std::string row = "| **a** | [[n]] \\| x |";
+    md_table_row(row, R::Body, info, st, &links);
+    CHECK(info.kind == LineKind::Para && info.table == R::Body);
+    CHECK((st[0] & S_TableBar) && (st[0] & S_Marker) && (st[4] & S_Bold));
+    CHECK(links.size() == 1 && links[0].wiki && links[0].target == "n" && row.compare(links[0].begin, 5, "[[n]]") == 0);
+    std::string out;
+    std::vector<Style> ost;
+    std::vector<int> map, bounds;
+    md_table_reader(row, st, out, ost, map, bounds);
+    CHECK_EQ(out, std::string("an | x"));
+    CHECK(bounds == std::vector<int>({0, 1, 6}));
+    CHECK(map.size() == out.size() && row[map[1]] == 'n' && row[map[3]] == '|');
+    md_table_row("| h | i |", R::Header, info, st);
+    CHECK((st[2] & S_Bold) && !(st[0] & S_Bold));
+    md_table_row("|:-|-:|", R::Delim, info, st);
+    CHECK(std::all_of(st.begin(), st.end(), [](Style f) { return (f & S_TableBar) && (f & S_Marker); }));
+    md_reader("|:-|-:|", info, st, out, ost, map);
+    CHECK(out.empty());
+
+    // In the reader a link sits in its column: clicking there follows it,
+    // and the first column (where it would be as running text) doesn't.
+    const std::string doc = "| a | [[far]] |\n| - | - |\n| b | c |";
+    Editor ed = fresh(doc);
+    std::string followed;
+    ed.on_link = [&](const LinkSpan& l) { followed = l.target; };
+    ed.set_reader(true, false);
+    frame(ed);
+    const float col_x = 200;  // (1000 - 600) / 2
+    for (float y = 0; y < 150 && followed.empty(); y += 4) click(ed, ImVec2(col_x + 2, y));
+    CHECK(followed.empty());
+    for (float y = 0; y < 150 && followed.empty(); y += 4) click(ed, ImVec2(col_x + 50, y));
+    CHECK_EQ(followed, std::string("far"));
+    // Toggling views (with the morph) and editing in between keep it whole.
+    ed.set_reader(false);
+    for (int k = 0; k < 20; k++) frame(ed);
+    ed.set_reader(true);
+    for (int k = 0; k < 20; k++) frame(ed);
+    CHECK_EQ(ed.text(), doc);
+}
+
 static void test_image_markdown() {
     // What counts as an image line, and the src a note's link resolves from.
     std::string alt, src;
@@ -3751,6 +3828,7 @@ int main() {
     test_wrap_and_clipboard();
     test_vertical_and_wrap();
     test_reader();
+    test_tables();
     test_fuzzy_and_keys();
     test_ini();
     test_config_schema();

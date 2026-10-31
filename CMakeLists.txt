@@ -84,6 +84,7 @@ embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual)
 add_library(delta_core STATIC
   src/editor.cpp
   src/editor_images.cpp
+  src/editor_tables.cpp
   src/markdown.cpp
   src/ini_syntax.cpp
   src/palette.cpp
@@ -112,7 +113,7 @@ target_include_directories(delta_core PRIVATE third_party/stb third_party/glfw/d
 find_package(Threads REQUIRED)
 target_link_libraries(delta_core PUBLIC imgui hunspell Threads::Threads)
 if(WIN32)
-  target_link_libraries(delta_core PUBLIC dwmapi dwrite shell32 shlwapi wininet)
+  target_link_libraries(delta_core PUBLIC dwmapi dwrite shell32 wininet)
   target_compile_definitions(delta_core PUBLIC NOMINMAX)
 endif()
 if(MSVC)

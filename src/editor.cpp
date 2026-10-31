@@ -1032,6 +1032,7 @@ void Editor::fonts_changed() {
 void Editor::set_syntax(Syntax s) {
     if (s == syntax_) return;
     syntax_ = s;
+    roles_version_ = 0;
     lay_[0].clear();  // styles are cached per line
     lay_[1].clear();
     snap_heights_ = true;
@@ -1128,6 +1129,8 @@ void Editor::layout(int mode) {
     V.resize(lines_.size());
     bool in_code = false;
     float y = 0, real_y = 0;
+    const std::vector<TableRole>& roles = table_roles();
+    bool tables = false;
     if (mode == 0) {
         drag_real_.clear();
         drag_real_y_.clear();
@@ -1137,7 +1140,9 @@ void Editor::layout(int mode) {
         const std::string& s = lines_[i];
         bool kept = same_text || (one_edit && ((size_t)i < dirty0 || (size_t)i >= dirty1));
         uint64_t hash = kept ? L.hash : fnv(s);
-        if (L.hash != hash || L.in_code != in_code || L.wrap != P_.column || L.base != P_.size ||
+        TableRole role = i < (int)roles.size() ? roles[i] : TableRole::None;
+        tables = tables || role != TableRole::None;
+        if (L.hash != hash || L.in_code != in_code || L.info.table != role || L.wrap != P_.column || L.base != P_.size ||
             L.lh != P_.line_height || L.tab != P_.tab_size || L.blank != P_.blank_line || L.code != P_.code_size) {
             L.hash = hash;
             L.in_code = in_code;
@@ -1148,6 +1153,7 @@ void Editor::layout(int mode) {
             L.blank = P_.blank_line;
             L.code = P_.code_size;
             if (syntax_ == Syntax::Ini) ini_analyze(s, L.info, L.style);
+            else if (role != TableRole::None) md_table_row(s, role, L.info, L.style);
             else md_analyze(s, in_code, L.info, L.style);
             float scale = L.info.kind == LineKind::Heading ? md_heading_scale(L.info.level) : 1.0f;
             L.size = std::round(P_.size * scale);
@@ -1155,9 +1161,16 @@ void Editor::layout(int mode) {
             // Never shorter than a body line, so small headings keep the rhythm.
             L.row_h = std::max(std::round(P_.size / kEm * P_.line_height),
                                std::round(L.size / kEm * (scale > 1 ? P_.line_height * 0.92f : P_.line_height)));
+            L.cells.clear();
             if (mode == 1) {
                 md_reader(s, L.info, L.style, L.rtext, L.rstyle, L.rmap);
                 if (L.info.kind == LineKind::Fence) L.row_h = std::round(L.row_h * 0.5f);
+                if (role == TableRole::Delim) L.row_h = std::max(1.0f, std::round(P_.dpi));  // the rule under the header
+                if (role == TableRole::Header || role == TableRole::Body) {
+                    std::vector<int> bounds;
+                    md_table_reader(s, L.style, L.rtext, L.rstyle, L.rmap, bounds);
+                    for (size_t c = 0; c + 1 < bounds.size(); c++) L.cells.push_back({bounds[c], bounds[c + 1]});
+                }
             }
             const std::string& t = mode ? L.rtext : s;
             const std::vector<Style>& st = mode ? L.rstyle : L.style;
@@ -1180,31 +1193,10 @@ void Editor::layout(int mode) {
             L.hang = hang_to > 0 ? measure(t, st, 0, hang_to, m) : 0.0f;
             if (L.hang > P_.column * 0.5f) L.hang = 0;
 
-            // Soft wrap at spaces; hard break inside words longer than a row.
-            L.rows.assign(1, 0);
-            float x = 0, x_brk = 0;
-            int row_start = 0, brk = -1;
-            const char* p = t.data();
-            for (int k = 0; k < (int)t.size();) {
-                int len;
-                unsigned cp = utf8::decode(p + k, p + t.size(), &len);
-                float a = advance(m, cp, st.empty() ? 0 : st[k]);
-                float limit = L.rows.size() > 1 ? P_.column - L.hang : P_.column;
-                if (cp != ' ' && x + a > limit && k > row_start) {
-                    if (brk > row_start) {
-                        x -= x_brk;
-                        row_start = brk;
-                    } else {
-                        x = 0;
-                        row_start = k;
-                    }
-                    L.rows.push_back(row_start);
-                    brk = -1;
-                }
-                x += a;
-                k += len;
-                if (cp == ' ') { brk = k; x_brk = x; }
-            }
+            // (A table row's cells wrap once its columns are sized.)
+            L.rows.clear();
+            if (mode == 1 && role != TableRole::None) L.rows.push_back(0);
+            else wrap_rows(t, st, 0, (int)t.size(), P_.column, L.hang, m, L.rows);
 
             // Blank lines are paragraph spacing, not a full line.
             // So is a quote's blank line in the reader: its bar still runs through.
@@ -1233,8 +1225,10 @@ void Editor::layout(int mode) {
             // Sizes barely step (see md_heading_scale), so the space above
             // carries the level: a top-level section opens widest.
             L.pad = std::round(P_.size * (L.info.level == 1 ? 0.9f : L.info.level == 2 ? 0.5f : 0.25f));
+        bool cell_row = mode == 1 && (role == TableRole::Header || role == TableRole::Body);
+        if (cell_row) L.pad = std::round(P_.size * 0.2f);  // and as much below
         L.y = y;
-        L.h = L.pad + L.rows.size() * L.row_h;
+        L.h = L.pad * (cell_row ? 2 : 1) + L.rows.size() * L.row_h;
         if (mode == 1) { L.dy = L.y; L.dh = L.h; }  // the reader doesn't animate layout
         if (mode == 0 && img_drag_) {
             drag_real_y_.push_back(real_y);
@@ -1245,6 +1239,52 @@ void Editor::layout(int mode) {
     }
     if (mode == 0 && img_drag_) drag_real_y_.push_back(real_y);
     total_h_[mode] = y;
+    // The reader sizes a table's columns from all its rows, then wraps each
+    // cell in its column: the rows' heights are known only after that.
+    if (mode == 1 && tables) {
+        layout_tables();
+        y = 0;
+        for (int i = 0; i < (int)V.size(); i++) {
+            Line& L = V[i];
+            bool cell_row = L.info.table == TableRole::Header || L.info.table == TableRole::Body;
+            L.y = L.dy = y;
+            L.h = L.dh = L.pad * (cell_row ? 2 : 1) + L.rows.size() * L.row_h;
+            y += L.h;
+        }
+        total_h_[mode] = y;
+    }
+}
+
+// Soft wrap t[a, b) into `rows` (where each starts) at spaces, with a hard
+// break inside words longer than a row. Rows after the first are `hang`
+// narrower.
+void Editor::wrap_rows(const std::string& t, const std::vector<Style>& st, int a, int b, float width, float hang,
+                       const Metrics& m, std::vector<int>& rows) const {
+    size_t first = rows.size();
+    rows.push_back(a);
+    float x = 0, x_brk = 0;
+    int row_start = a, brk = -1;
+    const char* p = t.data();
+    for (int k = a; k < b;) {
+        int len;
+        unsigned cp = utf8::decode(p + k, p + t.size(), &len);
+        float adv = advance(m, cp, st.empty() ? 0 : st[k]);
+        float limit = rows.size() - first > 1 ? width - hang : width;
+        if (cp != ' ' && x + adv > limit && k > row_start) {
+            if (brk > row_start) {
+                x -= x_brk;
+                row_start = brk;
+            } else {
+                x = 0;
+                row_start = k;
+            }
+            rows.push_back(row_start);
+            brk = -1;
+        }
+        x += adv;
+        k += len;
+        if (cp == ' ') { brk = k; x_brk = x; }
+    }
 }
 
 // Work out which lines survived the latest edit(s), which are new and which
@@ -1570,6 +1610,10 @@ bool Editor::hit(int mode, ImVec2 d, int& line, int& col) const {
     if (d.y >= L.dy + L.dh && line == (int)V.size() - 1) { col = (int)text_of(mode, line).size(); return true; }
     if (L.img) {
         col = img_col_at(L, (int)lines_[line].size(), d.x, d.y - L.dy - L.pad);
+        return true;
+    }
+    if (mode == 1 && L.info.table != TableRole::None) {
+        col = table_col_at(L, d.x, d.y - L.dy - L.pad);
         return true;
     }
     int r = std::clamp((int)std::floor((d.y - L.dy - L.pad) / L.row_h), 0, (int)L.rows.size() - 1);
@@ -1989,7 +2033,9 @@ void Editor::handle_mouse(bool hovered, bool active, ImVec2 d) {
             links.clear();
             LineInfo info;
             std::vector<Style> st;
-            md_analyze(lines_[line], lay_[0].size() == lines_.size() ? lay_[0][line].in_code : in_code_before(line), info, st, &links);
+            const std::vector<TableRole>& roles = table_roles();
+            if (roles[line] != TableRole::None) md_table_row(lines_[line], roles[line], info, st, &links);
+            else md_analyze(lines_[line], lay_[0].size() == lines_.size() ? lay_[0][line].in_code : in_code_before(line), info, st, &links);
             for (auto& l : links)
                 if (src_col >= l.begin && src_col < l.end) hover_link = &l;
         }
@@ -2770,6 +2816,17 @@ bool Editor::draw_morph(ImDrawList* dl, float s) {
             draw_image(dl, L0, x0, lerp(ye, yr, wg), base, -1);
             continue;
         }
+        // A table changes shape too much to glide word by word: its rows
+        // glide as they are, the source giving way to the grid.
+        if (L1.info.table != TableRole::None) {
+            float yl = lerp(ye, yr, wg);
+            P_.alpha = base * edit_struct;
+            if (P_.alpha > 0) draw_line_body(dl, 0, L0, src, L0.style, yl, -1, x0, 1e9f);
+            P_.alpha = base * reader_struct;
+            if (P_.alpha > 0) draw_line_body(dl, 1, L1, rt, L1.rstyle, yl, -1, x0, 1e9f);
+            P_.alpha = base;
+            continue;
+        }
 
         // Code blocks reshape between the two heights (fences are thinner
         // in the reader), staying solid throughout.
@@ -2943,6 +3000,10 @@ void Editor::draw_line_body(ImDrawList* dl, int mode, const Line& L, const std::
 
     if (L.img) {
         draw_image(dl, L, x0, y, P_.alpha, mode == 0 ? i : -1);
+        return;
+    }
+    if (mode == 1 && L.info.table != TableRole::None) {
+        draw_table_row(dl, L, s, st, x0, y);
         return;
     }
 

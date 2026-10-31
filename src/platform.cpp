@@ -14,7 +14,6 @@
 #include <dwmapi.h>
 #include <dwrite_1.h>
 #include <shellapi.h>
-#include <shlwapi.h>
 #include <wininet.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
@@ -112,22 +111,6 @@ bool open_url(const std::string& url) {
 #endif
 }
 
-#ifdef _WIN32
-// Quotes one argument the way CommandLineToArgvW reads it back.
-static std::wstring quote_arg(const std::wstring& s) {
-    std::wstring out = L"\"";
-    size_t slashes = 0;
-    for (wchar_t c : s) {
-        if (c == L'\\') { slashes++; continue; }
-        out.append(c == L'"' ? slashes * 2 + 1 : slashes, L'\\');
-        slashes = 0;
-        out += c;
-    }
-    out.append(slashes * 2, L'\\');
-    return out + L"\"";
-}
-#endif
-
 bool web_search(const std::string& text) {
     // One line of words, not too long for a command line or a URL.
     std::string q;
@@ -144,23 +127,7 @@ bool web_search(const std::string& text) {
     }
     if (q.empty()) return false;
 
-#ifdef _WIN32
-    // Ask the default browser to search, so its own search engine is used:
-    // Chromium browsers take "? words", Firefox and its kin take -search.
-    wchar_t exe[MAX_PATH];
-    DWORD len = MAX_PATH;
-    if (SUCCEEDED(AssocQueryStringW(ASSOCF_IS_PROTOCOL, ASSOCSTR_EXECUTABLE, L"https", L"open", exe, &len))) {
-        std::string name = lower(path_u8(fs::path(exe).stem()));
-        std::wstring words = u8path(q).wstring(), args;
-        for (auto* f : {"firefox", "librewolf", "waterfox", "floorp", "zen"})
-            if (name == f) args = L"-search " + quote_arg(words);
-        for (auto* c : {"chrome", "msedge", "brave", "vivaldi", "opera", "chromium", "thorium", "arc", "yandex"})
-            if (name == c) args = quote_arg(L"? " + words);
-        if (!args.empty() && (INT_PTR)ShellExecuteW(nullptr, L"open", exe, args.c_str(), nullptr, SW_SHOWNORMAL) > 32)
-            return true;
-    }
-#endif
-    // Any other browser gets a search page.
+    // A search page, opened like any link in the default browser.
     std::string url = "https://www.google.com/search?q=";
     for (unsigned char c : q) {
         if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') url += (char)c;

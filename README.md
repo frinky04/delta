@@ -20,13 +20,15 @@ If a note changes on disk while you have unsaved edits, delta stops saving it. P
 
 `ctrl+p` opens the palette with commands. Type a leading character to find something else; backspace returns to commands.
 
-- `.` notes (`ctrl+o`)
-- `/` spaces
-- `@` headings in this note
-- `:` line number
-- `?` text in notes
-- `[` notes that link to this one
-- `#` notes by tag (`ctrl+t`)
+| Type | To find | Key |
+| :--: | --- | --- |
+| `.` | notes | `ctrl+o` |
+| `/` | spaces | |
+| `@` | headings in this note | |
+| `:` | a line number | |
+| `?` | text in notes | |
+| `[` | notes that link to this one | |
+| `#` | notes by tag | `ctrl+t` |
 
 Notes, text and tags search the current space. Press `tab` to search every space. Type `work/plan` to look in one space; if the note doesn't exist, delta makes it. Press `ctrl+r` to sort notes by name or by most recent. A mode shows its own keys beside the prompt until you type.
 
@@ -79,6 +81,24 @@ format_on_save = true
 ```
 
 The rules are `double_space`, `trailing_space`, `blank_lines`, `space_before_punct`, `space_after_punct`, `final_newline`, `repeated_word`, `unclosed`, `heading_blank`, `fence_blank`, `list_marker` and `list_indent`.
+
+## Tables
+
+Write a table in markdown, one row per line, with `|` between cells and a row of dashes under the header. Colons in that row align a column: `:--` left, `:-:` center, `--:` right.
+
+```
+| Key | Does |
+| --- | ---- |
+| `ctrl+e` | reader mode |
+```
+
+which reads as:
+
+| Key | Does |
+| --- | ---- |
+| `ctrl+e` | reader mode |
+
+In reader mode a table shows as a grid. Columns take the room their cells need, and when the note is too narrow, long cells wrap within their column. Links in cells work as they do anywhere else.
 
 ## Images
 

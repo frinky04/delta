@@ -273,6 +273,20 @@ private:
         float img_m = 0;                   // margin above and below
         std::vector<int> text_rows;
         float text_row_h = 0;
+        // Table rows in the reader (editor_tables.cpp): each cell's text
+        // [b0, b1) in rtext, wrapped on its own in its column. `rows` is the
+        // tallest cell's, so the line is as tall as it. `pad` is added below
+        // the row too.
+        struct Cell {
+            int b0 = 0, b1 = 0;
+            float x = 0, w = 0;            // its column, from the text column's left
+            Align align = Align::None;
+            std::vector<int> rows;
+        };
+        std::vector<Cell> cells;
+        float table_w = 0;                 // the whole table's width
+        bool table_sep = false;            // a line above it (body rows after the first)
+        uint64_t table_key = 0;            // (header) what the columns were last sized for
     };
     struct Metrics {
         ImFontBaked* sans;
@@ -293,6 +307,8 @@ private:
 
     // layout
     void layout(int mode);
+    void wrap_rows(const std::string& t, const std::vector<Style>& st, int a, int b, float width, float hang,
+              const Metrics& m, std::vector<int>& rows) const;
     Metrics metrics(float size) const;
     bool bold_of(Style style) const;
     float advance(const Metrics& m, unsigned cp, Style style) const;
@@ -407,6 +423,16 @@ private:
     bool tile_rect(int line, int tile, ImVec2& a, ImVec2& b) const;  // doc coords, edit view
     void draw_image_drag(ImDrawList* dl);
     void draw_image(ImDrawList* dl, const Line& L, float x, float y, float alpha, int index);
+
+    // Tables (editor_tables.cpp): which lines are part of one, and how the
+    // reader shows them, as a grid.
+    const std::vector<TableRole>& table_roles() const;
+    void layout_tables();            // reader: size the columns, wrap the cells
+    int table_col_at(const Line& L, float x, float y) const;  // reader text byte there
+    void draw_table_row(ImDrawList* dl, const Line& L, const std::string& s, const std::vector<Style>& st,
+                        float x0, float y);
+    mutable std::vector<TableRole> roles_;
+    mutable uint64_t roles_version_ = 0;
 
     // Resizing an image by its handle: the line, the width being dragged to
     // (screen px) and what it snapped to ("" for none).
