@@ -177,3 +177,9 @@ The app is `build/delta`.
 Dictionaries from SCOWL (http://wordlist.aspell.net). Spellchecking by Hunspell.
 
 Portions of this software are copyright © 2024 The FreeType Project (https://freetype.org). All rights reserved.
+
+Fonts are Noto Sans and Noto Sans Mono, copyright 2022 The Noto Project Authors, under the SIL Open Font License 1.1 (`assets/OFL.txt`).
+
+## License
+
+delta is MIT licensed (`LICENSE`). The libraries in `third_party` keep their own licenses.

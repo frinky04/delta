@@ -1,0 +1,49 @@
+# Push a tag like v0.1.0 to build delta on Windows, run the tests, and publish
+# a GitHub release with the exe attached.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Test
+        run: build/delta_tests.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/delta | Out-Null
+          Copy-Item build/delta.exe, README.md, LICENSE, assets/OFL.txt dist/delta/
+          Compress-Archive -Path dist/delta -DestinationPath "dist/delta-$env:GITHUB_REF_NAME-windows-x64.zip"
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" "dist/delta-$env:GITHUB_REF_NAME-windows-x64.zip" --title "$env:GITHUB_REF_NAME" --generate-notes
