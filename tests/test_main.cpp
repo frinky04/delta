@@ -2824,7 +2824,20 @@ static void test_natural_sort() {
 static void test_manual() {
     std::string readme = read_src("../README.md");
     CHECK(!readme.empty());
+    // CMake's text read normalizes line endings before embedding the manual.
+    std::erase(readme, '\r');
+    // Repository screenshots stay out of the self-contained, offline manual.
+    const std::string begin = "<!-- screenshots:start -->";
+    const std::string end = "<!-- screenshots:end -->";
+    size_t a = readme.find(begin), b = readme.find(end);
+    CHECK(a != std::string::npos && b != std::string::npos && b > a);
+    if (a != std::string::npos && b != std::string::npos && b > a) {
+        b += end.size();
+        if (b < readme.size() && readme[b] == '\n') b++;
+        readme.erase(a, b - a);
+    }
     CHECK(std::string((const char*)g_manual, g_manual_size) == readme);
+    CHECK(readme.find("assets/screenshots/") == std::string::npos);
 }
 
 // --sandbox: a config pointing at a notes folder beside it, made once and

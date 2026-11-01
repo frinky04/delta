@@ -64,7 +64,7 @@ function(embed_file src name)
   set(out ${CMAKE_BINARY_DIR}/generated/${name}.cpp)
   add_custom_command(
     OUTPUT ${out}
-    COMMAND ${CMAKE_COMMAND} -DIN=${src} -DOUT=${out} -DNAME=${name} -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+    COMMAND ${CMAKE_COMMAND} -DIN=${src} -DOUT=${out} -DNAME=${name} ${ARGN} -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
     DEPENDS ${src} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
     COMMENT "Embedding ${name}")
   set(EMBEDDED ${EMBEDDED} ${out} PARENT_SCOPE)
@@ -77,8 +77,8 @@ embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.aff g_dict_en_us_aff)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_US.dic g_dict_en_us_dic)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.aff g_dict_en_gb_aff)
 embed_file(${CMAKE_SOURCE_DIR}/assets/dict/en_GB.dic g_dict_en_gb_dic)
-# The README, shown in the app by "open manual" (rebuilt when it changes).
-embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual)
+# The README, without the repository screenshots: the manual is self-contained.
+embed_file(${CMAKE_SOURCE_DIR}/README.md g_manual -DMANUAL=ON)
 
 # --- app ---------------------------------------------------------------------
 add_library(delta_core STATIC

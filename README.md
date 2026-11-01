@@ -4,6 +4,32 @@ A keyboard-driven markdown note app, modelled on a code editor. Notes are plain 
 
 Press `ctrl+p` to list every command and its key. Press `f1` to open this manual.
 
+<!-- screenshots:start -->
+<p align="center">
+  <img src="assets/screenshots/writing.png" alt="Writing a note with headings, links, tags and inline formatting" width="1000">
+  <br>
+  <sub>Markdown, styled as you write.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="assets/screenshots/palette.png" alt="The notes palette listing notes in the current space" width="500">
+      <br>
+      <strong>Note search</strong><br>
+      <sub>Find a note and jump straight to it.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="assets/screenshots/reader.png" alt="The same note in reader mode, with markdown symbols hidden" width="500">
+      <br>
+      <strong>Reader mode</strong><br>
+      <sub>The same note, with the symbols tucked away.</sub>
+    </td>
+  </tr>
+</table>
+
+<!-- screenshots:end -->
+
 ## Notes and spaces
 
 Notes are kept in `~/Documents/delta`. Each folder there is a **space**. Each `.md` file in a space is a note.
